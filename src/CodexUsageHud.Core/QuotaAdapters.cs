@@ -216,7 +216,7 @@ public sealed class AppServerClient
     private readonly TimeSpan _requestTimeout;
     private readonly TimeSpan _cleanupTimeout;
 
-    public AppServerClient(string hudVersion = "1.0.0", TimeSpan? startupTimeout = null,
+    public AppServerClient(string hudVersion = "1.0.1", TimeSpan? startupTimeout = null,
         TimeSpan? requestTimeout = null, TimeSpan? cleanupTimeout = null)
     {
         _hudVersion = hudVersion;
@@ -597,9 +597,40 @@ public static class QuotaJsonParser
             return null;
         }
 
+        // Current App Server responses expose sibling `primary` and `secondary`
+        // windows. The property name becomes the stable bucket id when the nested
+        // object does not repeat an id. Prefer only exact canonical ids here; do
+        // not infer the main quota from duration, reset time, or used percentage.
+        var exactPrimary = buckets.Where(bucket =>
+            bucket.Id.Equals("primary", StringComparison.OrdinalIgnoreCase) ||
+            bucket.Name.Equals("primary", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (exactPrimary.Length == 1)
+        {
+            return exactPrimary[0];
+        }
+        if (exactPrimary.Length > 1)
+        {
+            errorCode = "quota_bucket_ambiguous";
+            return null;
+        }
+
+        var exactCodex = buckets.Where(bucket =>
+            bucket.Id.Equals("codex", StringComparison.OrdinalIgnoreCase) ||
+            bucket.Id.Equals("codex-main", StringComparison.OrdinalIgnoreCase) ||
+            bucket.Id.Equals("codex_main", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (exactCodex.Length == 1)
+        {
+            return exactCodex[0];
+        }
+        if (exactCodex.Length > 1)
+        {
+            errorCode = "quota_bucket_ambiguous";
+            return null;
+        }
+
         var named = buckets.Where(bucket => bucket.Id.Contains("codex", StringComparison.OrdinalIgnoreCase) ||
-                                             bucket.Name.Contains("codex", StringComparison.OrdinalIgnoreCase) ||
-                                             bucket.Id.Contains("main", StringComparison.OrdinalIgnoreCase) ||
+                                              bucket.Name.Contains("codex", StringComparison.OrdinalIgnoreCase) ||
+                                              bucket.Id.Contains("main", StringComparison.OrdinalIgnoreCase) ||
                                              bucket.Name.Contains("main", StringComparison.OrdinalIgnoreCase)).ToArray();
         if (named.Length == 1)
         {
@@ -681,7 +712,7 @@ public sealed class QuotaStateMachine
         if (current.Primary is null)
         {
             if (string.Equals(current.ErrorCode, "quota_window_invalid", StringComparison.Ordinal)) return current;
-            return _last?.Primary is not null
+            return _last?.Primary is { } previous && previous.ResetsAtUtc > current.ObservedAtUtc
                 ? _last with { IsStale = true, ErrorCode = current.ErrorCode ?? "quota_temporarily_unavailable" }
                 : current;
         }
@@ -707,10 +738,14 @@ public sealed class QuotaStateMachine
         return current;
     }
 
-    public QuotaObservation RestoreForDisplay() => _last?.Primary is not null
-        ? _last with { IsStale = true, ErrorCode = "quota_last_observation" }
-        : new QuotaObservation(null, Array.Empty<QuotaBucket>(), QuotaSource.Unavailable,
-            DateTimeOffset.UtcNow, false, "not_refreshed");
+    public QuotaObservation RestoreForDisplay()
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (_last?.Primary is { } previous && previous.ResetsAtUtc > now)
+            return _last with { IsStale = true, ErrorCode = "quota_last_observation" };
+        return new QuotaObservation(null, Array.Empty<QuotaBucket>(), QuotaSource.Unavailable,
+            now, false, _last?.Primary is null ? "not_refreshed" : "quota_last_observation_expired");
+    }
 }
 
 public sealed class RefreshCadence

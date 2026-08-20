@@ -84,7 +84,7 @@ internal static class Program
             ("continuation_lifecycle_and_manual_drift", () => ContinuationLifecycleAndManualDrift(runRoot)),
             ("manual_drift_persists_and_clears", () => ManualDriftPersistence(runRoot)),
             ("context_window_migration_rescan_no_double_count", () => ContextWindowMigration(runRoot)),
-            ("expired_stale_quota_does_not_define_cycle", () => ExpiredQuotaCycle(runRoot)),
+            ("expired_quota_is_unavailable_and_does_not_define_cycle", () => ExpiredQuotaCycle(runRoot)),
             ("refresh_cadence_60_30_8_1", RefreshCadenceTest),
             ("app_server_contract_and_executable_discovery", () => AppServerContract(runRoot)),
             ("sqlite_restart_privacy_and_schema", () => SqlitePrivacySchema(runRoot)),
@@ -410,7 +410,17 @@ internal static class Program
                     (SELECT COUNT(*) FROM sessions AS child
                      WHERE child.session_kind = 'InternalTask' AND EXISTS
                          (SELECT 1 FROM sessions AS parent
-                          WHERE parent.thread_id = child.parent_thread_id AND parent.session_kind = 'InternalTask'));
+                          WHERE parent.thread_id = child.parent_thread_id AND parent.session_kind = 'InternalTask')),
+                    COALESCE((SELECT bucket_id FROM quota_observations
+                              WHERE is_primary = 1 ORDER BY id DESC LIMIT 1), 'unavailable'),
+                    COALESCE((SELECT used_percent FROM quota_observations
+                              WHERE is_primary = 1 ORDER BY id DESC LIMIT 1), -1),
+                    COALESCE((SELECT resets_at_utc FROM quota_observations
+                              WHERE is_primary = 1 ORDER BY id DESC LIMIT 1), 'unavailable'),
+                    COALESCE((SELECT observed_at_utc FROM quota_observations
+                              WHERE is_primary = 1 ORDER BY id DESC LIMIT 1), 'unavailable'),
+                    COALESCE((SELECT source FROM quota_observations
+                              WHERE is_primary = 1 ORDER BY id DESC LIMIT 1), 'unavailable');
                 """;
             using var reader = command.ExecuteReader();
             if (!reader.Read()) return 2;
@@ -421,7 +431,10 @@ internal static class Program
                                $"fingerprints={reader.GetInt64(9)} token_total={reader.GetInt64(10)} " +
                                $"sessions={reader.GetInt64(11)} app={reader.GetInt64(12)} cli={reader.GetInt64(13)} " +
                                $"internal={reader.GetInt64(14)} parent_links={reader.GetInt64(15)} " +
-                               $"linked={reader.GetInt64(16)} nested={reader.GetInt64(17)}");
+                               $"linked={reader.GetInt64(16)} nested={reader.GetInt64(17)} " +
+                               $"quota_id={reader.GetString(18)} quota_used={reader.GetDouble(19):0.##} " +
+                               $"quota_reset={reader.GetString(20)} quota_observed={reader.GetString(21)} " +
+                               $"quota_source={reader.GetString(22)}");
             return 0;
         }
         catch (Exception exception)
@@ -798,6 +811,11 @@ internal static class Program
         if (primary is null)
         {
             Console.WriteLine($"QUOTA status=UNAVAILABLE code={result.ErrorCode ?? "quota_unavailable"} args={result.RequestArguments} tier_override={result.TierOverrideRequested} method={AppServerProtocol.RateLimitsMethod}");
+            foreach (var bucket in result.Observation.Additional)
+            {
+                Console.WriteLine($"QUOTA_BUCKET id={bucket.Id} name={bucket.Name} used={bucket.UsedPercent:0.##} " +
+                                  $"duration={bucket.WindowDurationMinutes} reset={bucket.ResetsAtUtc:O}");
+            }
             return 2;
         }
 
@@ -1810,14 +1828,15 @@ internal static class Program
     private static void QuotaDurability(string runRoot)
     {
         using var database = NewDatabase(runRoot, "quota");
-        var first = QuotaJsonParser.Parse(QuotaJson("codex-main", "Codex", 80, 1786460611), DateTimeOffset.UtcNow);
+        var futureReset = DateTimeOffset.UtcNow.AddDays(7).ToUnixTimeSeconds();
+        var first = QuotaJsonParser.Parse(QuotaJson("codex-main", "Codex", 80, futureReset), DateTimeOffset.UtcNow);
         var state = new QuotaStateMachine(database);
         state.Observe(first);
-        var smallDriftAndName = QuotaJsonParser.Parse(QuotaJson("codex-renamed", "Codex Main", 80, 1786460671), DateTimeOffset.UtcNow.AddMinutes(1));
+        var smallDriftAndName = QuotaJsonParser.Parse(QuotaJson("codex-renamed", "Codex Main", 80, futureReset + 60), DateTimeOffset.UtcNow.AddMinutes(1));
         state.Observe(smallDriftAndName);
         Assert.Equal(0L, database.GetResetSignalCount());
         var restored = new QuotaStateMachine(database);
-        var jump = QuotaJsonParser.Parse(QuotaJson("codex-renamed", "Codex Main", 60, 1786460671), DateTimeOffset.UtcNow.AddMinutes(2));
+        var jump = QuotaJsonParser.Parse(QuotaJson("codex-renamed", "Codex Main", 60, futureReset + 60), DateTimeOffset.UtcNow.AddMinutes(2));
         restored.Observe(jump);
         Assert.Equal(1L, database.GetResetSignalCount());
         var stale = restored.Observe(new QuotaObservation(null, Array.Empty<QuotaBucket>(), QuotaSource.Unavailable,
@@ -1828,6 +1847,37 @@ internal static class Program
         var ambiguous = QuotaJsonParser.Parse("{\"result\":{\"data\":[{\"id\":\"codex-a\",\"name\":\"Codex A\",\"usedPercent\":1,\"windowDurationMins\":60,\"resetsAt\":1786460611},{\"id\":\"codex-b\",\"name\":\"Codex B\",\"usedPercent\":2,\"windowDurationMins\":60,\"resetsAt\":1786460611}]}}", DateTimeOffset.UtcNow);
         Assert.True(ambiguous.Primary is null);
         Assert.Equal("quota_bucket_ambiguous", ambiguous.ErrorCode);
+
+        var currentShape = QuotaJsonParser.Parse(
+            "{\"result\":{\"rateLimits\":{\"primary\":{\"usedPercent\":2,\"windowDurationMins\":10080,\"resetsAt\":1787801704},\"secondary\":{\"usedPercent\":24,\"windowDurationMins\":10080,\"resetsAt\":1787580470}}}}",
+            DateTimeOffset.UtcNow);
+        Assert.NotNull(currentShape.Primary);
+        Assert.Equal("primary", currentShape.Primary!.Id);
+        Assert.Equal(2d, currentShape.Primary.UsedPercent);
+        Assert.Equal(1, currentShape.Additional.Count);
+        Assert.Equal("secondary", currentShape.Additional[0].Id);
+
+        var rolloverStart = DateTimeOffset.Parse("2026-08-20T03:33:00Z", CultureInfo.InvariantCulture);
+        var rolloverState = new QuotaStateMachine();
+        rolloverState.Observe(new QuotaObservation(
+            new QuotaBucket("primary", "primary", 100, 10080, rolloverStart),
+            Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, rolloverStart.AddMinutes(-1), false));
+        var unavailableAfterExpiry = rolloverState.Observe(new QuotaObservation(null,
+            Array.Empty<QuotaBucket>(), QuotaSource.Unavailable, rolloverStart.AddMinutes(1), false,
+            "quota_bucket_ambiguous"));
+        Assert.True(unavailableAfterExpiry.Primary is null);
+        Assert.Equal("quota_bucket_ambiguous", unavailableAfterExpiry.ErrorCode);
+        var rolledOver = rolloverState.Observe(new QuotaObservation(
+            new QuotaBucket("primary", "primary", 2, 10080, rolloverStart.AddDays(7)),
+            Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, rolloverStart.AddMinutes(2), false));
+        Assert.Equal(98d, rolledOver.Primary!.RemainingPercent);
+
+        var expiredAt = DateTimeOffset.UtcNow.AddMinutes(-1);
+        restored.Observe(new QuotaObservation(new QuotaBucket("primary", "primary", 50, 10080, expiredAt),
+            Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, expiredAt.AddMinutes(-1), false));
+        var expiredRestore = new QuotaStateMachine(database).RestoreForDisplay();
+        Assert.True(expiredRestore.Primary is null);
+        Assert.Equal("quota_last_observation_expired", expiredRestore.ErrorCode);
     }
 
     private static void RunningCycleScopeAndInvalidQuota(string runRoot)
@@ -2222,9 +2272,11 @@ internal static class Program
         }
         using var engine = new UsageEngine(home, databasePath);
         var snapshot = engine.GetSnapshot();
-        Assert.NotNull(snapshot.Quota.Primary);
-        Assert.True(snapshot.Quota.IsStale);
+        Assert.True(snapshot.Quota.Primary is null);
+        Assert.True(!snapshot.Quota.IsStale);
+        Assert.Equal("quota_last_observation_expired", snapshot.Quota.ErrorCode);
         Assert.True(snapshot.CycleTotal is null);
+        Assert.True(HudPresentation.BuildCollapsedText(snapshot).Contains("额度不可用", StringComparison.Ordinal));
         Assert.True(HudPresentation.BuildCollapsedText(snapshot).Contains("本周期不可用", StringComparison.Ordinal));
     }
 

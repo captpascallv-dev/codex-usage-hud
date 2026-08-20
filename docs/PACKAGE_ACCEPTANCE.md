@@ -2,6 +2,8 @@
 
 Status: `FINAL_PACKAGE_VERIFIED`
 
+Release: `1.0.1` quota-rollover compatibility hotfix.
+
 This is the package-safe acceptance summary. Detailed internal diagnostics,
 machine paths, local session identifiers, local usage values, and private test
 records are intentionally not distributed with the application.
@@ -45,6 +47,10 @@ records are intentionally not distributed with the application.
 - Official quota data comes only from the local Codex App Server read-only
   method. Raw token totals are never used to estimate platform quota and the HUD
   never changes the Codex service tier.
+- App Server responses containing sibling `primary` and `secondary` quota
+  windows select only the exact stable `primary` bucket. Multiple fuzzy Codex
+  candidates remain unavailable rather than guessed. An expired persisted
+  observation is no longer rendered as a stale percentage after refresh fails.
 - User-facing running counts include only sessions in the derived Running state.
   Their adjacent token total is filtered to the same official current quota
   window; it is not a sum of those sessions' all-history totals. Non-positive

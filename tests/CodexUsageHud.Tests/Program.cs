@@ -22,6 +22,8 @@ internal static class Program
             return RunRealCheck(args.Skip(1).ToArray());
         if (args.Length > 0 && args[0].Equals("--quota-check", StringComparison.Ordinal))
             return RunQuotaCheck().GetAwaiter().GetResult();
+        if (args.Length > 0 && args[0].Equals("--lineage-cycle-check", StringComparison.Ordinal))
+            return RunLineageCycleCheck(args.Skip(1).ToArray());
         if (args.Length > 0 && args[0].Equals("--refresh-diagnostic", StringComparison.Ordinal))
             return RunRefreshDiagnostic(args.Skip(1).ToArray());
         if (args.Length > 0 && args[0].Equals("--gate-helper", StringComparison.Ordinal))
@@ -130,6 +132,12 @@ internal static class Program
             ("hud_v2_left_right_top_dock_and_handle", () => HudV2DockGeometry(runRoot)),
             ("hud_screen_recovery_geometry", HudScreenRecoveryGeometry),
             ("package_publication_privacy_contract", PackagePublicationPrivacyContract),
+            ("lineage_semantic_contract_v9_and_live_replay", () => LineageSemanticContractV9AndLiveReplay(runRoot)),
+            ("lineage_parent_child_grandchild_siblings_unrelated", () => LineageFamilyAndUnrelatedRoots(runRoot)),
+            ("lineage_pre_cycle_late_parent_missing_cyclic", () => LineageCycleTimingAndIsolation(runRoot)),
+            ("lineage_incremental_consumers_restart_privacy", () => LineageConsumersRestartPrivacy(runRoot)),
+            ("lineage_tuple_presence_reelection_and_render", () => LineageTuplePresenceReelectionAndRender(runRoot)),
+            ("lineage_independent_oracle_defect_injection", () => LineageIndependentOracleDefectInjection(runRoot)),
         };
 
         var failures = 0;
@@ -795,6 +803,609 @@ internal static class Program
         var total = checked(input + output);
         return new CanonicalTokenUsage(input, input - safeCached, safeCached, 0, output, safeReasoning,
             total, total);
+    }
+
+    private static int RunLineageCycleCheck(string[] args)
+    {
+        var databasePath = args.Length > 0 && !string.IsNullOrWhiteSpace(args[0])
+            ? args[0]
+            : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "CodexUsageHUD", "usage.db");
+        if (!File.Exists(databasePath))
+        {
+            Console.WriteLine("LINEAGE_CYCLE_CHECK status=UNAVAILABLE schema=unavailable samples=0 " +
+                              "canonical_stored=0 canonical_independent=0 stored_canonical_total=0 " +
+                              "independent_total=0 raw_sample_total=0 roots=0 cyclic_isolated=0 mismatch=1 " +
+                              "cycle_independent_total=0 db=missing");
+            return 2;
+        }
+
+        var builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Cache = SqliteCacheMode.Shared,
+            Pooling = false,
+            DefaultTimeout = 2,
+        };
+        using var connection = new SqliteConnection(builder.ToString());
+        try
+        {
+            connection.Open();
+        }
+        catch (SqliteException)
+        {
+            Console.WriteLine("LINEAGE_CYCLE_CHECK status=UNAVAILABLE schema=unavailable samples=0 " +
+                              "canonical_stored=0 canonical_independent=0 stored_canonical_total=0 " +
+                              "independent_total=0 raw_sample_total=0 roots=0 cyclic_isolated=0 mismatch=1 " +
+                              "cycle_independent_total=0 db=readonly");
+            return 2;
+        }
+
+        using (var pragma = connection.CreateCommand())
+        {
+            pragma.CommandText = "PRAGMA query_only=ON; PRAGMA busy_timeout=2000;";
+            pragma.ExecuteNonQuery();
+        }
+
+        string schema;
+        using (var schemaCmd = connection.CreateCommand())
+        {
+            schemaCmd.CommandText = "SELECT value FROM schema_info WHERE key = 'version';";
+            schema = Convert.ToString(schemaCmd.ExecuteScalar(), CultureInfo.InvariantCulture) ?? "unavailable";
+        }
+
+        var columns = new HashSet<string>(StringComparer.Ordinal);
+        using (var columnCmd = connection.CreateCommand())
+        {
+            columnCmd.CommandText = "PRAGMA table_info(token_samples);";
+            using var reader = columnCmd.ExecuteReader();
+            while (reader.Read()) columns.Add(reader.GetString(1));
+        }
+
+        var hasLineage = columns.Contains("is_lineage_canonical") && columns.Contains("semantic_identity");
+        var parents = new Dictionary<string, string?>(StringComparer.Ordinal);
+        using (var parentCmd = connection.CreateCommand())
+        {
+            parentCmd.CommandText = "SELECT thread_id, parent_thread_id FROM sessions;";
+            using var reader = parentCmd.ExecuteReader();
+            while (reader.Read())
+                parents[reader.GetString(0)] = reader.IsDBNull(1) ? null : reader.GetString(1);
+        }
+
+        var hasLegacyAlias = columns.Contains("legacy_semantic_identity");
+        var sampleSql = IndependentLineage.SampleSql(hasLineage, hasLegacyAlias);
+        var samples = new List<LineageCycleRow>();
+        using (var sampleCmd = connection.CreateCommand())
+        {
+            sampleCmd.CommandText = sampleSql;
+            using var reader = sampleCmd.ExecuteReader();
+            while (reader.Read())
+            {
+                samples.Add(new LineageCycleRow(
+                    reader.GetInt64(0), reader.GetString(1),
+                    new CanonicalTokenUsage(reader.GetInt64(2), reader.GetInt64(3), reader.GetInt64(4),
+                        reader.GetInt64(5), reader.GetInt64(6), reader.GetInt64(7), reader.GetInt64(8),
+                        reader.GetInt64(9)),
+                    reader.GetInt64(10), reader.GetInt64(11), reader.GetInt64(12),
+                    reader.IsDBNull(13) ? null : reader.GetInt64(13),
+                    reader.IsDBNull(14) ? null : reader.GetInt64(14),
+                    reader.IsDBNull(15) ? null : reader.GetString(15),
+                    reader.GetInt32(16),
+                    reader.IsDBNull(17) ? null : reader.GetInt64(17),
+                    hasLineage && !reader.IsDBNull(18) ? reader.GetString(18) : "",
+                    hasLineage && !reader.IsDBNull(19) ? reader.GetString(19) : "",
+                    hasLineage && !reader.IsDBNull(20) ? reader.GetString(20) : "",
+                    hasLineage && reader.GetInt64(21) != 0,
+                    hasLineage && reader.FieldCount > 22 && !reader.IsDBNull(22) ? reader.GetString(22) : ""));
+            }
+        }
+
+        var rawTotal = 0L;
+        var storedCanonicalCount = 0L;
+        var storedCanonicalTotal = 0L;
+        foreach (var row in samples)
+        {
+            rawTotal += row.Last.Total;
+            if (row.StoredCanonical)
+            {
+                storedCanonicalCount++;
+                storedCanonicalTotal += row.Last.Total;
+            }
+        }
+
+        var roots = new HashSet<string>(StringComparer.Ordinal);
+        var cyclicIsolated = 0L;
+        foreach (var row in samples)
+        {
+            var root = IndependentLineage.ResolveRoot(row.ThreadId, parents);
+            roots.Add(root);
+            if (parents.TryGetValue(row.ThreadId, out var parent) &&
+                !string.IsNullOrWhiteSpace(parent) &&
+                string.Equals(root, row.ThreadId, StringComparison.Ordinal) &&
+                !string.Equals(parent, root, StringComparison.Ordinal))
+            {
+                cyclicIsolated++;
+            }
+
+            row.IndependentRoot = root;
+            row.IndependentDepth = IndependentLineage.ResolvedDepth(row.ThreadId, parents);
+            IndependentLineage.Describe(row);
+        }
+
+        var independentIds = IndependentLineage.ElectCanonicalIds(samples);
+
+        var independentCount = (long)independentIds.Count;
+        var independentTotal = 0L;
+        var materialMismatch = 0L;
+        foreach (var row in samples)
+        {
+            if (independentIds.Contains(row.Id)) independentTotal += row.Last.Total;
+            if (!hasLineage) continue;
+            var expectedCanonical = independentIds.Contains(row.Id);
+            if (row.StoredCanonical != expectedCanonical) materialMismatch++;
+            if (!row.IndependentValid) materialMismatch++;
+            if (!string.IsNullOrWhiteSpace(row.StoredIdentity) &&
+                !string.Equals(row.IndependentIdentity, row.StoredIdentity, StringComparison.Ordinal))
+            {
+                materialMismatch++;
+            }
+            if (!string.IsNullOrWhiteSpace(row.StoredMaterial) &&
+                !string.Equals(row.IndependentMaterial, row.StoredMaterial, StringComparison.Ordinal))
+            {
+                materialMismatch++;
+            }
+            if (!string.IsNullOrWhiteSpace(row.StoredLegacy) &&
+                !string.Equals(row.IndependentAlias, row.StoredLegacy, StringComparison.Ordinal))
+            {
+                materialMismatch++;
+            }
+            if (!string.IsNullOrWhiteSpace(row.StoredRoot) &&
+                !string.Equals(row.IndependentRoot, row.StoredRoot, StringComparison.Ordinal))
+            {
+                materialMismatch++;
+            }
+        }
+
+        var cycleIndependent = 0L;
+        var hasQuotaTable = false;
+        using (var tableCmd = connection.CreateCommand())
+        {
+            tableCmd.CommandText =
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'quota_observations';";
+            hasQuotaTable = tableCmd.ExecuteScalar() is not null;
+        }
+
+        if (hasQuotaTable)
+        using (var quotaCmd = connection.CreateCommand())
+        {
+            quotaCmd.CommandText = """
+                SELECT window_duration_minutes, resets_at_utc
+                FROM quota_observations
+                WHERE is_primary = 1
+                ORDER BY id DESC LIMIT 1;
+                """;
+            using var quotaReader = quotaCmd.ExecuteReader();
+            if (quotaReader.Read())
+            {
+                var minutes = quotaReader.GetInt32(0);
+                var resetText = quotaReader.GetString(1);
+                if (minutes > 0 &&
+                    DateTimeOffset.TryParse(resetText, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind,
+                        out var resetAt))
+                {
+                    try
+                    {
+                        var cycleStart = resetAt.AddMinutes(-minutes).UtcTicks;
+                        var cycleEnd = resetAt.UtcTicks;
+                        foreach (var row in samples)
+                        {
+                            if (!row.EventTimeTicks.HasValue) continue;
+                            var ticks = row.EventTimeTicks.Value;
+                            if (ticks >= cycleStart && ticks < cycleEnd && independentIds.Contains(row.Id))
+                                cycleIndependent += row.Last.Total;
+                        }
+                    }
+                    catch (ArgumentOutOfRangeException)
+                    {
+                    }
+                }
+            }
+        }
+
+        var mismatch = 0;
+        if (hasLineage)
+        {
+            if (storedCanonicalCount != independentCount) mismatch = 1;
+            if (storedCanonicalTotal != independentTotal) mismatch = 1;
+            if (materialMismatch > 0) mismatch = 1;
+        }
+        else if (rawTotal != independentTotal)
+        {
+            mismatch = 1;
+        }
+
+        var status = mismatch == 0 ? "MATCH" : "MISMATCH";
+        Console.WriteLine(
+            $"LINEAGE_CYCLE_CHECK status={status} schema={schema} samples={samples.Count} " +
+            $"canonical_stored={storedCanonicalCount} canonical_independent={independentCount} " +
+            $"stored_canonical_total={storedCanonicalTotal} independent_total={independentTotal} " +
+            $"raw_sample_total={rawTotal} roots={roots.Count} cyclic_isolated={cyclicIsolated} " +
+            $"mismatch={mismatch} cycle_independent_total={cycleIndependent} db=readonly");
+        return mismatch == 0 ? 0 : 1;
+    }
+
+    private sealed class LineageCycleRow
+    {
+        public LineageCycleRow(long id, string threadId, CanonicalTokenUsage last, long cumulativeInput,
+            long cumulativeOutput, long cumulativeTotal, long? contextWindow, long? eventTimeTicks,
+            string? sourceKey, int sourceGeneration, long? sourceOffset, string storedIdentity,
+            string storedMaterial, string storedRoot, bool storedCanonical, string storedLegacy = "")
+        {
+            Id = id;
+            ThreadId = threadId;
+            Last = last;
+            CumulativeInput = cumulativeInput;
+            CumulativeOutput = cumulativeOutput;
+            CumulativeTotal = cumulativeTotal;
+            ContextWindow = contextWindow;
+            EventTimeTicks = eventTimeTicks;
+            SourceKey = sourceKey;
+            SourceGeneration = sourceGeneration;
+            SourceOffset = sourceOffset;
+            StoredIdentity = storedIdentity;
+            StoredMaterial = storedMaterial;
+            StoredRoot = storedRoot;
+            StoredCanonical = storedCanonical;
+            StoredLegacy = storedLegacy;
+        }
+
+        public long Id { get; }
+        public string ThreadId { get; }
+        public CanonicalTokenUsage Last { get; }
+        public long CumulativeInput { get; }
+        public long CumulativeOutput { get; }
+        public long CumulativeTotal { get; }
+        public long? ContextWindow { get; }
+        public long? EventTimeTicks { get; }
+        public string? SourceKey { get; }
+        public int SourceGeneration { get; }
+        public long? SourceOffset { get; }
+        public string StoredIdentity { get; }
+        public string StoredMaterial { get; }
+        public string StoredRoot { get; }
+        public bool StoredCanonical { get; }
+        public string StoredLegacy { get; }
+        public string IndependentRoot { get; set; } = "";
+        public int IndependentDepth { get; set; }
+        public string IndependentMaterial { get; set; } = "";
+        public string IndependentIdentity { get; set; } = "";
+        public string IndependentAlias { get; set; } = "";
+        public bool IndependentValid { get; set; } = true;
+    }
+
+    private static class IndependentLineage
+    {
+        private const string LivePrefix = "lineage-semantic-v2|";
+        private const string LegacyPrefix = "lineage-semantic-v1|";
+
+        public static string SampleSql(bool hasLineage, bool hasLegacyAlias)
+        {
+            if (!hasLineage)
+            {
+                return """
+                    SELECT id, thread_id, input_tokens, raw_input_tokens, cached_input_tokens, cache_write_input_tokens,
+                           output_tokens, reasoning_output_tokens, canonical_total_tokens, reported_total_tokens,
+                           cumulative_input_tokens, cumulative_output_tokens, cumulative_total_tokens, context_window,
+                           event_time_ticks, source_key, source_generation, source_offset
+                    FROM token_samples
+                    """;
+            }
+
+            if (hasLegacyAlias)
+            {
+                return """
+                    SELECT id, thread_id, input_tokens, raw_input_tokens, cached_input_tokens, cache_write_input_tokens,
+                           output_tokens, reasoning_output_tokens, canonical_total_tokens, reported_total_tokens,
+                           cumulative_input_tokens, cumulative_output_tokens, cumulative_total_tokens, context_window,
+                           event_time_ticks, source_key, source_generation, source_offset,
+                           semantic_identity, semantic_material, lineage_root_thread_id, is_lineage_canonical,
+                           legacy_semantic_identity
+                    FROM token_samples
+                    """;
+            }
+
+            return """
+                SELECT id, thread_id, input_tokens, raw_input_tokens, cached_input_tokens, cache_write_input_tokens,
+                       output_tokens, reasoning_output_tokens, canonical_total_tokens, reported_total_tokens,
+                       cumulative_input_tokens, cumulative_output_tokens, cumulative_total_tokens, context_window,
+                       event_time_ticks, source_key, source_generation, source_offset,
+                       semantic_identity, semantic_material, lineage_root_thread_id, is_lineage_canonical,
+                       ''
+                FROM token_samples
+                """;
+        }
+
+        public static void Describe(LineageCycleRow row)
+        {
+            var aliasMaterial = EncodeLegacy(row);
+            var alias = Hash(aliasMaterial);
+            row.IndependentAlias = alias;
+            if (!row.StoredMaterial.StartsWith(LivePrefix, StringComparison.Ordinal))
+            {
+                row.IndependentMaterial = aliasMaterial;
+                row.IndependentIdentity = alias;
+                row.IndependentValid = true;
+                return;
+            }
+
+            if (!TryParseLive(row.StoredMaterial, out var total, out var last, out var context))
+            {
+                row.IndependentMaterial = string.Empty;
+                row.IndependentIdentity = string.Empty;
+                row.IndependentValid = false;
+                return;
+            }
+
+            var material = EncodeLive(total, last, context);
+            row.IndependentMaterial = material;
+            row.IndependentIdentity = Hash(material);
+            row.IndependentValid = CanonicalColumnsMatch(total, last, context, row);
+        }
+
+        public static bool IsLiveRow(LineageCycleRow row) =>
+            row.StoredMaterial.StartsWith(LivePrefix, StringComparison.Ordinal);
+
+        public static bool IsLegacyRow(LineageCycleRow row) =>
+            row.StoredMaterial.StartsWith(LegacyPrefix, StringComparison.Ordinal) || !IsLiveRow(row);
+
+        public static string ResolveRoot(string threadId, IReadOnlyDictionary<string, string?> parents)
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var current = threadId;
+            while (true)
+            {
+                if (!parents.TryGetValue(current, out var parent) || string.IsNullOrWhiteSpace(parent))
+                    return current;
+                if (!parents.ContainsKey(parent)) return current;
+                if (!seen.Add(current) || seen.Contains(parent) ||
+                    string.Equals(parent, current, StringComparison.Ordinal))
+                {
+                    return threadId;
+                }
+                current = parent;
+            }
+        }
+
+        public static int ResolvedDepth(string threadId, IReadOnlyDictionary<string, string?> parents)
+        {
+            var root = ResolveRoot(threadId, parents);
+            if (string.Equals(threadId, root, StringComparison.Ordinal)) return 0;
+            var depth = 0;
+            var seen = new HashSet<string>(StringComparer.Ordinal) { threadId };
+            var current = threadId;
+            while (true)
+            {
+                if (!parents.TryGetValue(current, out var parent) || string.IsNullOrWhiteSpace(parent))
+                    return depth;
+                if (!parents.ContainsKey(parent)) return depth;
+                if (!seen.Add(parent) || string.Equals(parent, current, StringComparison.Ordinal))
+                    return depth;
+                depth++;
+                if (string.Equals(parent, root, StringComparison.Ordinal)) return depth;
+                current = parent;
+            }
+        }
+
+        public static HashSet<long> ElectCanonicalIds(IReadOnlyList<LineageCycleRow> samples)
+        {
+            var groups = new Dictionary<string, List<LineageCycleRow>>(StringComparer.Ordinal);
+            foreach (var row in samples)
+            {
+                var key = row.IndependentRoot + "\n" + row.IndependentIdentity;
+                if (!groups.TryGetValue(key, out var list))
+                {
+                    list = new List<LineageCycleRow>();
+                    groups[key] = list;
+                }
+                list.Add(row);
+            }
+
+            var independentIds = new HashSet<long>();
+            var liveWinners = new List<LineageCycleRow>();
+            var legacyWinners = new List<LineageCycleRow>();
+            foreach (var pair in groups)
+            {
+                var winner = Earliest(pair.Value);
+                independentIds.Add(winner.Id);
+                if (IsLiveRow(winner)) liveWinners.Add(winner);
+                else if (IsLegacyRow(winner)) legacyWinners.Add(winner);
+            }
+
+            if (liveWinners.Count == 0 || legacyWinners.Count == 0) return independentIds;
+
+            var livesByAlias = new Dictionary<string, List<LineageCycleRow>>(StringComparer.Ordinal);
+            foreach (var live in liveWinners)
+            {
+                var key = live.IndependentRoot + "\n" + live.IndependentAlias;
+                if (!livesByAlias.TryGetValue(key, out var list))
+                {
+                    list = new List<LineageCycleRow>();
+                    livesByAlias[key] = list;
+                }
+                list.Add(live);
+            }
+
+            foreach (var list in livesByAlias.Values)
+                list.Sort(CompareOrder);
+
+            foreach (var legacy in legacyWinners)
+            {
+                if (!independentIds.Contains(legacy.Id)) continue;
+                var key = legacy.IndependentRoot + "\n" + legacy.IndependentIdentity;
+                if (!livesByAlias.TryGetValue(key, out var lives)) continue;
+                LineageCycleRow? equivalent = null;
+                foreach (var live in lives)
+                {
+                    if (!independentIds.Contains(live.Id)) continue;
+                    equivalent = live;
+                    break;
+                }
+                if (equivalent is null) continue;
+                if (CompareOrder(legacy, equivalent) < 0) independentIds.Remove(equivalent.Id);
+                else independentIds.Remove(legacy.Id);
+            }
+
+            return independentIds;
+        }
+
+        public static LineageCycleRow Earliest(IReadOnlyList<LineageCycleRow> rows)
+        {
+            var winner = rows[0];
+            foreach (var row in rows)
+            {
+                if (CompareOrder(row, winner) < 0) winner = row;
+            }
+            return winner;
+        }
+
+        public static int CompareOrder(LineageCycleRow left, LineageCycleRow right)
+        {
+            var leftReliable = left.EventTimeTicks.HasValue;
+            var rightReliable = right.EventTimeTicks.HasValue;
+            if (leftReliable != rightReliable) return leftReliable ? -1 : 1;
+            if (leftReliable)
+            {
+                var time = left.EventTimeTicks!.Value.CompareTo(right.EventTimeTicks!.Value);
+                if (time != 0) return time;
+                var depth = left.IndependentDepth.CompareTo(right.IndependentDepth);
+                if (depth != 0) return depth;
+            }
+
+            var source = string.Compare(left.SourceKey ?? string.Empty, right.SourceKey ?? string.Empty,
+                StringComparison.Ordinal);
+            if ((left.SourceKey is null) != (right.SourceKey is null))
+                return left.SourceKey is null ? 1 : -1;
+            if (source != 0) return source;
+            var generation = left.SourceGeneration.CompareTo(right.SourceGeneration);
+            if (generation != 0) return generation;
+            if ((left.SourceOffset is null) != (right.SourceOffset is null))
+                return left.SourceOffset is null ? 1 : -1;
+            if (left.SourceOffset.HasValue)
+            {
+                var offset = left.SourceOffset.Value.CompareTo(right.SourceOffset!.Value);
+                if (offset != 0) return offset;
+            }
+            return left.Id.CompareTo(right.Id);
+        }
+
+        public static bool TryParseLive(string material, out long?[] total, out long?[] last, out long? context)
+        {
+            total = Array.Empty<long?>();
+            last = Array.Empty<long?>();
+            context = null;
+            if (!material.StartsWith(LivePrefix, StringComparison.Ordinal)) return false;
+            var parts = material.Split('|');
+            if (parts.Length != 4) return false;
+            if (!string.Equals(parts[0], "lineage-semantic-v2", StringComparison.Ordinal)) return false;
+            if (!TryParsePresenceTuple(parts[1], out total)) return false;
+            if (!TryParsePresenceTuple(parts[2], out last)) return false;
+            return TryParsePresence(parts[3], out context);
+        }
+
+        public static string EncodeLive(long?[] total, long?[] last, long? context) =>
+            string.Join('|', "lineage-semantic-v2", JoinPresence(total), JoinPresence(last),
+                FormatPresence(context));
+
+        public static string EncodeLegacy(LineageCycleRow row)
+        {
+            static string Number(long value) => value.ToString(CultureInfo.InvariantCulture);
+            var last = row.Last;
+            var lastPart = string.Join(',', Number(last.Input), Number(last.RawInput), Number(last.CachedInput),
+                Number(last.CacheWriteInput), Number(last.Output), Number(last.Reasoning), Number(last.Total),
+                Number(last.ReportedTotal));
+            var totalPart = string.Join(',', Number(row.CumulativeInput), Number(row.CumulativeOutput),
+                Number(row.CumulativeTotal));
+            var context = row.ContextWindow is > 0 ? "v:" + Number(row.ContextWindow.Value) : "m";
+            return string.Join('|', "lineage-semantic-v1", lastPart, totalPart, context);
+        }
+
+        public static string Hash(string value) =>
+            Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
+
+        private static bool TryParsePresenceTuple(string text, out long?[] values)
+        {
+            var fields = text.Split(',');
+            values = new long?[7];
+            if (fields.Length != 7) return false;
+            for (var index = 0; index < 7; index++)
+            {
+                if (!TryParsePresence(fields[index], out values[index])) return false;
+            }
+            return true;
+        }
+
+        private static bool TryParsePresence(string text, out long? value)
+        {
+            value = null;
+            if (string.Equals(text, "m", StringComparison.Ordinal)) return true;
+            if (!text.StartsWith("v:", StringComparison.Ordinal)) return false;
+            if (!long.TryParse(text.AsSpan(2), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed))
+                return false;
+            value = parsed;
+            return true;
+        }
+
+        private static string JoinPresence(long?[] values)
+        {
+            var parts = new string[values.Length];
+            for (var index = 0; index < values.Length; index++)
+                parts[index] = FormatPresence(values[index]);
+            return string.Join(',', parts);
+        }
+
+        private static string FormatPresence(long? value) => value.HasValue
+            ? "v:" + value.Value.ToString(CultureInfo.InvariantCulture)
+            : "m";
+
+        private static bool CanonicalColumnsMatch(long?[] total, long?[] last, long? context,
+            LineageCycleRow row)
+        {
+            var canonicalLast = Canonicalize(last);
+            var canonicalTotal = Canonicalize(total);
+            return canonicalLast.Input == row.Last.Input &&
+                   canonicalLast.RawInput == row.Last.RawInput &&
+                   canonicalLast.CachedInput == row.Last.CachedInput &&
+                   canonicalLast.CacheWriteInput == row.Last.CacheWriteInput &&
+                   canonicalLast.Output == row.Last.Output &&
+                   canonicalLast.Reasoning == row.Last.Reasoning &&
+                   canonicalLast.Total == row.Last.Total &&
+                   canonicalLast.ReportedTotal == row.Last.ReportedTotal &&
+                   canonicalTotal.Input == row.CumulativeInput &&
+                   canonicalTotal.Output == row.CumulativeOutput &&
+                   canonicalTotal.Total == row.CumulativeTotal &&
+                   Nullable.Equals(context, row.ContextWindow);
+        }
+
+        private static CanonicalTokenUsage Canonicalize(long?[] values)
+        {
+            static long NonNegative(long value) => value < 0 ? 0 : value;
+            static long SaturatingAdd(long left, long right)
+            {
+                if (right > 0 && left > long.MaxValue - right) return long.MaxValue;
+                if (right < 0 && left < long.MinValue - right) return long.MinValue;
+                return left + right;
+            }
+
+            var input = NonNegative(values[0] ?? 0);
+            var cached = Math.Max(NonNegative(values[1] ?? 0), NonNegative(values[2] ?? 0));
+            cached = Math.Min(cached, input);
+            var cacheWrite = NonNegative(values[3] ?? 0);
+            var output = NonNegative(values[4] ?? 0);
+            var reasoning = Math.Min(NonNegative(values[5] ?? 0), output);
+            return new CanonicalTokenUsage(input, Math.Max(input - cached, 0), cached, cacheWrite,
+                output, reasoning, SaturatingAdd(input, output), NonNegative(values[6] ?? 0));
+        }
     }
 
     private static async Task<int> RunQuotaCheck()
@@ -2080,6 +2691,8 @@ internal static class Program
             Assert.Equal(1, resetSegment.PostCompactionSampleCount);
             Assert.True(!resetSegment.HasReliablePostCompactionBaseline);
         }
+
+        AssertForkExplicitContextBoundaries(runRoot);
     }
 
     private static void ContinuationGradeHierarchy()
@@ -2205,7 +2818,7 @@ internal static class Program
         }
         using var cleared = new UsageDatabase(databasePath);
         Assert.True(!cleared.LoadSessionDriftAssessments().ContainsKey("thread-drift"));
-        Assert.Equal("9", cleared.ReadSchemaValue("version"));
+        Assert.Equal("10", cleared.ReadSchemaValue("version"));
     }
 
     private static void ContextWindowMigration(string runRoot)
@@ -2356,6 +2969,8 @@ internal static class Program
             "explicit_marker_identity", "explicit_marker_turn_key", "model_key", "detection_source",
             "boundary_event_identity", "runway_turns", "runway_tokens",
             "assessment_level",
+            "semantic_identity", "semantic_material", "legacy_semantic_identity",
+            "lineage_root_thread_id", "is_lineage_canonical",
         };
         Assert.True(database.ReadSchemaColumnNames().Values.SelectMany(columns => columns).All(safe.Contains));
     }
@@ -2581,6 +3196,25 @@ internal static class Program
         Assert.True(!publicEvidence.Contains(@"C:\Users\", StringComparison.OrdinalIgnoreCase));
         Assert.True(!System.Text.RegularExpressions.Regex.IsMatch(publicEvidence,
             @"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"));
+
+        var readme = File.ReadAllText(Path.Combine(root, "README.md"));
+        var spec = File.ReadAllText(Path.Combine(root, "docs", "TECHNICAL_SPEC.md"));
+        Assert.True(!readme.Contains("78 checks", StringComparison.Ordinal));
+        Assert.True(!readme.Contains("intentionally does not deduplicate across different thread",
+            StringComparison.Ordinal));
+        Assert.True(!readme.Contains("future validation item", StringComparison.Ordinal));
+        Assert.True(readme.Contains("84 checks", StringComparison.Ordinal));
+        Assert.True(readme.Contains("cache_read_input_tokens", StringComparison.Ordinal));
+        Assert.True(!publicEvidence.Contains("FINAL_PACKAGE_VERIFIED", StringComparison.Ordinal));
+        Assert.True(!publicEvidence.Contains("78 existing checks", StringComparison.Ordinal));
+        Assert.True(publicEvidence.Contains("PRE_RELEASE_CANDIDATE", StringComparison.Ordinal));
+        Assert.True(publicEvidence.Contains("84 automated tests", StringComparison.Ordinal));
+        Assert.True(spec.Contains("cache_read_input_tokens", StringComparison.Ordinal));
+        Assert.True(spec.Contains("seven independent", StringComparison.Ordinal));
+        Assert.True(spec.Contains("missing is distinct from explicit zero", StringComparison.Ordinal) ||
+                    spec.Contains("missing-versus-zero", StringComparison.Ordinal));
+        Assert.True(readme.Contains("parent-tree", StringComparison.Ordinal) ||
+                    readme.Contains("解析后的父树根", StringComparison.Ordinal));
     }
 
     private static void HudWpfRuntimeInteractions(string runRoot)
@@ -5104,6 +5738,2294 @@ internal static class Program
     }
 
     private static CanonicalTokenUsage Usage(long total) => new(total, total, 0, 0, 0, 0, total, total);
+
+    private static TokenUsageSnapshot LineageSnapshot(long totalInput, long totalOutput, long lastInput,
+        long lastOutput, long? contextWindow = 128000) => new(
+        new TokenComponents(totalInput, null, null, null, totalOutput, null, totalInput + totalOutput),
+        new TokenComponents(lastInput, null, null, null, lastOutput, null, lastInput + lastOutput),
+        contextWindow);
+
+    private static void DrainAggregates(UsageDatabase database)
+    {
+        for (var guard = 0; guard < 10_000 && !database.IsAggregateRebuildComplete; guard++)
+            _ = database.RunAggregateRebuildBatch();
+        Assert.True(database.IsAggregateRebuildComplete);
+    }
+
+    private static void AssertNonNegativeAggregates(string databasePath)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        foreach (var sql in new[]
+                 {
+                     "SELECT COALESCE(MIN(canonical_total_tokens), 0) FROM session_token_aggregates",
+                     "SELECT COALESCE(MIN(canonical_total_tokens), 0) FROM turn_token_aggregates",
+                     "SELECT COALESCE(MIN(canonical_total_tokens), 0) FROM token_time_buckets",
+                     "SELECT COALESCE(MIN(canonical_total_tokens), 0) FROM active_cycle_aggregate",
+                     "SELECT COALESCE(MIN(canonical_total_tokens), 0) FROM latest_token_events",
+                 })
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText = sql;
+            Assert.True(Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) >= 0);
+        }
+    }
+
+    private static IReadOnlyList<(long Id, string ThreadId, string Identity, string Material, string Root, int Canonical)>
+        ReadLineageRows(string databasePath)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT id, thread_id, semantic_identity, semantic_material, lineage_root_thread_id,
+                   is_lineage_canonical
+            FROM token_samples ORDER BY id;
+            """;
+        using var reader = command.ExecuteReader();
+        var rows = new List<(long, string, string, string, string, int)>();
+        while (reader.Read())
+            rows.Add((reader.GetInt64(0), reader.GetString(1), reader.GetString(2),
+                reader.IsDBNull(3) ? string.Empty : reader.GetString(3), reader.GetString(4),
+                reader.GetInt32(5)));
+        return rows;
+    }
+
+    private static string DescribeLineageFlags(string databasePath) =>
+        string.Join(";", ReadLineageRows(databasePath)
+            .OrderBy(row => row.Id)
+            .Select(row => $"{row.Id}:{row.ThreadId}:{row.Canonical}:{row.Root}"));
+
+    private static long CountContextBaselines(string databasePath, string threadId,
+        string? detectionSource = null)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = detectionSource is null
+            ? "SELECT COUNT(*) FROM context_baseline_observations WHERE thread_id = $thread_id;"
+            : """
+                SELECT COUNT(*) FROM context_baseline_observations
+                WHERE thread_id = $thread_id AND detection_source = $source;
+                """;
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        if (detectionSource is not null) command.Parameters.AddWithValue("$source", detectionSource);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+    }
+
+    private static IReadOnlyList<long> ReadExplicitBaselineInputs(string databasePath, string threadId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT post_input_tokens FROM context_baseline_observations
+            WHERE thread_id = $thread_id AND detection_source = 'explicit'
+            ORDER BY event_time_ticks, post_sample_id;
+            """;
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        using var reader = command.ExecuteReader();
+        var values = new List<long>();
+        while (reader.Read()) values.Add(reader.GetInt64(0));
+        return values;
+    }
+
+    private static void AssertSingleExplicitBaseline(string databasePath, string threadId, long input)
+    {
+        var inputs = ReadExplicitBaselineInputs(databasePath, threadId);
+        Assert.Equal(1, inputs.Count);
+        Assert.Equal(input, inputs[0]);
+    }
+
+    private static void LineageSemanticContractV9AndLiveReplay(string runRoot)
+    {
+        var missing = new TokenUsageSnapshot(
+            new TokenComponents(10, null, null, null, 2, null, 12),
+            new TokenComponents(10, null, null, null, 2, null, 12), 128000);
+        var zeroed = new TokenUsageSnapshot(
+            new TokenComponents(10, 0, 0, 0, 2, 0, 12),
+            new TokenComponents(10, 0, 0, 0, 2, 0, 12), 128000);
+        var zeroContext = new TokenUsageSnapshot(
+            new TokenComponents(10, null, null, null, 2, null, 12),
+            new TokenComponents(10, null, null, null, 2, null, 12), 0);
+        var cachedOnly = new TokenUsageSnapshot(
+            new TokenComponents(10, 4, null, null, 2, null, 12),
+            new TokenComponents(10, 4, null, null, 2, null, 12), 128000);
+        var cacheRead = new TokenUsageSnapshot(
+            new TokenComponents(10, null, 4, null, 2, null, 12),
+            new TokenComponents(10, null, 4, null, 2, null, 12), 128000);
+        var cacheWrite = new TokenUsageSnapshot(
+            new TokenComponents(10, null, null, 3, 2, null, 12),
+            new TokenComponents(10, null, null, 3, 2, null, 12), 128000);
+        var reasoning = new TokenUsageSnapshot(
+            new TokenComponents(10, null, null, null, 2, 1, 12),
+            new TokenComponents(10, null, null, null, 2, 1, 12), 128000);
+        var reported = new TokenUsageSnapshot(
+            new TokenComponents(10, null, null, null, 2, null, 99),
+            new TokenComponents(10, null, null, null, 2, null, 99), 128000);
+        Assert.True(missing.SemanticIdentity() != zeroed.SemanticIdentity());
+        Assert.True(missing.SemanticMaterial() != zeroed.SemanticMaterial());
+        Assert.True(missing.SemanticIdentity() != zeroContext.SemanticIdentity());
+        Assert.True(missing.SemanticIdentity() != cachedOnly.SemanticIdentity());
+        Assert.True(missing.SemanticIdentity() != cacheRead.SemanticIdentity());
+        Assert.True(missing.SemanticIdentity() != cacheWrite.SemanticIdentity());
+        Assert.True(missing.SemanticIdentity() != reasoning.SemanticIdentity());
+        Assert.True(missing.SemanticIdentity() != reported.SemanticIdentity());
+        Assert.Equal(missing.LegacySemanticIdentity(), zeroed.LegacySemanticIdentity());
+        Assert.True(missing.SemanticMaterial().StartsWith(TokenUsageSnapshot.LineageSemanticPrefix + "|",
+            StringComparison.Ordinal));
+        Assert.True(missing.LegacySemanticMaterial().StartsWith(
+            TokenUsageSnapshot.LineageSemanticLegacyPrefix + "|", StringComparison.Ordinal));
+        Assert.Equal(missing.SemanticIdentity(), TokenUsageSnapshot.HashText(missing.SemanticMaterial()));
+        Assert.Equal(missing.LegacySemanticIdentity(), TokenUsageSnapshot.HashText(missing.LegacySemanticMaterial()));
+        var last = missing.LastUsage.ToCanonical();
+        var total = missing.TotalUsage.ToCanonical();
+        var storedMaterial = TokenUsageSnapshot.LineageSemanticMaterialFromStored(last, total.Input, total.Output,
+            total.Total, missing.ContextWindow);
+        Assert.Equal(missing.LegacySemanticMaterial(), storedMaterial);
+        Assert.True(missing.SemanticMaterial() != storedMaterial);
+        Assert.Equal(missing.LegacySemanticIdentity(),
+            TokenUsageSnapshot.LineageSemanticIdentityFromStored(last, total.Input, total.Output, total.Total,
+                missing.ContextWindow));
+        Assert.True(missing.Fingerprint("thread-a") != missing.Fingerprint("thread-b"));
+        var otherContext = LineageSnapshot(10, 2, 10, 2, null);
+        Assert.True(missing.SemanticIdentity() != otherContext.SemanticIdentity());
+
+        var directory = Path.Combine(runRoot, "lineage-v9");
+        Directory.CreateDirectory(directory);
+        var databasePath = Path.Combine(directory, "usage.db");
+        CreateSchemaV9LineageFixture(databasePath);
+        using (var migrated = new UsageDatabase(databasePath))
+        {
+            DrainAggregates(migrated);
+            Assert.Equal("10", migrated.ReadSchemaValue("version"));
+            Assert.Equal("2", migrated.ReadSchemaValue("lineage_semantic_version"));
+            Assert.Equal(24L, migrated.GetSessionTotal("v9-parent").Total);
+            Assert.Equal(5L, migrated.GetSessionTotal("v9-child").Total);
+            Assert.Equal(2L, migrated.GetSampleCount("v9-parent"));
+            Assert.Equal(2L, migrated.GetSampleCount("v9-child"));
+            var rows = ReadLineageRows(databasePath);
+            Assert.Equal(4, rows.Count);
+            Assert.True(rows.All(row => row.Material.StartsWith(
+                TokenUsageSnapshot.LineageSemanticLegacyPrefix + "|", StringComparison.Ordinal)));
+            Assert.True(rows.All(row => row.Identity == TokenUsageSnapshot.HashText(row.Material)));
+            Assert.Equal(3, rows.Count(row => row.Canonical == 1));
+            Assert.Equal(2, rows.Count(row => row.Canonical == 1 && row.ThreadId == "v9-parent"));
+            Assert.Equal(1, rows.Count(row => row.Canonical == 1 && row.ThreadId == "v9-child"));
+            var live = LineageSnapshot(20, 4, 10, 2);
+            Assert.Equal(live.LegacySemanticIdentity(), rows.Single(row =>
+                row.ThreadId == "v9-parent" && row.Material.Contains("|20,4,24|", StringComparison.Ordinal)).Identity);
+            migrated.UpsertSession(new SessionMetadata("v9-later", "Later", null, null, null, null, null, null,
+                DateTimeOffset.Parse("2026-01-01T00:02:00Z", CultureInfo.InvariantCulture), null,
+                Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "v9-parent", AgentDepth: 1));
+            DrainAggregates(migrated);
+            Assert.True(migrated.AcceptTokenSample("v9-later", live,
+                DateTimeOffset.Parse("2026-01-01T00:02:00Z", CultureInfo.InvariantCulture),
+                DateTimeOffset.Parse("2026-01-01T00:02:00Z", CultureInfo.InvariantCulture),
+                "turn-later", null, null));
+            Assert.Equal(0L, migrated.GetSessionTotal("v9-later").Total);
+            Assert.Equal(1L, migrated.GetSampleCount("v9-later"));
+            Assert.Equal(24L, migrated.GetSessionTotal("v9-parent").Total);
+            Assert.Equal(5L, migrated.GetSessionTotal("v9-child").Total);
+            var afterLive = ReadLineageRows(databasePath);
+            Assert.Equal(1, afterLive.Count(row => row.ThreadId == "v9-later"));
+            Assert.True(afterLive.Single(row => row.ThreadId == "v9-later").Material.StartsWith(
+                TokenUsageSnapshot.LineageSemanticPrefix + "|", StringComparison.Ordinal));
+            Assert.Equal(0, afterLive.Single(row => row.ThreadId == "v9-later").Canonical);
+            var zeroReplay = new TokenUsageSnapshot(
+                new TokenComponents(20, 0, 0, 0, 4, 0, 24),
+                new TokenComponents(10, 0, 0, 0, 2, 0, 12), 128000);
+            Assert.True(migrated.AcceptTokenSample("v9-later", zeroReplay,
+                DateTimeOffset.Parse("2026-01-01T00:02:01Z", CultureInfo.InvariantCulture),
+                DateTimeOffset.Parse("2026-01-01T00:02:01Z", CultureInfo.InvariantCulture),
+                "turn-zero", null, null));
+            Assert.Equal(12L, migrated.GetSessionTotal("v9-later").Total);
+            Assert.Equal(2L, migrated.GetSampleCount("v9-later"));
+            var afterZero = ReadLineageRows(databasePath);
+            Assert.Equal(1, afterZero.Count(row => row.ThreadId == "v9-later" && row.Canonical == 1));
+            Assert.Equal(1, afterZero.Count(row => row.ThreadId == "v9-later" && row.Canonical == 0));
+            Assert.Equal(4, afterZero.Count(row => row.Canonical == 1));
+            Assert.Equal(1, afterZero.Count(row => row.Canonical == 1 && row.ThreadId == "v9-later"));
+            Assert.Equal(zeroReplay.SemanticIdentity(),
+                afterZero.Single(row => row.ThreadId == "v9-later" && row.Canonical == 1).Identity);
+            Assert.Equal(live.SemanticIdentity(),
+                afterZero.Single(row => row.ThreadId == "v9-later" && row.Canonical == 0).Identity);
+            Assert.Equal(0L, migrated.GetSessionTotal("v9-later", "turn-later").Total);
+            Assert.Equal(12L, migrated.GetSessionTotal("v9-later", "turn-zero").Total);
+            var mixedStart = DateTimeOffset.Parse("2026-01-01T00:00:00Z", CultureInfo.InvariantCulture);
+            var mixedNow = mixedStart.AddHours(1);
+            Assert.Equal(41L, migrated.GetCycleTotal(mixedStart, mixedNow).Total);
+            Assert.Equal(24L, migrated.GetCycleTotalForThreads(mixedStart, mixedNow, new[] { "v9-parent" }).Total);
+            Assert.Equal(5L, migrated.GetCycleTotalForThreads(mixedStart, mixedNow, new[] { "v9-child" }).Total);
+            Assert.Equal(12L, migrated.GetCycleTotalForThreads(mixedStart, mixedNow, new[] { "v9-later" }).Total);
+            var mixedAggregates = migrated.LoadSessionAggregates(mixedNow);
+            var mixedSnapshot = new HudSnapshot(
+                new QuotaObservation(new QuotaBucket("codex", "Codex", 10, 10080, mixedNow.AddDays(7)),
+                    Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, mixedNow, false),
+                mixedAggregates, migrated.GetCycleTotal(mixedStart, mixedNow), mixedNow, false, "fresh",
+                Array.Empty<string>(), Array.Empty<HudEvent>(),
+                RunningCycleTotal: migrated.GetCycleTotalForThreads(mixedStart, mixedNow, new[] { "v9-parent" }));
+            var mixedRows = HudPresentation.BuildRows(mixedSnapshot);
+            Assert.Equal(41L, mixedRows.Single(row => row.ThreadId == "v9-parent").WorkTotal.Total);
+            Assert.Equal(5L, mixedRows.Single(row => row.ThreadId == "v9-child").WorkTotal.Total);
+            Assert.Equal(12L, mixedRows.Single(row => row.ThreadId == "v9-later").WorkTotal.Total);
+            Assert.Equal("自身 24 + 子任务 17",
+                mixedRows.Single(row => row.ThreadId == "v9-parent").WorkBreakdownText);
+            Assert.True(HudPresentation.BuildCollapsedText(mixedSnapshot)
+                .Contains("本周期 41 raw tokens", StringComparison.Ordinal));
+            Assert.True(HudPresentation.BuildFrame(mixedSnapshot).OverviewText.Contains(
+                "本额度周期全部会话合计：41 raw tokens", StringComparison.Ordinal));
+            var mixedFlags = DescribeLineageFlags(databasePath);
+            migrated.RebuildLineageCanonical();
+            DrainAggregates(migrated);
+            migrated.RebuildLineageCanonical();
+            DrainAggregates(migrated);
+            Assert.Equal(mixedFlags, DescribeLineageFlags(databasePath));
+            Assert.Equal(24L, migrated.GetSessionTotal("v9-parent").Total);
+            Assert.Equal(5L, migrated.GetSessionTotal("v9-child").Total);
+            Assert.Equal(12L, migrated.GetSessionTotal("v9-later").Total);
+            Assert.Equal(41L, migrated.GetCycleTotal(mixedStart, mixedNow).Total);
+            AssertNonNegativeAggregates(databasePath);
+        }
+
+        using var restarted = new UsageDatabase(databasePath);
+        DrainAggregates(restarted);
+        Assert.Equal(24L, restarted.GetSessionTotal("v9-parent").Total);
+        Assert.Equal(5L, restarted.GetSessionTotal("v9-child").Total);
+        Assert.Equal(12L, restarted.GetSessionTotal("v9-later").Total);
+        Assert.Equal(6L, restarted.GetSampleCount());
+        restarted.RebuildLineageCanonical();
+        DrainAggregates(restarted);
+        Assert.Equal(24L, restarted.GetSessionTotal("v9-parent").Total);
+        Assert.Equal(5L, restarted.GetSessionTotal("v9-child").Total);
+        Assert.Equal(12L, restarted.GetSessionTotal("v9-later").Total);
+        Assert.Equal(1, ReadLineageRows(databasePath).Count(row => row.ThreadId == "v9-later" && row.Canonical == 1));
+        Assert.True(!restarted.ContainsPrivacySentinel(Sentinel));
+
+        var extraPath = Path.Combine(directory, "alias-pair.db");
+        CreateSchemaV9AliasPairFixture(extraPath);
+        var t0 = DateTimeOffset.Parse("2026-01-01T00:00:00Z", CultureInfo.InvariantCulture);
+        using (var extra = new UsageDatabase(extraPath))
+        {
+            DrainAggregates(extra);
+            Assert.Equal(12L, extra.GetSessionTotal("early-root").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-root").Total);
+            extra.UpsertSession(new SessionMetadata("early-child", "Early child", null, null, null, null, null,
+                null, t0.AddMinutes(2), null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "early-root", AgentDepth: 1));
+            extra.UpsertSession(new SessionMetadata("move-child", "Move child", null, null, null, null, null,
+                null, t0.AddMinutes(20), null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "move-root", AgentDepth: 1));
+            DrainAggregates(extra);
+
+            Assert.True(extra.AcceptTokenSample("early-child", missing, t0.AddMinutes(1), t0.AddMinutes(1),
+                "turn-early-missing", null, null));
+            Assert.Equal(0L, extra.GetSessionTotal("early-root").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("early-child").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-root").Total);
+            Assert.True(extra.AcceptTokenSample("early-child", zeroed, t0.AddMinutes(2), t0.AddMinutes(2),
+                "turn-early-zero", null, null));
+            Assert.Equal(0L, extra.GetSessionTotal("early-root").Total);
+            Assert.Equal(24L, extra.GetSessionTotal("early-child").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-root").Total);
+            var earlyRows = ReadLineageRows(extraPath);
+            Assert.Equal(0, earlyRows.Single(row => row.ThreadId == "early-root").Canonical);
+            Assert.Equal(2, earlyRows.Count(row => row.ThreadId == "early-child" && row.Canonical == 1));
+            Assert.Equal(1, earlyRows.Count(row => row.ThreadId == "move-root" && row.Canonical == 1));
+
+            Assert.True(extra.AcceptTokenSample("move-child", zeroed, t0.AddMinutes(20), t0.AddMinutes(20),
+                "turn-move-zero", null, null));
+            Assert.Equal(12L, extra.GetSessionTotal("move-root").Total);
+            Assert.Equal(0L, extra.GetSessionTotal("move-child").Total);
+            Assert.Equal(0, ReadLineageRows(extraPath).Count(row => row.ThreadId == "move-child" && row.Canonical == 1));
+            Assert.True(extra.AcceptTokenSample("move-child", missing, t0.AddMinutes(10), t0.AddMinutes(10),
+                "turn-move-missing", null, null));
+            Assert.Equal(12L, extra.GetSessionTotal("move-root").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-child").Total);
+            Assert.Equal(0L, extra.GetSessionTotal("early-root").Total);
+            Assert.Equal(24L, extra.GetSessionTotal("early-child").Total);
+            var moved = ReadLineageRows(extraPath);
+            Assert.Equal(1, moved.Count(row => row.ThreadId == "move-root" && row.Canonical == 1));
+            Assert.Equal(1, moved.Count(row => row.ThreadId == "move-child" && row.Canonical == 1));
+            Assert.Equal(1, moved.Count(row => row.ThreadId == "move-child" && row.Canonical == 0));
+            Assert.Equal(zeroed.SemanticIdentity(),
+                moved.Single(row => row.ThreadId == "move-child" && row.Canonical == 1).Identity);
+            Assert.Equal(missing.SemanticIdentity(),
+                moved.Single(row => row.ThreadId == "move-child" && row.Canonical == 0).Identity);
+            Assert.Equal(2L, extra.GetSampleCount("move-child"));
+            Assert.Equal(2L, extra.GetFingerprintCount("move-child"));
+            var replayFlags = DescribeLineageFlags(extraPath);
+            var replayChild = extra.GetSessionTotal("move-child").Total;
+            var replayRoot = extra.GetSessionTotal("move-root").Total;
+            var replayZeroTurn = extra.GetSessionTotal("move-child", "turn-move-zero").Total;
+            var replayMissingTurn = extra.GetSessionTotal("move-child", "turn-move-missing").Total;
+            Assert.True(!extra.AcceptTokenSample("move-child", missing, t0.AddMinutes(11), t0.AddMinutes(11),
+                "turn-move-missing-dup", null, null));
+            Assert.Equal(2L, extra.GetSampleCount("move-child"));
+            Assert.Equal(2L, extra.GetFingerprintCount("move-child"));
+            Assert.Equal(replayFlags, DescribeLineageFlags(extraPath));
+            Assert.Equal(replayChild, extra.GetSessionTotal("move-child").Total);
+            Assert.Equal(replayRoot, extra.GetSessionTotal("move-root").Total);
+            Assert.Equal(replayZeroTurn, extra.GetSessionTotal("move-child", "turn-move-zero").Total);
+            Assert.Equal(replayMissingTurn, extra.GetSessionTotal("move-child", "turn-move-missing").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-child").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-root").Total);
+            Assert.Equal(1, ReadLineageRows(extraPath).Count(row => row.ThreadId == "move-child" && row.Canonical == 1));
+            Assert.Equal(1, ReadLineageRows(extraPath).Count(row => row.ThreadId == "move-child" && row.Canonical == 0));
+
+            Assert.True(missing.Fingerprint("move-sib") != missing.Fingerprint("move-child"));
+            extra.UpsertSession(new SessionMetadata("move-sib", "Move sibling", null, null, null, null, null,
+                null, t0.AddMinutes(11), null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "move-root", AgentDepth: 1));
+            DrainAggregates(extra);
+            Assert.True(extra.AcceptTokenSample("move-sib", missing, t0.AddMinutes(11), t0.AddMinutes(11),
+                "turn-move-sib-missing", null, null));
+            Assert.Equal(1L, extra.GetSampleCount("move-sib"));
+            Assert.Equal(1L, extra.GetFingerprintCount("move-sib"));
+            Assert.Equal(2L, extra.GetSampleCount("move-child"));
+            Assert.Equal(0L, extra.GetSessionTotal("move-sib").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-child").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-root").Total);
+            Assert.Equal(0L, extra.GetSessionTotal("early-root").Total);
+            Assert.Equal(24L, extra.GetSessionTotal("early-child").Total);
+            var afterSibling = ReadLineageRows(extraPath);
+            var sibling = afterSibling.Single(row => row.ThreadId == "move-sib");
+            Assert.Equal(0, sibling.Canonical);
+            Assert.Equal("move-root", sibling.Root);
+            Assert.Equal(missing.SemanticIdentity(), sibling.Identity);
+            Assert.Equal(2, afterSibling.Count(row =>
+                row.Root == "move-root" && row.Identity == missing.SemanticIdentity()));
+            Assert.Equal(0, afterSibling.Count(row =>
+                row.Root == "move-root" && row.Identity == missing.SemanticIdentity() && row.Canonical == 1));
+            Assert.Equal(1, afterSibling.Count(row => row.ThreadId == "move-child" && row.Canonical == 1));
+            Assert.Equal(zeroed.SemanticIdentity(),
+                afterSibling.Single(row => row.ThreadId == "move-child" && row.Canonical == 1).Identity);
+            Assert.Equal(missing.SemanticIdentity(),
+                afterSibling.Single(row => row.ThreadId == "move-child" && row.Canonical == 0).Identity);
+            Assert.True(afterSibling.Single(row => row.ThreadId == "move-child" && row.Canonical == 0).Id <
+                        sibling.Id);
+            Assert.Equal(1, afterSibling.Count(row => row.Root == "move-root" && row.Canonical == 1 &&
+                row.Material.StartsWith(TokenUsageSnapshot.LineageSemanticPrefix + "|", StringComparison.Ordinal)));
+            Assert.Equal(1, afterSibling.Count(row => row.Root == "move-root" && row.Canonical == 1 &&
+                row.Material.StartsWith(TokenUsageSnapshot.LineageSemanticLegacyPrefix + "|",
+                    StringComparison.Ordinal)));
+            Assert.Equal(0L, extra.GetSessionTotal("move-sib", "turn-move-sib-missing").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-child", "turn-move-zero").Total);
+            Assert.Equal(0L, extra.GetSessionTotal("move-child", "turn-move-missing").Total);
+            AssertNonNegativeAggregates(extraPath);
+
+            var pairNow = t0.AddHours(1);
+            Assert.Equal(48L, extra.GetCycleTotal(t0, pairNow).Total);
+            Assert.Equal(24L, extra.GetCycleTotalForThreads(t0, pairNow, new[] { "early-child" }).Total);
+            Assert.Equal(12L, extra.GetCycleTotalForThreads(t0, pairNow, new[] { "move-root" }).Total);
+            Assert.Equal(12L, extra.GetCycleTotalForThreads(t0, pairNow, new[] { "move-child" }).Total);
+            Assert.Equal(0L, extra.GetCycleTotalForThreads(t0, pairNow, new[] { "move-sib" }).Total);
+            var pairAggregates = extra.LoadSessionAggregates(pairNow);
+            var pairSnapshot = new HudSnapshot(
+                new QuotaObservation(new QuotaBucket("codex", "Codex", 10, 10080, pairNow.AddDays(7)),
+                    Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, pairNow, false),
+                pairAggregates, extra.GetCycleTotal(t0, pairNow), pairNow, false, "fresh",
+                Array.Empty<string>(), Array.Empty<HudEvent>(),
+                RunningCycleTotal: extra.GetCycleTotalForThreads(t0, pairNow, new[] { "early-root" }));
+            var pairRows = HudPresentation.BuildRows(pairSnapshot);
+            Assert.Equal(24L, pairRows.Single(row => row.ThreadId == "early-root").WorkTotal.Total);
+            Assert.Equal(24L, pairRows.Single(row => row.ThreadId == "early-child").WorkTotal.Total);
+            Assert.Equal(24L, pairRows.Single(row => row.ThreadId == "move-root").WorkTotal.Total);
+            Assert.Equal(12L, pairRows.Single(row => row.ThreadId == "move-child").WorkTotal.Total);
+            Assert.Equal(0L, pairRows.Single(row => row.ThreadId == "move-sib").WorkTotal.Total);
+            Assert.Equal("自身 0 + 子任务 24",
+                pairRows.Single(row => row.ThreadId == "early-root").WorkBreakdownText);
+            Assert.Equal("自身 12 + 子任务 12",
+                pairRows.Single(row => row.ThreadId == "move-root").WorkBreakdownText);
+            Assert.True(HudPresentation.BuildCollapsedText(pairSnapshot)
+                .Contains("本周期 48 raw tokens", StringComparison.Ordinal));
+
+            var extraFlags = DescribeLineageFlags(extraPath);
+            extra.RebuildLineageCanonical();
+            DrainAggregates(extra);
+            extra.RebuildLineageCanonical();
+            DrainAggregates(extra);
+            Assert.Equal(extraFlags, DescribeLineageFlags(extraPath));
+            Assert.Equal(0L, extra.GetSessionTotal("early-root").Total);
+            Assert.Equal(24L, extra.GetSessionTotal("early-child").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-root").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-child").Total);
+            Assert.Equal(0L, extra.GetSessionTotal("move-sib").Total);
+            Assert.Equal(48L, extra.GetCycleTotal(t0, pairNow).Total);
+            AssertNonNegativeAggregates(extraPath);
+
+            extra.UpsertSession(new SessionMetadata("other-root", "Other", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            extra.UpsertSession(new SessionMetadata("early-child", "Early child", null, null, null, null, null,
+                null, t0.AddMinutes(2), null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "other-root", AgentDepth: 1));
+            DrainAggregates(extra);
+            Assert.Equal(12L, extra.GetSessionTotal("early-root").Total);
+            Assert.Equal(24L, extra.GetSessionTotal("early-child").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-root").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-child").Total);
+            Assert.Equal(0L, extra.GetSessionTotal("move-sib").Total);
+            var reparented = ReadLineageRows(extraPath);
+            Assert.Equal(1, reparented.Single(row => row.ThreadId == "early-root").Canonical);
+            Assert.Equal(2, reparented.Count(row => row.ThreadId == "early-child" && row.Canonical == 1));
+            Assert.True(reparented.Where(row => row.ThreadId == "early-child").All(row => row.Root == "other-root"));
+            Assert.True(reparented.Where(row => row.ThreadId == "move-child" || row.ThreadId == "move-root" ||
+                    row.ThreadId == "move-sib")
+                .All(row => row.Root == "move-root"));
+            var reparentSnapshot = new HudSnapshot(
+                new QuotaObservation(new QuotaBucket("codex", "Codex", 10, 10080, pairNow.AddDays(7)),
+                    Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, pairNow, false),
+                extra.LoadSessionAggregates(pairNow), extra.GetCycleTotal(t0, pairNow), pairNow, false, "fresh",
+                Array.Empty<string>(), Array.Empty<HudEvent>(),
+                RunningCycleTotal: extra.GetCycleTotalForThreads(t0, pairNow, new[] { "other-root" }));
+            var reparentRows = HudPresentation.BuildRows(reparentSnapshot);
+            Assert.Equal(12L, reparentRows.Single(row => row.ThreadId == "early-root").WorkTotal.Total);
+            Assert.Equal(24L, reparentRows.Single(row => row.ThreadId == "other-root").WorkTotal.Total);
+            Assert.Equal(24L, reparentRows.Single(row => row.ThreadId == "move-root").WorkTotal.Total);
+            Assert.Equal(60L, extra.GetCycleTotal(t0, pairNow).Total);
+
+            extra.UpsertSession(new SessionMetadata("early-child", "Early child", null, null, null, null, null,
+                null, t0.AddMinutes(2), null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "early-root", AgentDepth: 1));
+            DrainAggregates(extra);
+            Assert.Equal(0L, extra.GetSessionTotal("early-root").Total);
+            Assert.Equal(24L, extra.GetSessionTotal("early-child").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-root").Total);
+            Assert.Equal(12L, extra.GetSessionTotal("move-child").Total);
+            Assert.Equal(0L, extra.GetSessionTotal("move-sib").Total);
+            Assert.Equal(0, ReadLineageRows(extraPath).Single(row => row.ThreadId == "early-root").Canonical);
+            Assert.Equal(2, ReadLineageRows(extraPath).Count(row => row.ThreadId == "early-child" && row.Canonical == 1));
+            AssertNonNegativeAggregates(extraPath);
+            Assert.True(!extra.ContainsPrivacySentinel(Sentinel));
+        }
+
+        using var extraRestart = new UsageDatabase(extraPath);
+        DrainAggregates(extraRestart);
+        extraRestart.RebuildLineageCanonical();
+        DrainAggregates(extraRestart);
+        Assert.Equal(0L, extraRestart.GetSessionTotal("early-root").Total);
+        Assert.Equal(24L, extraRestart.GetSessionTotal("early-child").Total);
+        Assert.Equal(12L, extraRestart.GetSessionTotal("move-root").Total);
+        Assert.Equal(12L, extraRestart.GetSessionTotal("move-child").Total);
+        Assert.Equal(0L, extraRestart.GetSessionTotal("move-sib").Total);
+        Assert.Equal(48L, extraRestart.GetCycleTotal(t0, t0.AddHours(1)).Total);
+        Assert.Equal(0, ReadLineageRows(extraPath).Single(row => row.ThreadId == "early-root").Canonical);
+        Assert.Equal(2, ReadLineageRows(extraPath).Count(row => row.ThreadId == "early-child" && row.Canonical == 1));
+        Assert.Equal(1, ReadLineageRows(extraPath).Count(row => row.ThreadId == "move-child" && row.Canonical == 1));
+        Assert.Equal(0, ReadLineageRows(extraPath).Single(row => row.ThreadId == "move-sib").Canonical);
+        Assert.Equal(zeroed.SemanticIdentity(), ReadLineageRows(extraPath)
+            .Single(row => row.ThreadId == "move-child" && row.Canonical == 1).Identity);
+        AssertNonNegativeAggregates(extraPath);
+        Assert.True(!extraRestart.ContainsPrivacySentinel(Sentinel));
+        AssertSchemaV9ExplicitBoundaryMigration(runRoot);
+    }
+
+    private static void AssertSchemaV9ExplicitBoundaryMigration(string runRoot)
+    {
+        var directory = Path.Combine(runRoot, "v9-explicit-context");
+        Directory.CreateDirectory(directory);
+        var databasePath = Path.Combine(directory, "usage.db");
+        CreateSchemaV9ExplicitContextFixture(databasePath);
+        Assert.True(!File.Exists(Path.Combine(directory, "sessions")));
+        const string threadId = "v9-explicit-context";
+        const long window = 258_400;
+        const long start = 1_786_320_000;
+        SessionContextMetrics Capture(UsageDatabase database)
+        {
+            DrainAggregates(database);
+            return database.LoadSessionContextMetrics()[threadId];
+        }
+
+        SessionContextMetrics first;
+        using (var migrated = new UsageDatabase(databasePath))
+        {
+            first = Capture(migrated);
+            AssertExplicitContinuationContract(first, window);
+            Assert.Equal(3L, CountContextBaselines(databasePath, threadId, "explicit"));
+            Assert.Equal(0L, CountContextBaselines(databasePath, threadId, "heuristic"));
+            migrated.RebuildLineageCanonical();
+            var second = Capture(migrated);
+            AssertExplicitContinuationContract(second, window);
+            migrated.RebuildLineageCanonical();
+            var third = Capture(migrated);
+            AssertExplicitContinuationContract(third, window);
+            Assert.Equal(3L, CountContextBaselines(databasePath, threadId, "explicit"));
+            Assert.Equal(first.PostCompactionInputTokens, third.PostCompactionInputTokens);
+            Assert.Equal(first.PostCompactionSampleCount, third.PostCompactionSampleCount);
+            Assert.Equal(first.BaselineTrendPercentagePoints, third.BaselineTrendPercentagePoints);
+            AssertNonNegativeAggregates(databasePath);
+            Assert.True(!migrated.ContainsPrivacySentinel(Sentinel));
+        }
+
+        using var restarted = new UsageDatabase(databasePath);
+        var restored = Capture(restarted);
+        AssertExplicitContinuationContract(restored, window);
+        Assert.Equal(first.PostCompactionInputTokens, restored.PostCompactionInputTokens);
+        Assert.Equal(3L, CountContextBaselines(databasePath, threadId, "explicit"));
+        var row = ContinuationRow(threadId, restored, DateTimeOffset.FromUnixTimeSeconds(start + 122));
+        Assert.Equal("B-", row.ContinuationGradeText);
+        Assert.Equal("建议当前完整工作包结束后续接", row.ContinuationAdviceText);
+        Assert.True(row.PostCompactionSourceText.Contains("官方压缩边界", StringComparison.Ordinal));
+        Assert.True(!restarted.ContainsPrivacySentinel(Sentinel));
+    }
+
+    private static void AssertExplicitContinuationContract(SessionContextMetrics metrics, long window)
+    {
+        Assert.Equal(120_000L, metrics.PostCompactionInputTokens);
+        Assert.Equal(window, metrics.PostCompactionWindowTokens);
+        Assert.Equal(3, metrics.PostCompactionSampleCount);
+        Assert.True(metrics.UsesExplicitCompactionBoundaries);
+        Assert.Near(46.439, metrics.PostCompactionPercent!.Value, 0.01);
+        Assert.Near(10.449, metrics.BaselineTrendPercentagePoints!.Value, 0.01);
+        Assert.Near(-50, metrics.TurnRunwayChangePercent!.Value, 0.01);
+        Assert.Near(-27.273, metrics.TokenRunwayChangePercent!.Value, 0.01);
+    }
+
+    private static SessionDisplayRow ContinuationRow(string threadId, SessionContextMetrics metrics,
+        DateTimeOffset activity) =>
+        new(threadId, "上下文测试", threadId[..Math.Min(12, threadId.Length)], "lead",
+            "test", "gpt-test", "Standard", "运行中", "08-10 08:00:00", activity,
+            Usage(1), "最近一轮", "reliable-turn", Usage(2_100_000_000), true, false,
+            true, SessionKind.Primary, metrics);
+
+    private static void CreateSchemaV9ExplicitContextFixture(string databasePath)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE schema_info(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE event_fingerprints(
+                fingerprint TEXT PRIMARY KEY, thread_id TEXT NOT NULL, first_seen_utc TEXT NOT NULL,
+                last_seen_utc TEXT NOT NULL, duplicate_count INTEGER NOT NULL DEFAULT 0,
+                disposition TEXT NOT NULL DEFAULT 'accepted', diagnostic_code TEXT);
+            CREATE TABLE token_samples(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL UNIQUE,
+                thread_id TEXT NOT NULL, input_tokens INTEGER NOT NULL, raw_input_tokens INTEGER NOT NULL,
+                cached_input_tokens INTEGER NOT NULL, cache_write_input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL, reasoning_output_tokens INTEGER NOT NULL,
+                cumulative_input_tokens INTEGER NOT NULL, cumulative_output_tokens INTEGER NOT NULL,
+                cumulative_total_tokens INTEGER NOT NULL, canonical_total_tokens INTEGER NOT NULL,
+                reported_total_tokens INTEGER NOT NULL, event_time_utc TEXT, event_time_ticks INTEGER,
+                observed_at_utc TEXT NOT NULL, source_key TEXT, source_generation INTEGER NOT NULL DEFAULT 0,
+                source_offset INTEGER, turn_key TEXT, model TEXT, service_tier TEXT,
+                confidence TEXT NOT NULL, turn_confidence TEXT NOT NULL DEFAULT 'unavailable',
+                event_order_confidence TEXT NOT NULL DEFAULT 'unavailable', context_window INTEGER);
+            CREATE TABLE sessions(
+                thread_id TEXT PRIMARY KEY, display_name TEXT, role TEXT, nickname TEXT, project_tag TEXT,
+                model TEXT, reasoning_effort TEXT, service_tier TEXT,
+                service_tier_source TEXT NOT NULL DEFAULT 'unavailable', last_activity_utc TEXT,
+                status TEXT NOT NULL, current_turn_key TEXT, current_turn_reliable INTEGER NOT NULL DEFAULT 0,
+                turn_sequence INTEGER NOT NULL DEFAULT 0, turn_open INTEGER NOT NULL DEFAULT 0,
+                pinned INTEGER NOT NULL DEFAULT 0, session_kind TEXT NOT NULL DEFAULT 'Unknown',
+                session_surface TEXT NOT NULL DEFAULT 'Unknown', parent_thread_id TEXT, agent_depth INTEGER);
+            CREATE TABLE structural_events (
+                event_identity TEXT PRIMARY KEY, base_identity TEXT NOT NULL, thread_id TEXT NOT NULL,
+                event_kind TEXT NOT NULL, association_key TEXT, event_time_utc TEXT,
+                source_identity_hash TEXT NOT NULL, source_generation INTEGER NOT NULL,
+                source_offset INTEGER NOT NULL, occurrence INTEGER NOT NULL);
+            INSERT INTO schema_info(key, value) VALUES
+                ('version', '9'), ('aggregate_schema_version', '5'),
+                ('windows_file_id_128', '1'), ('token_tuple_oracle_migration', '2'),
+                ('deterministic_turn_keys', '1'), ('sample_source_offsets', '1'),
+                ('context_capture_version', '2'), ('private_source_identity_v2', 'logical_complete'),
+                ('private_source_scrub_v2', 'complete');
+            INSERT INTO sessions(thread_id, display_name, last_activity_utc, status, session_kind,
+                session_surface, model)
+            VALUES ('v9-explicit-context', 'Explicit', '2026-08-10T00:02:02.0000000+00:00', 'Idle',
+                'Primary', 'App', 'gpt-test');
+            """;
+        command.ExecuteNonQuery();
+
+        const string threadId = "v9-explicit-context";
+        const string sourceKey = "win-v2:v9-explicit-01";
+        const long window = 258_400;
+        const long start = 1_786_320_000;
+        void InsertSample(string fingerprint, long lastIn, long cumIn, long unix, long offset, string turn)
+        {
+            var time = DateTimeOffset.FromUnixTimeSeconds(unix);
+            var eventTime = time.ToString("O");
+            using var insert = connection.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO event_fingerprints(fingerprint, thread_id, first_seen_utc, last_seen_utc, duplicate_count, disposition)
+                VALUES ($fingerprint, $thread, $observed, $observed, 0, 'accepted');
+                INSERT INTO token_samples(fingerprint, thread_id, input_tokens, raw_input_tokens,
+                    cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens,
+                    cumulative_input_tokens, cumulative_output_tokens, cumulative_total_tokens,
+                    canonical_total_tokens, reported_total_tokens, event_time_utc, event_time_ticks,
+                    observed_at_utc, source_key, source_generation, source_offset, turn_key, model, confidence,
+                    turn_confidence, event_order_confidence, context_window)
+                VALUES ($fingerprint, $thread, $last_in, $last_in, 0, 0, 0, 0,
+                    $cum_in, 0, $cum_in, $last_in, $last_in, $event_time, $ticks,
+                    $observed, $source, 0, $offset, $turn, 'gpt-test', 'trusted', 'reliable', 'reliable', $window);
+                """;
+            insert.Parameters.AddWithValue("$fingerprint", fingerprint);
+            insert.Parameters.AddWithValue("$thread", threadId);
+            insert.Parameters.AddWithValue("$last_in", lastIn);
+            insert.Parameters.AddWithValue("$cum_in", cumIn);
+            insert.Parameters.AddWithValue("$event_time", eventTime);
+            insert.Parameters.AddWithValue("$ticks", time.UtcTicks);
+            insert.Parameters.AddWithValue("$observed", eventTime);
+            insert.Parameters.AddWithValue("$source", sourceKey);
+            insert.Parameters.AddWithValue("$offset", offset);
+            insert.Parameters.AddWithValue("$turn", turn);
+            insert.Parameters.AddWithValue("$window", window);
+            insert.ExecuteNonQuery();
+        }
+
+        void InsertCompact(string identity, long unix, long offset, string turn)
+        {
+            var time = DateTimeOffset.FromUnixTimeSeconds(unix);
+            using var insert = connection.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO structural_events(event_identity, base_identity, thread_id, event_kind,
+                    association_key, event_time_utc, source_identity_hash, source_generation,
+                    source_offset, occurrence)
+                VALUES ($id, $id, $thread, 'event_msg:context_compacted', $turn, $event_time,
+                    $source, 0, $offset, 1);
+                """;
+            insert.Parameters.AddWithValue("$id", identity);
+            insert.Parameters.AddWithValue("$thread", threadId);
+            insert.Parameters.AddWithValue("$turn", turn);
+            insert.Parameters.AddWithValue("$event_time", time.ToString("O"));
+            insert.Parameters.AddWithValue("$source", sourceKey);
+            insert.Parameters.AddWithValue("$offset", offset);
+            insert.ExecuteNonQuery();
+        }
+
+        InsertCompact("v9-compact-1", start + 1, 10, "turn-1");
+        InsertSample(new string('1', 64), 105_000, 1_105_000, start + 2, 20, "turn-1");
+        InsertSample(new string('2', 64), 60_000, 1_165_000, start + 21, 40, "turn-2");
+        InsertCompact("v9-compact-2", start + 61, 50, "turn-3");
+        InsertSample(new string('3', 64), 120_000, 1_285_000, start + 62, 60, "turn-3");
+        InsertCompact("v9-compact-3", start + 121, 70, "turn-4");
+        InsertSample(new string('4', 64), 132_000, 1_417_000, start + 122, 80, "turn-4");
+    }
+
+    private static void CreateSchemaV9LineageFixture(string databasePath)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE schema_info(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE event_fingerprints(
+                fingerprint TEXT PRIMARY KEY, thread_id TEXT NOT NULL, first_seen_utc TEXT NOT NULL,
+                last_seen_utc TEXT NOT NULL, duplicate_count INTEGER NOT NULL DEFAULT 0,
+                disposition TEXT NOT NULL DEFAULT 'accepted', diagnostic_code TEXT);
+            CREATE TABLE token_samples(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL UNIQUE,
+                thread_id TEXT NOT NULL, input_tokens INTEGER NOT NULL, raw_input_tokens INTEGER NOT NULL,
+                cached_input_tokens INTEGER NOT NULL, cache_write_input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL, reasoning_output_tokens INTEGER NOT NULL,
+                cumulative_input_tokens INTEGER NOT NULL, cumulative_output_tokens INTEGER NOT NULL,
+                cumulative_total_tokens INTEGER NOT NULL, canonical_total_tokens INTEGER NOT NULL,
+                reported_total_tokens INTEGER NOT NULL, event_time_utc TEXT, event_time_ticks INTEGER,
+                observed_at_utc TEXT NOT NULL, source_key TEXT, source_generation INTEGER NOT NULL DEFAULT 0,
+                source_offset INTEGER, turn_key TEXT, model TEXT, service_tier TEXT,
+                confidence TEXT NOT NULL, turn_confidence TEXT NOT NULL DEFAULT 'unavailable',
+                event_order_confidence TEXT NOT NULL DEFAULT 'unavailable', context_window INTEGER);
+            CREATE TABLE sessions(
+                thread_id TEXT PRIMARY KEY, display_name TEXT, role TEXT, nickname TEXT, project_tag TEXT,
+                model TEXT, reasoning_effort TEXT, service_tier TEXT,
+                service_tier_source TEXT NOT NULL DEFAULT 'unavailable', last_activity_utc TEXT,
+                status TEXT NOT NULL, current_turn_key TEXT, current_turn_reliable INTEGER NOT NULL DEFAULT 0,
+                turn_sequence INTEGER NOT NULL DEFAULT 0, turn_open INTEGER NOT NULL DEFAULT 0,
+                pinned INTEGER NOT NULL DEFAULT 0, session_kind TEXT NOT NULL DEFAULT 'Unknown',
+                session_surface TEXT NOT NULL DEFAULT 'Unknown', parent_thread_id TEXT, agent_depth INTEGER);
+            INSERT INTO schema_info(key, value) VALUES
+                ('version', '9'), ('aggregate_schema_version', '5'),
+                ('windows_file_id_128', '1'), ('token_tuple_oracle_migration', '2'),
+                ('deterministic_turn_keys', '1'), ('sample_source_offsets', '1'),
+                ('context_capture_version', '2'), ('private_source_identity_v2', 'logical_complete'),
+                ('private_source_scrub_v2', 'complete');
+            INSERT INTO sessions(thread_id, display_name, last_activity_utc, status, session_kind,
+                session_surface, parent_thread_id, agent_depth)
+            VALUES
+                ('v9-parent', 'Parent', '2026-01-01T00:00:00.0000000+00:00', 'Idle', 'Primary', 'App', NULL, NULL),
+                ('v9-child', 'Child', '2026-01-01T00:01:00.0000000+00:00', 'Idle', 'InternalTask',
+                    'InternalTask', 'v9-parent', 1);
+            """;
+        command.ExecuteNonQuery();
+
+        void InsertSample(string threadId, string fingerprint, long lastIn, long lastOut, long cumIn, long cumOut,
+            string eventTime, long ticks, string turnKey, long offset)
+        {
+            using var insert = connection.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO event_fingerprints(fingerprint, thread_id, first_seen_utc, last_seen_utc, duplicate_count, disposition)
+                VALUES ($fingerprint, $thread, $observed, $observed, 0, 'accepted');
+                INSERT INTO token_samples(fingerprint, thread_id, input_tokens, raw_input_tokens,
+                    cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens,
+                    cumulative_input_tokens, cumulative_output_tokens, cumulative_total_tokens,
+                    canonical_total_tokens, reported_total_tokens, event_time_utc, event_time_ticks,
+                    observed_at_utc, source_key, source_generation, source_offset, turn_key, confidence,
+                    turn_confidence, event_order_confidence, context_window)
+                VALUES ($fingerprint, $thread, $last_in, $last_in, 0, 0, $last_out, 0,
+                    $cum_in, $cum_out, $cum_total, $last_total, $last_total, $event_time, $ticks,
+                    $observed, $source, 0, $offset, $turn, 'trusted', 'reliable', 'reliable', 128000);
+                """;
+            insert.Parameters.AddWithValue("$fingerprint", fingerprint);
+            insert.Parameters.AddWithValue("$thread", threadId);
+            insert.Parameters.AddWithValue("$last_in", lastIn);
+            insert.Parameters.AddWithValue("$last_out", lastOut);
+            insert.Parameters.AddWithValue("$cum_in", cumIn);
+            insert.Parameters.AddWithValue("$cum_out", cumOut);
+            insert.Parameters.AddWithValue("$cum_total", cumIn + cumOut);
+            insert.Parameters.AddWithValue("$last_total", lastIn + lastOut);
+            insert.Parameters.AddWithValue("$event_time", eventTime);
+            insert.Parameters.AddWithValue("$ticks", ticks);
+            insert.Parameters.AddWithValue("$observed", eventTime);
+            insert.Parameters.AddWithValue("$source", "win-v2:" + fingerprint[..16]);
+            insert.Parameters.AddWithValue("$offset", offset);
+            insert.Parameters.AddWithValue("$turn", turnKey);
+            insert.ExecuteNonQuery();
+        }
+
+        var t0 = DateTimeOffset.Parse("2026-01-01T00:00:00Z", CultureInfo.InvariantCulture);
+        var t1 = t0.AddMinutes(1);
+        InsertSample("v9-parent", new string('a', 64), 10, 2, 10, 2, t0.ToString("O"), t0.UtcTicks, "turn-p", 10);
+        InsertSample("v9-parent", new string('b', 64), 10, 2, 20, 4, t0.AddSeconds(30).ToString("O"),
+            t0.AddSeconds(30).UtcTicks, "turn-p", 20);
+        InsertSample("v9-child", new string('c', 64), 10, 2, 20, 4, t1.ToString("O"), t1.UtcTicks, "turn-c", 10);
+        InsertSample("v9-child", new string('d', 64), 5, 0, 25, 4, t1.AddSeconds(10).ToString("O"),
+            t1.AddSeconds(10).UtcTicks, "turn-c", 20);
+    }
+
+    private static void CreateSchemaV9AliasPairFixture(string databasePath)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            CREATE TABLE schema_info(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE event_fingerprints(
+                fingerprint TEXT PRIMARY KEY, thread_id TEXT NOT NULL, first_seen_utc TEXT NOT NULL,
+                last_seen_utc TEXT NOT NULL, duplicate_count INTEGER NOT NULL DEFAULT 0,
+                disposition TEXT NOT NULL DEFAULT 'accepted', diagnostic_code TEXT);
+            CREATE TABLE token_samples(
+                id INTEGER PRIMARY KEY AUTOINCREMENT, fingerprint TEXT NOT NULL UNIQUE,
+                thread_id TEXT NOT NULL, input_tokens INTEGER NOT NULL, raw_input_tokens INTEGER NOT NULL,
+                cached_input_tokens INTEGER NOT NULL, cache_write_input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL, reasoning_output_tokens INTEGER NOT NULL,
+                cumulative_input_tokens INTEGER NOT NULL, cumulative_output_tokens INTEGER NOT NULL,
+                cumulative_total_tokens INTEGER NOT NULL, canonical_total_tokens INTEGER NOT NULL,
+                reported_total_tokens INTEGER NOT NULL, event_time_utc TEXT, event_time_ticks INTEGER,
+                observed_at_utc TEXT NOT NULL, source_key TEXT, source_generation INTEGER NOT NULL DEFAULT 0,
+                source_offset INTEGER, turn_key TEXT, model TEXT, service_tier TEXT,
+                confidence TEXT NOT NULL, turn_confidence TEXT NOT NULL DEFAULT 'unavailable',
+                event_order_confidence TEXT NOT NULL DEFAULT 'unavailable', context_window INTEGER);
+            CREATE TABLE sessions(
+                thread_id TEXT PRIMARY KEY, display_name TEXT, role TEXT, nickname TEXT, project_tag TEXT,
+                model TEXT, reasoning_effort TEXT, service_tier TEXT,
+                service_tier_source TEXT NOT NULL DEFAULT 'unavailable', last_activity_utc TEXT,
+                status TEXT NOT NULL, current_turn_key TEXT, current_turn_reliable INTEGER NOT NULL DEFAULT 0,
+                turn_sequence INTEGER NOT NULL DEFAULT 0, turn_open INTEGER NOT NULL DEFAULT 0,
+                pinned INTEGER NOT NULL DEFAULT 0, session_kind TEXT NOT NULL DEFAULT 'Unknown',
+                session_surface TEXT NOT NULL DEFAULT 'Unknown', parent_thread_id TEXT, agent_depth INTEGER);
+            INSERT INTO schema_info(key, value) VALUES
+                ('version', '9'), ('aggregate_schema_version', '5'),
+                ('windows_file_id_128', '1'), ('token_tuple_oracle_migration', '2'),
+                ('deterministic_turn_keys', '1'), ('sample_source_offsets', '1'),
+                ('context_capture_version', '2'), ('private_source_identity_v2', 'logical_complete'),
+                ('private_source_scrub_v2', 'complete');
+            INSERT INTO sessions(thread_id, display_name, last_activity_utc, status, session_kind,
+                session_surface, parent_thread_id, agent_depth)
+            VALUES
+                ('early-root', 'Early', '2026-01-01T00:10:00.0000000+00:00', 'Idle', 'Primary', 'App', NULL, NULL),
+                ('move-root', 'Move', '2026-01-01T00:00:00.0000000+00:00', 'Idle', 'Primary', 'App', NULL, NULL);
+            """;
+        command.ExecuteNonQuery();
+
+        void InsertSample(string threadId, string fingerprint, string eventTime, long ticks)
+        {
+            using var insert = connection.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO event_fingerprints(fingerprint, thread_id, first_seen_utc, last_seen_utc, duplicate_count, disposition)
+                VALUES ($fingerprint, $thread, $observed, $observed, 0, 'accepted');
+                INSERT INTO token_samples(fingerprint, thread_id, input_tokens, raw_input_tokens,
+                    cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens,
+                    cumulative_input_tokens, cumulative_output_tokens, cumulative_total_tokens,
+                    canonical_total_tokens, reported_total_tokens, event_time_utc, event_time_ticks,
+                    observed_at_utc, source_key, source_generation, source_offset, turn_key, confidence,
+                    turn_confidence, event_order_confidence, context_window)
+                VALUES ($fingerprint, $thread, 10, 10, 0, 0, 2, 0,
+                    10, 2, 12, 12, 12, $event_time, $ticks,
+                    $observed, $source, 0, 10, 'turn-p', 'trusted', 'reliable', 'reliable', 128000);
+                """;
+            insert.Parameters.AddWithValue("$fingerprint", fingerprint);
+            insert.Parameters.AddWithValue("$thread", threadId);
+            insert.Parameters.AddWithValue("$event_time", eventTime);
+            insert.Parameters.AddWithValue("$ticks", ticks);
+            insert.Parameters.AddWithValue("$observed", eventTime);
+            insert.Parameters.AddWithValue("$source", "win-v2:" + fingerprint[..16]);
+            insert.ExecuteNonQuery();
+        }
+
+        var early = DateTimeOffset.Parse("2026-01-01T00:10:00Z", CultureInfo.InvariantCulture);
+        var move = DateTimeOffset.Parse("2026-01-01T00:00:00Z", CultureInfo.InvariantCulture);
+        InsertSample("early-root", new string('e', 64), early.ToString("O"), early.UtcTicks);
+        InsertSample("move-root", new string('f', 64), move.ToString("O"), move.UtcTicks);
+    }
+
+    private static void AssertCommitScanLateParentMaterialization(string runRoot)
+    {
+        var directory = Path.Combine(runRoot, "lineage-timing-commit-scan");
+        Directory.CreateDirectory(directory);
+        var databasePath = Path.Combine(directory, "usage.db");
+        var cycleStart = DateTimeOffset.Parse("2026-05-01T01:00:00Z", CultureInfo.InvariantCulture);
+        var cycleEnd = cycleStart.AddHours(1);
+        var ancestor = LineageSnapshot(10, 2, 10, 2);
+        var tail = LineageSnapshot(13, 3, 3, 1);
+        var parentUnix = cycleStart.AddMinutes(1).ToUnixTimeSeconds();
+        var parentPath = Path.Combine(directory, "scan-parent.jsonl");
+        File.WriteAllText(parentPath, TokenLine("scan-parent", parentUnix, 10, 2, 10, 2) + "\n",
+            new UTF8Encoding(false));
+        var unrelatedPath = Path.Combine(directory, "unrelated-root.jsonl");
+        File.WriteAllText(unrelatedPath, TokenLine("unrelated-root", parentUnix + 30, 20, 1, 20, 1) + "\n",
+            new UTF8Encoding(false));
+
+        using (var database = new UsageDatabase(databasePath))
+        {
+            database.UpsertSession(new SessionMetadata("scan-child", "ScanChild", null, null, null, null, null,
+                null, cycleStart, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "scan-parent", AgentDepth: 1));
+            Assert.True(database.AcceptTokenSample("scan-child", ancestor, cycleStart.AddMinutes(8),
+                cycleStart.AddMinutes(8), "turn-late", null, null));
+            Assert.True(database.AcceptTokenSample("scan-child", tail, cycleStart.AddMinutes(9),
+                cycleStart.AddMinutes(9), "turn-late", null, null));
+            Assert.Equal(16L, database.GetSessionTotal("scan-child").Total);
+            Assert.True(database.IsAggregateRebuildComplete);
+
+            var indexer = new RolloutIndexer(database);
+            var parentScan = indexer.ScanFile(parentPath, "sessions/scan-parent.jsonl", "scan-parent");
+            Assert.Equal(1, parentScan.AcceptedSamples);
+            Assert.True(!database.IsAggregateRebuildComplete);
+            var pending = new HudSnapshot(
+                new QuotaObservation(new QuotaBucket("codex", "Codex", 10, 10080, cycleEnd.AddDays(6)),
+                    Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, cycleStart, false),
+                Array.Empty<SessionAggregate>(), null, cycleStart, true, "索引中（统计迁移）",
+                Array.Empty<string>(), AggregateMigrationPending: true);
+            Assert.True(HudPresentation.BuildCollapsedText(pending).Contains("索引中", StringComparison.Ordinal));
+            Assert.True(HudPresentation.BuildFrame(pending).FreshnessText.Contains("索引中", StringComparison.Ordinal));
+            DrainAggregates(database);
+
+            Assert.Equal(12L, database.GetSessionTotal("scan-parent").Total);
+            Assert.Equal(4L, database.GetSessionTotal("scan-child").Total);
+            Assert.Equal(4L, database.GetSessionTotal("scan-child", "turn-late").Total);
+            Assert.Equal(16L, database.GetCycleTotal(cycleStart, cycleEnd).Total);
+            Assert.Equal(12L, database.GetCycleTotalForThreads(cycleStart, cycleEnd, new[] { "scan-parent" }).Total);
+            Assert.Equal(4L, database.GetCycleTotalForThreads(cycleStart, cycleEnd, new[] { "scan-child" }).Total);
+            Assert.Equal(12L, ReadFrontierMaximum(databasePath, "scan-parent"));
+            Assert.Equal(16L, ReadFrontierMaximum(databasePath, "scan-child"));
+            Assert.Equal(16L, ReadBucketTotal(databasePath, cycleStart, cycleEnd));
+            var rows = ReadLineageRows(databasePath);
+            Assert.True(rows.Where(row => row.ThreadId is "scan-parent" or "scan-child")
+                .All(row => row.Root == "scan-parent"));
+            Assert.Equal(1, rows.Count(row => row.ThreadId == "scan-parent" && row.Canonical == 1));
+            Assert.Equal(1, rows.Count(row => row.ThreadId == "scan-child" && row.Canonical == 1));
+            var now = cycleStart.AddHours(2);
+            var aggregates = database.LoadSessionAggregates(now);
+            var parentAggregate = aggregates.Single(item => item.Metadata.ThreadId == "scan-parent");
+            var childAggregate = aggregates.Single(item => item.Metadata.ThreadId == "scan-child");
+            Assert.Equal(12L, parentAggregate.SessionTotal.Total);
+            Assert.Equal(4L, childAggregate.SessionTotal.Total);
+            Assert.Equal(4L, childAggregate.LatestTurnTotal.Total);
+            Assert.Equal(SessionKind.Unknown, parentAggregate.Metadata.Kind);
+            Assert.Equal(SessionSurface.Unknown, parentAggregate.Metadata.Surface);
+            Assert.True(string.IsNullOrWhiteSpace(parentAggregate.Metadata.Model));
+            Assert.True(parentAggregate.LifecycleMetrics is null);
+            var snapshot = new HudSnapshot(
+                new QuotaObservation(new QuotaBucket("codex", "Codex", 10, 10080, now.AddDays(7)),
+                    Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false),
+                aggregates, database.GetCycleTotal(cycleStart, cycleEnd), now, false, "fresh",
+                Array.Empty<string>(), Array.Empty<HudEvent>(),
+                RunningCycleTotal: database.GetCycleTotalForThreads(cycleStart, cycleEnd, new[] { "scan-parent" }));
+            var display = HudPresentation.BuildRows(snapshot);
+            Assert.Equal(16L, display.Single(row => row.ThreadId == "scan-parent").WorkTotal.Total);
+            Assert.Equal(4L, display.Single(row => row.ThreadId == "scan-child").WorkTotal.Total);
+            Assert.Equal("自身 12 + 子任务 4",
+                display.Single(row => row.ThreadId == "scan-parent").WorkBreakdownText);
+            Assert.True(HudPresentation.BuildCollapsedText(snapshot)
+                .Contains("本周期 16 raw tokens", StringComparison.Ordinal));
+            Assert.True(HudPresentation.BuildFrame(snapshot).OverviewText.Contains(
+                "本额度周期全部会话合计：16 raw tokens", StringComparison.Ordinal));
+            var viewModel = new MainViewModel();
+            viewModel.Apply(snapshot);
+            viewModel.SetFilter("all");
+            Assert.True(viewModel.ToggleChildren("scan-parent"));
+            Assert.Equal(2, viewModel.Rows.Count);
+            Assert.Equal(16L, viewModel.Rows.Single(row => row.ThreadId == "scan-parent").WorkTotal.Total);
+            Assert.Equal(4L, viewModel.Rows.Single(row => row.ThreadId == "scan-child").WorkTotal.Total);
+
+            var flags = DescribeLineageFlags(databasePath);
+            Assert.True(indexer.MergeMetadata(new SessionMetadata("scan-parent", null, null, null, null,
+                "gpt-test", null, null, null, null, Kind: SessionKind.Primary, Surface: SessionSurface.App)));
+            Assert.True(database.IsAggregateRebuildComplete);
+            AssertScanParentEnrichedLifecycle(database, now);
+            var enriched = database.LoadSessionAggregates(now);
+            Assert.Equal(12L, enriched.Single(item => item.Metadata.ThreadId == "scan-parent").SessionTotal.Total);
+            Assert.Equal(4L, enriched.Single(item => item.Metadata.ThreadId == "scan-child").SessionTotal.Total);
+            Assert.Equal(4L, enriched.Single(item => item.Metadata.ThreadId == "scan-child").LatestTurnTotal.Total);
+            Assert.Equal(flags, DescribeLineageFlags(databasePath));
+            Assert.Equal(12L, database.GetSessionTotal("scan-parent").Total);
+            Assert.Equal(4L, database.GetSessionTotal("scan-child").Total);
+            Assert.Equal(4L, database.GetSessionTotal("scan-child", "turn-late").Total);
+            Assert.Equal(16L, database.GetCycleTotal(cycleStart, cycleEnd).Total);
+            Assert.Equal(12L, database.GetCycleTotalForThreads(cycleStart, cycleEnd, new[] { "scan-parent" }).Total);
+            Assert.Equal(4L, database.GetCycleTotalForThreads(cycleStart, cycleEnd, new[] { "scan-child" }).Total);
+            Assert.Equal(12L, ReadFrontierMaximum(databasePath, "scan-parent"));
+            Assert.Equal(16L, ReadFrontierMaximum(databasePath, "scan-child"));
+            Assert.Equal(16L, ReadBucketTotal(databasePath, cycleStart, cycleEnd));
+            Assert.True(ReadLineageRows(databasePath).Where(row => row.ThreadId is "scan-parent" or "scan-child")
+                .All(row => row.Root == "scan-parent"));
+            var enrichedSnapshot = snapshot with { Sessions = enriched };
+            var enrichedDisplay = HudPresentation.BuildRows(enrichedSnapshot);
+            Assert.Equal(16L, enrichedDisplay.Single(row => row.ThreadId == "scan-parent").WorkTotal.Total);
+            Assert.Equal(4L, enrichedDisplay.Single(row => row.ThreadId == "scan-child").WorkTotal.Total);
+            Assert.Equal("自身 12 + 子任务 4",
+                enrichedDisplay.Single(row => row.ThreadId == "scan-parent").WorkBreakdownText);
+            Assert.True(HudPresentation.BuildCollapsedText(enrichedSnapshot)
+                .Contains("本周期 16 raw tokens", StringComparison.Ordinal));
+            Assert.True(HudPresentation.BuildFrame(enrichedSnapshot).OverviewText.Contains(
+                "本额度周期全部会话合计：16 raw tokens", StringComparison.Ordinal));
+
+            var repeat = indexer.ScanFile(parentPath, "sessions/scan-parent.jsonl", "scan-parent");
+            Assert.True(database.IsAggregateRebuildComplete);
+            Assert.True(repeat.AcceptedSamples == 0 || repeat.WasSkipped);
+            AssertScanParentEnrichedLifecycle(database, now);
+            database.RebuildLineageCanonical();
+            DrainAggregates(database);
+            Assert.Equal(flags, DescribeLineageFlags(databasePath));
+            Assert.Equal(12L, database.GetSessionTotal("scan-parent").Total);
+            Assert.Equal(4L, database.GetSessionTotal("scan-child").Total);
+            AssertScanParentEnrichedLifecycle(database, now);
+
+            Assert.True(database.IsAggregateRebuildComplete);
+            var unrelatedScan = indexer.ScanFile(unrelatedPath, "sessions/unrelated-root.jsonl", "unrelated-root");
+            Assert.Equal(1, unrelatedScan.AcceptedSamples);
+            Assert.True(database.IsAggregateRebuildComplete);
+            Assert.Equal(12L, database.GetSessionTotal("scan-parent").Total);
+            Assert.Equal(4L, database.GetSessionTotal("scan-child").Total);
+            Assert.Equal(21L, database.GetSessionTotal("unrelated-root").Total);
+            Assert.Equal(37L, database.GetCycleTotal(cycleStart, cycleEnd).Total);
+            Assert.True(ReadLineageRows(databasePath).Single(row => row.ThreadId == "unrelated-root").Root ==
+                        "unrelated-root");
+
+            database.UpsertSession(new SessionMetadata("still-missing-child", "Missing", null, null, null, null,
+                null, null, cycleStart, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "still-missing-parent", AgentDepth: 1));
+            Assert.True(database.AcceptTokenSample("still-missing-child", ancestor, cycleStart.AddHours(2),
+                cycleStart.AddHours(2), "turn-missing", null, null));
+            Assert.Equal(12L, database.GetSessionTotal("still-missing-child").Total);
+            Assert.True(ReadLineageRows(databasePath).Single(row => row.ThreadId == "still-missing-child").Root ==
+                        "still-missing-child");
+
+            database.UpsertSession(new SessionMetadata("cycle-scan-a", "A", null, null, null, null, null, null,
+                cycleStart, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "cycle-scan-b", AgentDepth: 1));
+            database.UpsertSession(new SessionMetadata("cycle-scan-b", "B", null, null, null, null, null, null,
+                cycleStart, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "cycle-scan-a", AgentDepth: 1));
+            DrainAggregates(database);
+            Assert.True(database.AcceptTokenSample("cycle-scan-a", ancestor, cycleStart.AddHours(2).AddMinutes(1),
+                cycleStart.AddHours(2).AddMinutes(1), "turn-a", null, null));
+            Assert.True(database.AcceptTokenSample("cycle-scan-b", ancestor, cycleStart.AddHours(2).AddMinutes(2),
+                cycleStart.AddHours(2).AddMinutes(2), "turn-b", null, null));
+            Assert.Equal(12L, database.GetSessionTotal("cycle-scan-a").Total);
+            Assert.Equal(12L, database.GetSessionTotal("cycle-scan-b").Total);
+            Assert.True(ReadLineageRows(databasePath).Where(row => row.ThreadId is "cycle-scan-a" or "cycle-scan-b")
+                .All(row => row.Root == row.ThreadId));
+            AssertNonNegativeAggregates(databasePath);
+            Assert.True(!database.ContainsPrivacySentinel(Sentinel));
+        }
+
+        using var restarted = new UsageDatabase(databasePath);
+        DrainAggregates(restarted);
+        restarted.RebuildLineageCanonical();
+        DrainAggregates(restarted);
+        Assert.Equal(12L, restarted.GetSessionTotal("scan-parent").Total);
+        Assert.Equal(4L, restarted.GetSessionTotal("scan-child").Total);
+        Assert.Equal(21L, restarted.GetSessionTotal("unrelated-root").Total);
+        Assert.Equal(12L, restarted.GetSessionTotal("still-missing-child").Total);
+        Assert.Equal(12L, restarted.GetSessionTotal("cycle-scan-a").Total);
+        Assert.Equal(12L, restarted.GetSessionTotal("cycle-scan-b").Total);
+        Assert.Equal(37L, restarted.GetCycleTotal(cycleStart, cycleEnd).Total);
+        Assert.True(ReadLineageRows(databasePath).Where(row => row.ThreadId is "scan-parent" or "scan-child")
+            .All(row => row.Root == "scan-parent"));
+        Assert.Equal(1, ReadLineageRows(databasePath).Count(row => row.ThreadId == "scan-parent" && row.Canonical == 1));
+        Assert.Equal(1, ReadLineageRows(databasePath).Count(row => row.ThreadId == "scan-child" && row.Canonical == 1));
+        AssertScanParentEnrichedLifecycle(restarted, cycleStart.AddHours(2));
+        AssertNonNegativeAggregates(databasePath);
+        Assert.True(!restarted.ContainsPrivacySentinel(Sentinel));
+    }
+
+    private static void AssertScanParentEnrichedLifecycle(UsageDatabase database, DateTimeOffset nowUtc)
+    {
+        var parent = database.LoadSessions().Single(item => item.ThreadId == "scan-parent");
+        Assert.Equal(SessionKind.Primary, parent.Kind);
+        Assert.Equal(SessionSurface.App, parent.Surface);
+        Assert.Equal("gpt-test", parent.Model);
+        Assert.True(parent.ParentThreadId is null);
+        var child = database.LoadSessions().Single(item => item.ThreadId == "scan-child");
+        Assert.Equal("scan-parent", child.ParentThreadId);
+        var aggregate = database.LoadSessionAggregates(nowUtc)
+            .Single(item => item.Metadata.ThreadId == "scan-parent");
+        if (aggregate.LifecycleMetrics is not { } life)
+            throw new InvalidOperationException("lifecycle_metrics_missing");
+        Assert.Equal(12L, life.Recent48HourTokens);
+    }
+
+    private static void AssertForkExplicitContextBoundaries(string runRoot)
+    {
+        static string TurnLine(string thread, long timestamp, string turn, string model) =>
+            $"{{\"timestamp\":{timestamp},\"type\":\"turn_context\",\"payload\":{{\"thread_id\":\"{thread}\",\"turn_id\":\"{turn}\",\"model\":\"{model}\"}}}}";
+        static string CompactLine(string thread, long timestamp) =>
+            $"{{\"timestamp\":{timestamp},\"type\":\"event_msg\",\"payload\":{{\"type\":\"context_compacted\",\"thread_id\":\"{thread}\"}}}}";
+        static string ContextTokenLine(string thread, long timestamp, string model, long totalInput,
+            long lastInput, long contextWindow) => System.Text.Json.JsonSerializer.Serialize(new
+            {
+                type = "event_msg",
+                payload = new
+                {
+                    type = "token_count", thread_id = thread, timestamp, model,
+                    info = new
+                    {
+                        total_token_usage = new { input_tokens = totalInput, output_tokens = 0, total_tokens = totalInput },
+                        last_token_usage = new { input_tokens = lastInput, output_tokens = 0, total_tokens = lastInput },
+                        model_context_window = contextWindow,
+                    },
+                },
+            });
+
+        var directory = Path.Combine(runRoot, "context-fork-lineage");
+        Directory.CreateDirectory(directory);
+        var databasePath = Path.Combine(directory, "usage.db");
+        const long window = 258_400;
+        const long start = 1_786_400_000;
+        var parentPath = Path.Combine(directory, "fork-parent.jsonl");
+        var childPath = Path.Combine(directory, "fork-child.jsonl");
+        var copyOnlyPath = Path.Combine(directory, "fork-copy-only.jsonl");
+        var missingPath = Path.Combine(directory, "fork-missing.jsonl");
+        File.WriteAllText(parentPath, string.Join('\n', new[]
+        {
+            $"{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fork-parent\"}}}}",
+            TurnLine("fork-parent", start, "turn-parent", "gpt-test"),
+            CompactLine("fork-parent", start + 1),
+            ContextTokenLine("fork-parent", start + 2, "gpt-test", 1_105_000, 105_000, window),
+        }) + "\n", new UTF8Encoding(false));
+        File.WriteAllText(childPath, string.Join('\n', new[]
+        {
+            $"{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fork-child\"}}}}",
+            TurnLine("fork-child", start, "turn-parent", "gpt-test"),
+            CompactLine("fork-child", start + 1),
+            ContextTokenLine("fork-child", start + 2, "gpt-test", 1_105_000, 105_000, window),
+            TurnLine("fork-child", start + 80, "turn-child", "gpt-test"),
+            CompactLine("fork-child", start + 81),
+            ContextTokenLine("fork-child", start + 82, "gpt-test", 1_175_000, 70_000, window),
+        }) + "\n", new UTF8Encoding(false));
+        File.WriteAllText(copyOnlyPath, string.Join('\n', new[]
+        {
+            $"{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fork-copy-only\"}}}}",
+            TurnLine("fork-copy-only", start, "turn-parent", "gpt-test"),
+            CompactLine("fork-copy-only", start + 1),
+            ContextTokenLine("fork-copy-only", start + 2, "gpt-test", 1_105_000, 105_000, window),
+            TurnLine("fork-copy-only", start + 90, "turn-copy-tail", "gpt-test"),
+            ContextTokenLine("fork-copy-only", start + 91, "gpt-test", 1_185_000, 80_000, window),
+        }) + "\n", new UTF8Encoding(false));
+        File.WriteAllText(missingPath, string.Join('\n', new[]
+        {
+            $"{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"fork-missing\"}}}}",
+            TurnLine("fork-missing", start + 200, "turn-missing", "gpt-test"),
+            CompactLine("fork-missing", start + 201),
+            ContextTokenLine("fork-missing", start + 202, "gpt-test", 900_000, 90_000, window),
+        }) + "\n", new UTF8Encoding(false));
+
+        using (var database = new UsageDatabase(databasePath))
+        {
+            var indexer = new RolloutIndexer(database);
+            Assert.Equal(1, indexer.ScanFile(parentPath, "sessions/fork-parent.jsonl", "fork-parent").AcceptedSamples);
+            database.UpsertSession(new SessionMetadata("fork-child", "ForkChild", null, null, null, "gpt-test",
+                null, null, DateTimeOffset.FromUnixTimeSeconds(start), null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "fork-parent", AgentDepth: 1));
+            DrainAggregates(database);
+            Assert.Equal(2, indexer.ScanFile(childPath, "sessions/fork-child.jsonl", "fork-child").AcceptedSamples);
+            DrainAggregates(database);
+            AssertForkInheritedCopyElection(databasePath);
+            Assert.Equal(1L, CountContextBaselines(databasePath, "fork-parent", "explicit"));
+            Assert.Equal(1L, CountContextBaselines(databasePath, "fork-child", "explicit"));
+            Assert.Equal(0L, CountContextBaselines(databasePath, "fork-child", "heuristic"));
+            AssertSingleExplicitBaseline(databasePath, "fork-parent", 105_000L);
+            AssertSingleExplicitBaseline(databasePath, "fork-child", 70_000L);
+            Assert.True(database.LoadSessionContextMetrics()["fork-child"].UsesExplicitCompactionBoundaries);
+
+            database.UpsertSession(new SessionMetadata("fork-copy-only", "CopyOnly", null, null, null, "gpt-test",
+                null, null, DateTimeOffset.FromUnixTimeSeconds(start), null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "fork-parent", AgentDepth: 1));
+            DrainAggregates(database);
+            Assert.Equal(2, indexer.ScanFile(copyOnlyPath, "sessions/fork-copy-only.jsonl", "fork-copy-only")
+                .AcceptedSamples);
+            DrainAggregates(database);
+            Assert.Equal(0L, CountContextBaselines(databasePath, "fork-copy-only", "explicit"));
+            Assert.True(!database.LoadSessionContextMetrics().TryGetValue("fork-copy-only", out var copyMetrics) ||
+                        copyMetrics.PostCompactionSampleCount == 0 || !copyMetrics.UsesExplicitCompactionBoundaries);
+
+            database.ClearSessionParent("fork-child");
+            DrainAggregates(database);
+            database.RebuildLineageCanonical();
+            DrainAggregates(database);
+            Assert.True(CountContextBaselines(databasePath, "fork-child", "explicit") >= 1);
+            database.UpsertSession(new SessionMetadata("fork-child", "ForkChild", null, null, null, "gpt-test",
+                null, null, DateTimeOffset.FromUnixTimeSeconds(start), null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "fork-parent", AgentDepth: 1));
+            DrainAggregates(database);
+            database.RebuildLineageCanonical();
+            DrainAggregates(database);
+            AssertForkInheritedCopyElection(databasePath);
+            Assert.Equal(1L, CountContextBaselines(databasePath, "fork-parent", "explicit"));
+            Assert.Equal(1L, CountContextBaselines(databasePath, "fork-child", "explicit"));
+            AssertSingleExplicitBaseline(databasePath, "fork-parent", 105_000L);
+            AssertSingleExplicitBaseline(databasePath, "fork-child", 70_000L);
+
+            database.UpsertSession(new SessionMetadata("fork-missing", "Missing", null, null, null, "gpt-test",
+                null, null, DateTimeOffset.FromUnixTimeSeconds(start), null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "fork-absent-parent", AgentDepth: 1));
+            DrainAggregates(database);
+            Assert.Equal(1, indexer.ScanFile(missingPath, "sessions/fork-missing.jsonl", "fork-missing")
+                .AcceptedSamples);
+            DrainAggregates(database);
+            Assert.Equal(1L, CountContextBaselines(databasePath, "fork-missing", "explicit"));
+            Assert.True(ReadLineageRows(databasePath).Single(row => row.ThreadId == "fork-missing").Root ==
+                        "fork-missing");
+
+            database.UpsertSession(new SessionMetadata("fork-cycle-a", "CA", null, null, null, "gpt-test", null,
+                null, DateTimeOffset.FromUnixTimeSeconds(start), null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "fork-cycle-b", AgentDepth: 1));
+            database.UpsertSession(new SessionMetadata("fork-cycle-b", "CB", null, null, null, "gpt-test", null,
+                null, DateTimeOffset.FromUnixTimeSeconds(start), null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "fork-cycle-a", AgentDepth: 1));
+            DrainAggregates(database);
+            var cycleA = Path.Combine(directory, "fork-cycle-a.jsonl");
+            var cycleB = Path.Combine(directory, "fork-cycle-b.jsonl");
+            File.WriteAllText(cycleA, string.Join('\n', new[]
+            {
+                TurnLine("fork-cycle-a", start + 300, "turn-a", "gpt-test"),
+                CompactLine("fork-cycle-a", start + 301),
+                ContextTokenLine("fork-cycle-a", start + 302, "gpt-test", 500_000, 55_000, window),
+            }) + "\n", new UTF8Encoding(false));
+            File.WriteAllText(cycleB, string.Join('\n', new[]
+            {
+                TurnLine("fork-cycle-b", start + 310, "turn-b", "gpt-test"),
+                CompactLine("fork-cycle-b", start + 311),
+                ContextTokenLine("fork-cycle-b", start + 312, "gpt-test", 510_000, 56_000, window),
+            }) + "\n", new UTF8Encoding(false));
+            Assert.Equal(1, indexer.ScanFile(cycleA, "sessions/fork-cycle-a.jsonl", "fork-cycle-a").AcceptedSamples);
+            Assert.Equal(1, indexer.ScanFile(cycleB, "sessions/fork-cycle-b.jsonl", "fork-cycle-b").AcceptedSamples);
+            DrainAggregates(database);
+            Assert.Equal(1L, CountContextBaselines(databasePath, "fork-cycle-a", "explicit"));
+            Assert.Equal(1L, CountContextBaselines(databasePath, "fork-cycle-b", "explicit"));
+            Assert.True(ReadLineageRows(databasePath).Where(row => row.ThreadId is "fork-cycle-a" or "fork-cycle-b")
+                .All(row => row.Root == row.ThreadId));
+            Assert.True(!database.ContainsPrivacySentinel(Sentinel));
+            AssertNonNegativeAggregates(databasePath);
+        }
+
+        using var restarted = new UsageDatabase(databasePath);
+        DrainAggregates(restarted);
+        restarted.RebuildLineageCanonical();
+        DrainAggregates(restarted);
+        AssertForkInheritedCopyElection(databasePath);
+        Assert.Equal(1L, CountContextBaselines(databasePath, "fork-parent", "explicit"));
+        Assert.Equal(1L, CountContextBaselines(databasePath, "fork-child", "explicit"));
+        Assert.Equal(0L, CountContextBaselines(databasePath, "fork-copy-only", "explicit"));
+        Assert.Equal(1L, CountContextBaselines(databasePath, "fork-missing", "explicit"));
+        AssertSingleExplicitBaseline(databasePath, "fork-parent", 105_000L);
+        AssertSingleExplicitBaseline(databasePath, "fork-child", 70_000L);
+        Assert.True(!restarted.ContainsPrivacySentinel(Sentinel));
+    }
+
+    private static void AssertForkInheritedCopyElection(string databasePath)
+    {
+        var rows = ReadLineageRows(databasePath);
+        var parent = rows.Where(row => row.ThreadId == "fork-parent").ToArray();
+        Assert.Equal(1, parent.Length);
+        Assert.Equal(1, parent[0].Canonical);
+        var children = rows.Where(row => row.ThreadId == "fork-child").ToArray();
+        Assert.Equal(2, children.Length);
+        var copied = children.Single(row => row.Identity == parent[0].Identity);
+        Assert.Equal(0, copied.Canonical);
+        var tail = children.Single(row => row.Identity != parent[0].Identity);
+        Assert.Equal(1, tail.Canonical);
+    }
+
+    private static void LineageFamilyAndUnrelatedRoots(string runRoot)
+    {
+        var directory = Path.Combine(runRoot, "lineage-family");
+        Directory.CreateDirectory(directory);
+        var databasePath = Path.Combine(directory, "usage.db");
+        var t0 = DateTimeOffset.Parse("2026-02-01T00:00:00Z", CultureInfo.InvariantCulture);
+        using var database = new UsageDatabase(databasePath);
+        database.UpsertSession(new SessionMetadata("root", "Root", null, null, null, "gpt-test", null, null,
+            t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+        database.UpsertSession(new SessionMetadata("child", "Child", null, null, null, "gpt-test", null, null,
+            t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+            ParentThreadId: "root", AgentDepth: 1));
+        database.UpsertSession(new SessionMetadata("grand", "Grand", null, null, null, "gpt-test", null, null,
+            t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+            ParentThreadId: "child", AgentDepth: 2));
+        database.UpsertSession(new SessionMetadata("sib", "Sibling", null, null, null, "gpt-test", null, null,
+            t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+            ParentThreadId: "root", AgentDepth: 1));
+        database.UpsertSession(new SessionMetadata("other", "Other", null, null, null, "gpt-test", null, null,
+            t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.Cli));
+
+        var shared = LineageSnapshot(10, 2, 10, 2);
+        var childTail = LineageSnapshot(15, 3, 5, 1);
+        var grandTail = LineageSnapshot(18, 4, 3, 1);
+        var sibTail = LineageSnapshot(16, 2, 6, 0);
+        Assert.True(database.AcceptTokenSample("root", shared, t0, t0, "turn-root", "gpt-test", null));
+        Assert.True(database.AcceptTokenSample("child", shared, t0.AddMinutes(1), t0.AddMinutes(1),
+            "turn-child", "gpt-test", null));
+        Assert.True(database.AcceptTokenSample("grand", shared, t0.AddMinutes(2), t0.AddMinutes(2),
+            "turn-grand", "gpt-test", null));
+        Assert.True(database.AcceptTokenSample("sib", shared, t0.AddMinutes(1), t0.AddMinutes(1),
+            "turn-sib", "gpt-test", null));
+        Assert.True(database.AcceptTokenSample("child", childTail, t0.AddMinutes(3), t0.AddMinutes(3),
+            "turn-child", "gpt-test", null));
+        Assert.True(database.AcceptTokenSample("grand", grandTail, t0.AddMinutes(4), t0.AddMinutes(4),
+            "turn-grand", "gpt-test", null));
+        Assert.True(database.AcceptTokenSample("sib", sibTail, t0.AddMinutes(3), t0.AddMinutes(3),
+            "turn-sib", "gpt-test", null));
+        Assert.True(database.AcceptTokenSample("other", shared, t0, t0, "turn-other", "gpt-test", null));
+
+        Assert.Equal(12L, database.GetSessionTotal("root").Total);
+        Assert.Equal(6L, database.GetSessionTotal("child").Total);
+        Assert.Equal(4L, database.GetSessionTotal("grand").Total);
+        Assert.Equal(6L, database.GetSessionTotal("sib").Total);
+        Assert.Equal(12L, database.GetSessionTotal("other").Total);
+        Assert.Equal(8L, database.GetSampleCount());
+        Assert.Equal(4, ReadLineageRows(databasePath).Count(row => row.Canonical == 1 && row.Root == "root"));
+        Assert.Equal(1, ReadLineageRows(databasePath).Count(row => row.Canonical == 1 && row.Root == "other"));
+
+        var now = t0.AddHours(1);
+        var aggregates = database.LoadSessionAggregates(now);
+        var snapshot = new HudSnapshot(
+            new QuotaObservation(new QuotaBucket("codex", "Codex", 10, 10080, now.AddDays(7)),
+                Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false),
+            aggregates, database.GetCycleTotal(t0, t0.AddHours(1)), now, false, "fresh",
+            Array.Empty<string>(), Array.Empty<HudEvent>(), RunningCycleTotal: database.GetCycleTotalForThreads(
+                t0, t0.AddHours(1), new[] { "root" }));
+        var rows = HudPresentation.BuildRows(snapshot);
+        Assert.Equal(28L, rows.Single(row => row.ThreadId == "root").WorkTotal.Total);
+        Assert.Equal(10L, rows.Single(row => row.ThreadId == "child").WorkTotal.Total);
+        Assert.Equal(12L, rows.Single(row => row.ThreadId == "other").WorkTotal.Total);
+        Assert.Equal(40L, snapshot.CycleTotal!.Value.Total);
+        Assert.Equal(0L, CountContextBaselines(databasePath, "child"));
+        Assert.Equal(0L, CountContextBaselines(databasePath, "grand"));
+        AssertNonNegativeAggregates(databasePath);
+        var engineSource = File.ReadAllText(Path.Combine(ProjectRoot(), "src", "CodexUsageHud.Core",
+            "UsageEngine.cs"));
+        Assert.True(engineSource.Contains("HudProduct.Version", StringComparison.Ordinal));
+        Assert.Equal("1.0.2", HudProduct.Version);
+    }
+
+    private static void LineageCycleTimingAndIsolation(string runRoot)
+    {
+        var directory = Path.Combine(runRoot, "lineage-timing");
+        Directory.CreateDirectory(directory);
+        var databasePath = Path.Combine(directory, "usage.db");
+        var cycleStart = DateTimeOffset.Parse("2026-03-01T01:00:00Z", CultureInfo.InvariantCulture);
+        var cycleEnd = cycleStart.AddHours(1);
+        using (var database = new UsageDatabase(databasePath))
+        {
+            database.UpsertSession(new SessionMetadata("early-root", "Early", null, null, null, null, null, null,
+                cycleStart, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("early-child", "EarlyChild", null, null, null, null, null,
+                null, cycleStart, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "early-root", AgentDepth: 1));
+            var ancestor = LineageSnapshot(10, 2, 10, 2);
+            var tail = LineageSnapshot(13, 3, 3, 1);
+            Assert.True(database.AcceptTokenSample("early-root", ancestor, cycleStart.AddMinutes(-10),
+                cycleStart.AddMinutes(-10), "turn-early", null, null));
+            Assert.True(database.AcceptTokenSample("early-child", ancestor, cycleStart.AddMinutes(5),
+                cycleStart.AddMinutes(5), "turn-child", null, null));
+            Assert.True(database.AcceptTokenSample("early-child", tail, cycleStart.AddMinutes(6),
+                cycleStart.AddMinutes(6), "turn-child", null, null));
+            Assert.Equal(12L, database.GetSessionTotal("early-root").Total);
+            Assert.Equal(4L, database.GetSessionTotal("early-child").Total);
+            Assert.Equal(4L, database.GetCycleTotal(cycleStart, cycleEnd).Total);
+
+            Assert.True(database.AcceptTokenSample("late-child", ancestor, cycleStart.AddMinutes(8),
+                cycleStart.AddMinutes(8), "turn-late", null, null));
+            Assert.True(database.AcceptTokenSample("late-child", tail, cycleStart.AddMinutes(9),
+                cycleStart.AddMinutes(9), "turn-late", null, null));
+            Assert.Equal(16L, database.GetSessionTotal("late-child").Total);
+            Assert.True(database.IsAggregateRebuildComplete);
+            database.UpsertSession(new SessionMetadata("late-parent", "LateParent", null, null, null, null, null,
+                null, cycleStart, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("late-child", "LateChild", null, null, null, null, null,
+                null, cycleStart, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "late-parent", AgentDepth: 1));
+            Assert.True(!database.IsAggregateRebuildComplete);
+            var pending = new HudSnapshot(
+                new QuotaObservation(new QuotaBucket("codex", "Codex", 10, 10080, cycleEnd.AddDays(6)),
+                    Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, cycleStart, false),
+                Array.Empty<SessionAggregate>(), null, cycleStart, true, "索引中（统计迁移）",
+                Array.Empty<string>(), AggregateMigrationPending: true);
+            Assert.True(HudPresentation.BuildCollapsedText(pending).Contains("索引中", StringComparison.Ordinal));
+            Assert.True(HudPresentation.BuildFrame(pending).FreshnessText.Contains("索引中", StringComparison.Ordinal));
+            DrainAggregates(database);
+            Assert.Equal(0L, database.GetSessionTotal("late-parent").Total);
+            Assert.Equal(16L, database.GetSessionTotal("late-child").Total);
+
+            Assert.True(database.AcceptTokenSample("late-parent", ancestor, cycleStart.AddMinutes(-5),
+                cycleStart.AddMinutes(-5), "turn-parent", null, null));
+            Assert.Equal(12L, database.GetSessionTotal("late-parent").Total);
+            Assert.Equal(4L, database.GetSessionTotal("late-child").Total);
+            Assert.Equal(8L, database.GetCycleTotal(cycleStart, cycleEnd).Total);
+
+            database.UpsertSession(new SessionMetadata("missing-child", "Missing", "worker", null, "same-project",
+                null, null, null, cycleStart, null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "no-such-parent", AgentDepth: 1));
+            Assert.True(database.AcceptTokenSample("missing-child", ancestor, cycleStart.AddHours(2),
+                cycleStart.AddHours(2), "turn-missing", null, null));
+            Assert.Equal(12L, database.GetSessionTotal("missing-child").Total);
+
+            database.UpsertSession(new SessionMetadata("cycle-a", "A", null, null, null, null, null, null,
+                cycleStart, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "cycle-b", AgentDepth: 1));
+            database.UpsertSession(new SessionMetadata("cycle-b", "B", null, null, null, null, null, null,
+                cycleStart, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "cycle-a", AgentDepth: 1));
+            DrainAggregates(database);
+            Assert.True(database.AcceptTokenSample("cycle-a", ancestor, cycleStart.AddHours(2).AddMinutes(1),
+                cycleStart.AddHours(2).AddMinutes(1), "turn-a", null, null));
+            Assert.True(database.AcceptTokenSample("cycle-b", ancestor, cycleStart.AddHours(2).AddMinutes(2),
+                cycleStart.AddHours(2).AddMinutes(2), "turn-b", null, null));
+            Assert.Equal(12L, database.GetSessionTotal("cycle-a").Total);
+            Assert.Equal(12L, database.GetSessionTotal("cycle-b").Total);
+            var cyclicRows = ReadLineageRows(databasePath).Where(row =>
+                row.ThreadId is "cycle-a" or "cycle-b").ToArray();
+            Assert.True(cyclicRows.All(row => row.Root == row.ThreadId));
+            Assert.Equal(2, cyclicRows.Count(row => row.Canonical == 1));
+        }
+
+        using var restarted = new UsageDatabase(databasePath);
+        DrainAggregates(restarted);
+        Assert.Equal(12L, restarted.GetSessionTotal("early-root").Total);
+        Assert.Equal(4L, restarted.GetSessionTotal("early-child").Total);
+        Assert.Equal(12L, restarted.GetSessionTotal("late-parent").Total);
+        Assert.Equal(4L, restarted.GetSessionTotal("late-child").Total);
+        Assert.Equal(12L, restarted.GetSessionTotal("missing-child").Total);
+        Assert.Equal(12L, restarted.GetSessionTotal("cycle-a").Total);
+        Assert.Equal(12L, restarted.GetSessionTotal("cycle-b").Total);
+        Assert.Equal(8L, restarted.GetCycleTotal(cycleStart, cycleEnd).Total);
+        AssertNonNegativeAggregates(databasePath);
+        AssertCommitScanLateParentMaterialization(runRoot);
+    }
+
+    private static void LineageConsumersRestartPrivacy(string runRoot)
+    {
+        var directory = Path.Combine(runRoot, "lineage-consumers");
+        Directory.CreateDirectory(directory);
+        var databasePath = Path.Combine(directory, "usage.db");
+        var start = DateTimeOffset.Parse("2026-04-01T00:00:00Z", CultureInfo.InvariantCulture);
+        using (var database = new UsageDatabase(databasePath))
+        {
+            database.UpsertSession(new SessionMetadata("inc-parent", "IncParent", null, null, null, "gpt-test",
+                null, null, start, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("inc-child", "IncChild", null, null, null, "gpt-test",
+                null, null, start, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "inc-parent", AgentDepth: 1));
+            var shared = LineageSnapshot(10, 2, 10, 2);
+            var tail = LineageSnapshot(14, 3, 4, 1);
+            Assert.True(database.AcceptTokenSample("inc-child", shared, start.AddMinutes(10), start.AddMinutes(10),
+                "turn-child", "gpt-test", null));
+            Assert.Equal(12L, database.GetSessionTotal("inc-child").Total);
+            Assert.True(database.IsAggregateRebuildComplete);
+            Assert.True(database.AcceptTokenSample("inc-parent", shared, start.AddMinutes(1), start.AddMinutes(1),
+                "turn-parent", "gpt-test", null));
+            Assert.True(database.IsAggregateRebuildComplete);
+            Assert.Equal(12L, database.GetSessionTotal("inc-parent").Total);
+            Assert.Equal(0L, database.GetSessionTotal("inc-child").Total);
+            Assert.True(database.AcceptTokenSample("inc-child", tail, start.AddMinutes(20), start.AddMinutes(20),
+                "turn-child", "gpt-test", null));
+            Assert.Equal(5L, database.GetSessionTotal("inc-child").Total);
+            Assert.Equal(5L, database.GetSessionTotal("inc-child", "turn-child").Total);
+            Assert.Equal(17L, database.GetCycleTotal(start, start.AddHours(1)).Total);
+            Assert.Equal(5L, database.GetCycleTotalForThreads(start, start.AddHours(1),
+                new[] { "inc-child" }).Total);
+            Assert.Equal(12L, database.GetCycleTotalForThreads(start, start.AddHours(1),
+                new[] { "inc-parent" }).Total);
+            var latest = database.LoadSessionAggregates(start.AddHours(2))
+                .Single(item => item.Metadata.ThreadId == "inc-child");
+            Assert.Equal(5L, latest.SessionTotal.Total);
+            Assert.Equal(5L, latest.LatestTurnTotal.Total);
+            Assert.Equal(5L, latest.RecentUsage.Total);
+            Assert.Equal(RecentUsageKind.LatestTurn, latest.RecentKind);
+            Assert.Equal(0L, CountContextBaselines(databasePath, "inc-child"));
+            var parentLifecycle = database.LoadSessionAggregates(start.AddHours(2))
+                .Single(item => item.Metadata.ThreadId == "inc-parent");
+            if (parentLifecycle.LifecycleMetrics is not { } parentMetrics)
+                throw new InvalidOperationException("lifecycle_metrics_missing");
+            Assert.Equal(12L, parentMetrics.Recent48HourTokens);
+            Assert.Equal(12L, ReadFrontierMaximum(databasePath, "inc-parent"));
+            Assert.Equal(17L, ReadFrontierMaximum(databasePath, "inc-child"));
+            Assert.Equal(17L, ReadBucketTotal(databasePath, start, start.AddHours(1)));
+            var now = start.AddHours(2);
+            var snapshot = new HudSnapshot(
+                new QuotaObservation(new QuotaBucket("codex", "Codex", 10, 10080, now.AddDays(7)),
+                    Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false),
+                database.LoadSessionAggregates(now), database.GetCycleTotal(start, start.AddHours(1)), now, false,
+                "fresh", Array.Empty<string>(), Array.Empty<HudEvent>(),
+                RunningCycleTotal: database.GetCycleTotalForThreads(start, start.AddHours(1), new[] { "inc-parent" }));
+            var rows = HudPresentation.BuildRows(snapshot);
+            Assert.Equal(17L, rows.Single(row => row.ThreadId == "inc-parent").WorkTotal.Total);
+            Assert.Equal(5L, rows.Single(row => row.ThreadId == "inc-child").WorkTotal.Total);
+            Assert.Equal("自身 12 + 子任务 5",
+                rows.Single(row => row.ThreadId == "inc-parent").WorkBreakdownText);
+            var collapsed = HudPresentation.BuildCollapsedText(snapshot);
+            Assert.True(collapsed.Contains("本周期 17 raw tokens", StringComparison.Ordinal));
+            var frame = HudPresentation.BuildFrame(snapshot);
+            Assert.True(frame.OverviewText.Contains("本额度周期全部会话合计：17 raw tokens", StringComparison.Ordinal));
+            Assert.True(frame.OverviewText.Contains("运行中会话本额度周期合计：12 raw tokens", StringComparison.Ordinal));
+            var viewModel = new MainViewModel();
+            viewModel.Apply(snapshot);
+            Assert.Equal(collapsed, viewModel.CollapsedText);
+            Assert.True(viewModel.OverviewText.Contains("本额度周期全部会话合计：17 raw tokens", StringComparison.Ordinal));
+            viewModel.SetFilter("all");
+            Assert.True(viewModel.ToggleChildren("inc-parent"));
+            Assert.Equal(2, viewModel.Rows.Count);
+            Assert.Equal(17L, viewModel.Rows.Single(row => row.ThreadId == "inc-parent").WorkTotal.Total);
+            Assert.Equal(5L, viewModel.Rows.Single(row => row.ThreadId == "inc-child").WorkTotal.Total);
+            AssertNonNegativeAggregates(databasePath);
+
+            var secondShared = LineageSnapshot(10, 2, 10, 2);
+            Assert.True(!database.AcceptTokenSample("inc-child", secondShared, start.AddMinutes(11),
+                start.AddMinutes(11), "turn-child", "gpt-test", null));
+            Assert.Equal(5L, database.GetSessionTotal("inc-child").Total);
+            Assert.Equal(2L, database.GetSampleCount("inc-child"));
+            Assert.Equal(1L, database.GetSampleCount("inc-parent"));
+        }
+
+        using (var restarted = new UsageDatabase(databasePath))
+        {
+            DrainAggregates(restarted);
+            Assert.Equal(12L, restarted.GetSessionTotal("inc-parent").Total);
+            Assert.Equal(5L, restarted.GetSessionTotal("inc-child").Total);
+            Assert.Equal(17L, restarted.GetCycleTotal(start, start.AddHours(1)).Total);
+            var replay = LineageSnapshot(10, 2, 10, 2);
+            Assert.True(!restarted.AcceptTokenSample("inc-child", replay, start.AddMinutes(12),
+                start.AddMinutes(12), "turn-child", "gpt-test", null));
+            Assert.Equal(5L, restarted.GetSessionTotal("inc-child").Total);
+            Assert.Equal(3L, restarted.GetSampleCount());
+            Assert.True(!restarted.ContainsPrivacySentinel(Sentinel));
+            var schema = restarted.ReadSchemaColumnNames()["token_samples"];
+            foreach (var column in new[] { "semantic_identity", "semantic_material", "legacy_semantic_identity",
+                         "lineage_root_thread_id", "is_lineage_canonical" })
+                Assert.True(schema.Contains(column, StringComparer.Ordinal));
+        }
+
+        using var named = new UsageDatabase(Path.Combine(directory, "privacy.db"));
+        named.UpsertSession(new SessionMetadata("privacy-thread", Sentinel, "lead", null, null, null, null, null,
+            start, null));
+        Assert.True(named.ContainsPrivacySentinel(Sentinel));
+        var lineageColumns = named.ReadSchemaColumnNames()["token_samples"];
+        Assert.True(lineageColumns.All(column =>
+            !column.Contains("prompt", StringComparison.OrdinalIgnoreCase) &&
+            !column.Contains("message", StringComparison.OrdinalIgnoreCase) &&
+            !column.Contains("preview", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static void LineageTuplePresenceReelectionAndRender(string runRoot)
+    {
+        var directory = Path.Combine(runRoot, "lineage-presence");
+        Directory.CreateDirectory(directory);
+        var databasePath = Path.Combine(directory, "usage.db");
+        var t0 = DateTimeOffset.Parse("2026-05-01T00:00:00Z", CultureInfo.InvariantCulture);
+        var missing = new TokenUsageSnapshot(
+            new TokenComponents(10, null, null, null, 2, null, 12),
+            new TokenComponents(10, null, null, null, 2, null, 12), 128000);
+        var zeroed = new TokenUsageSnapshot(
+            new TokenComponents(10, 0, 0, 0, 2, 0, 12),
+            new TokenComponents(10, 0, 0, 0, 2, 0, 12), 128000);
+        using (var database = new UsageDatabase(databasePath))
+        {
+            database.UpsertSession(new SessionMetadata("presence", "Presence", null, null, null, "gpt-test",
+                null, null, t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("unrelated", "Unrelated", null, null, null, "gpt-test",
+                null, null, t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.Cli));
+            Assert.True(database.AcceptTokenSample("presence", missing, t0, t0, "turn-m", null, null));
+            Assert.True(database.AcceptTokenSample("presence", zeroed, t0.AddSeconds(1), t0.AddSeconds(1),
+                "turn-z", null, null));
+            Assert.True(database.AcceptTokenSample("unrelated", missing, t0, t0, "turn-u", null, null));
+            Assert.Equal(24L, database.GetSessionTotal("presence").Total);
+            Assert.Equal(12L, database.GetSessionTotal("unrelated").Total);
+            Assert.Equal(2, ReadLineageRows(databasePath).Count(row =>
+                row.ThreadId == "presence" && row.Canonical == 1));
+            Assert.Equal(12L, database.GetSessionTotal("presence", "turn-m").Total);
+            Assert.Equal(12L, database.GetSessionTotal("presence", "turn-z").Total);
+
+            database.UpsertSession(new SessionMetadata("root", "Root", null, null, null, "gpt-test", null, null,
+                t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("alpha", "Alpha", null, null, null, "gpt-test", null, null,
+                t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "root", AgentDepth: 1), currentTurnKey: "turn-a");
+            database.UpsertSession(new SessionMetadata("beta", "Beta", null, null, null, "gpt-test", null, null,
+                t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "root", AgentDepth: 1), currentTurnKey: "turn-b");
+            var shared = LineageSnapshot(10, 2, 10, 2);
+            Assert.True(database.AcceptTokenSample("alpha", shared, t0.AddMinutes(1), t0.AddMinutes(1),
+                "turn-a", null, null));
+            Assert.True(database.AcceptTokenSample("beta", shared, t0.AddMinutes(2), t0.AddMinutes(2),
+                "turn-b", null, null));
+            Assert.Equal(12L, database.GetSessionTotal("alpha").Total);
+            Assert.Equal(0L, database.GetSessionTotal("beta").Total);
+
+            database.UpsertSession(new SessionMetadata("other", "Other", null, null, null, "gpt-test", null,
+                null, t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("alpha", "Alpha", null, null, null, "gpt-test", null, null,
+                t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "other", AgentDepth: 1), currentTurnKey: "turn-a");
+            DrainAggregates(database);
+            Assert.Equal(12L, database.GetSessionTotal("alpha").Total);
+            Assert.Equal(12L, database.GetSessionTotal("beta").Total);
+            Assert.Equal(0L, database.GetSessionTotal("root").Total);
+            Assert.Equal(0L, database.GetSessionTotal("other").Total);
+            Assert.Equal(12L, database.GetSessionTotal("alpha", "turn-a").Total);
+            Assert.Equal(12L, database.GetSessionTotal("beta", "turn-b").Total);
+            Assert.Equal(1, ReadLineageRows(databasePath).Count(row =>
+                row.ThreadId == "alpha" && row.Canonical == 1 && row.Root == "other"));
+            Assert.Equal(1, ReadLineageRows(databasePath).Count(row =>
+                row.ThreadId == "beta" && row.Canonical == 1 && row.Root == "root"));
+            Assert.Equal(1, ReadLineageRows(databasePath).Count(row =>
+                row.Root == "other" && row.Canonical == 1));
+            Assert.Equal(1, ReadLineageRows(databasePath).Count(row =>
+                row.Root == "root" && row.Canonical == 1));
+            var reparentNow = t0.AddHours(1);
+            var reparentAggregates = database.LoadSessionAggregates(reparentNow);
+            var alphaRow = reparentAggregates.Single(item => item.Metadata.ThreadId == "alpha");
+            var betaRow = reparentAggregates.Single(item => item.Metadata.ThreadId == "beta");
+            Assert.Equal(12L, alphaRow.SessionTotal.Total);
+            Assert.Equal(12L, alphaRow.LatestTurnTotal.Total);
+            Assert.Equal(12L, alphaRow.RecentUsage.Total);
+            Assert.Equal(RecentUsageKind.LatestTurn, alphaRow.RecentKind);
+            Assert.Equal(12L, betaRow.SessionTotal.Total);
+            Assert.Equal(12L, betaRow.LatestTurnTotal.Total);
+            var presenceLifeRow = reparentAggregates.Single(item => item.Metadata.ThreadId == "presence");
+            var unrelatedLifeRow = reparentAggregates.Single(item => item.Metadata.ThreadId == "unrelated");
+            if (presenceLifeRow.LifecycleMetrics is not { } presenceLife)
+                throw new InvalidOperationException("lifecycle_metrics_missing");
+            if (unrelatedLifeRow.LifecycleMetrics is not { } unrelatedLife)
+                throw new InvalidOperationException("lifecycle_metrics_missing");
+            Assert.Equal(24L, presenceLife.Recent48HourTokens);
+            Assert.Equal(12L, unrelatedLife.Recent48HourTokens);
+            Assert.Equal(12L, ReadFrontierMaximum(databasePath, "alpha"));
+            Assert.Equal(12L, ReadFrontierMaximum(databasePath, "beta"));
+            Assert.Equal(60L, ReadBucketTotal(databasePath, t0, t0.AddHours(1)));
+            Assert.Equal(60L, database.GetCycleTotal(t0, t0.AddHours(1)).Total);
+            Assert.Equal(12L, database.GetCycleTotalForThreads(t0, t0.AddHours(1), new[] { "alpha" }).Total);
+            Assert.Equal(12L, database.GetCycleTotalForThreads(t0, t0.AddHours(1), new[] { "beta" }).Total);
+            Assert.Equal(0L, database.GetCycleTotalForThreads(t0, t0.AddHours(1),
+                Array.Empty<string>()).Total);
+            Assert.Equal(0L, CountContextBaselines(databasePath, "alpha"));
+            Assert.Equal(0L, CountContextBaselines(databasePath, "beta"));
+            var reparentSnapshot = new HudSnapshot(
+                new QuotaObservation(new QuotaBucket("codex", "Codex", 10, 10080, t0.AddDays(7)),
+                    Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, reparentNow, false),
+                reparentAggregates, database.GetCycleTotal(t0, t0.AddHours(1)), reparentNow, false, "fresh",
+                Array.Empty<string>(), Array.Empty<HudEvent>(),
+                RunningCycleTotal: database.GetCycleTotalForThreads(t0, t0.AddHours(1), new[] { "alpha" }));
+            var reparentDisplay = HudPresentation.BuildRows(reparentSnapshot);
+            Assert.Equal(12L, reparentDisplay.Single(row => row.ThreadId == "other").WorkTotal.Total);
+            Assert.Equal(12L, reparentDisplay.Single(row => row.ThreadId == "root").WorkTotal.Total);
+            Assert.Equal("自身 0 + 子任务 12",
+                reparentDisplay.Single(row => row.ThreadId == "other").WorkBreakdownText);
+            Assert.Equal("自身 0 + 子任务 12",
+                reparentDisplay.Single(row => row.ThreadId == "root").WorkBreakdownText);
+            var reparentCollapsed = HudPresentation.BuildCollapsedText(reparentSnapshot);
+            Assert.True(reparentCollapsed.Contains("本周期 60 raw tokens", StringComparison.Ordinal));
+            var reparentFrame = HudPresentation.BuildFrame(reparentSnapshot);
+            Assert.True(reparentFrame.OverviewText.Contains("本额度周期全部会话合计：60 raw tokens",
+                StringComparison.Ordinal));
+            Assert.True(reparentFrame.OverviewText.Contains("运行中会话本额度周期合计：12 raw tokens",
+                StringComparison.Ordinal));
+            var reparentView = new MainViewModel();
+            reparentView.Apply(reparentSnapshot);
+            Assert.Equal(reparentCollapsed, reparentView.CollapsedText);
+            reparentView.SetFilter("all");
+            Assert.True(reparentView.ToggleChildren("other"));
+            Assert.Equal(12L, reparentView.Rows.Single(row => row.ThreadId == "alpha").SessionTotal.Total);
+            Assert.True(reparentView.ToggleChildren("root"));
+            Assert.Equal(12L, reparentView.Rows.Single(row => row.ThreadId == "beta").SessionTotal.Total);
+
+            Assert.True(database.ClearSessionParent("beta"));
+            DrainAggregates(database);
+            Assert.Equal(12L, database.GetSessionTotal("beta").Total);
+            Assert.Equal(1, ReadLineageRows(databasePath).Count(row =>
+                row.ThreadId == "beta" && row.Canonical == 1 && row.Root == "beta"));
+
+            database.UpsertSession(new SessionMetadata("presence-fields", "Fields", null, null, null, "gpt-test",
+                null, null, t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            var missingParts = new TokenComponents(10, null, null, null, 2, null, 12);
+            var presenceCount = 0;
+            void AcceptPresence(TokenUsageSnapshot snapshot, string turn)
+            {
+                Assert.True(database.AcceptTokenSample("presence-fields", snapshot, t0.AddSeconds(presenceCount + 2),
+                    t0.AddSeconds(presenceCount + 2), turn, null, null));
+                presenceCount++;
+            }
+            AcceptPresence(new TokenUsageSnapshot(missingParts, missingParts, 128000), "turn-base");
+            AcceptPresence(new TokenUsageSnapshot(missingParts, missingParts, 0), "turn-ctx0");
+            AcceptPresence(new TokenUsageSnapshot(missingParts, missingParts, null), "turn-ctxm");
+            foreach (var field in new[] { "cached", "read", "write", "reasoning", "reported" })
+            {
+                AcceptPresence(new TokenUsageSnapshot(missingParts, WithPresenceField(missingParts, field, 0),
+                    128000), "turn-last-" + field);
+                AcceptPresence(new TokenUsageSnapshot(WithPresenceField(missingParts, field, 0), missingParts,
+                    128000), "turn-total-" + field);
+            }
+            Assert.Equal(presenceCount, ReadLineageRows(databasePath).Count(row =>
+                row.ThreadId == "presence-fields" && row.Canonical == 1));
+            Assert.Equal(12L * presenceCount, database.GetSessionTotal("presence-fields").Total);
+
+            database.UpsertSession(new SessionMetadata("conflict-root", "ConflictRoot", null, null, null,
+                "gpt-test", null, null, t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("conflict-late", "ConflictLate", null, null, null,
+                "gpt-test", null, null, t0, null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "conflict-root", AgentDepth: 1));
+            database.UpsertSession(new SessionMetadata("conflict-early", "ConflictEarly", null, null, null,
+                "gpt-test", null, null, t0, null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "conflict-root", AgentDepth: 1));
+            var conflictShared = LineageSnapshot(11, 2, 11, 2);
+            Assert.True(database.AcceptTokenSample("conflict-late", conflictShared, t0.AddMinutes(8),
+                t0.AddMinutes(8), "turn-late-c", null, null));
+            Assert.Equal(13L, database.GetSessionTotal("conflict-late").Total);
+            Assert.True(database.AcceptTokenSample("conflict-early", conflictShared, t0.AddMinutes(4),
+                t0.AddMinutes(4), "turn-early-c", null, null));
+            Assert.Equal(13L, database.GetSessionTotal("conflict-early").Total);
+            Assert.Equal(0L, database.GetSessionTotal("conflict-late").Total);
+
+            var recoverNull = LineageSnapshot(10, 2, 10, 2, null);
+            database.UpsertSession(new SessionMetadata("recover-root", "RecoverRoot", null, null, null,
+                "gpt-test", null, null, t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("recover-win", "RecoverWin", null, null, null,
+                "gpt-test", null, null, t0, null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "recover-root", AgentDepth: 1));
+            database.UpsertSession(new SessionMetadata("recover-lose", "RecoverLose", null, null, null,
+                "gpt-test", null, null, t0, null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "recover-root", AgentDepth: 1));
+            Assert.True(database.AcceptTokenSample("recover-win", recoverNull, t0.AddMinutes(20),
+                t0.AddMinutes(20), "turn-rw", null, null));
+            Assert.True(database.AcceptTokenSample("recover-lose", recoverNull, t0.AddMinutes(21),
+                t0.AddMinutes(21), "turn-rl", null, null));
+            Assert.Equal(12L, database.GetSessionTotal("recover-win").Total);
+            Assert.Equal(0L, database.GetSessionTotal("recover-lose").Total);
+            Assert.True(database.RecoverPersistedContextWindow(recoverNull.Fingerprint("recover-win"), 128000));
+            Assert.Equal(12L, database.GetSessionTotal("recover-win").Total);
+            Assert.Equal(12L, database.GetSessionTotal("recover-lose").Total);
+
+            var reverseNull = LineageSnapshot(14, 2, 14, 2, null);
+            database.UpsertSession(new SessionMetadata("reverse-root", "ReverseRoot", null, null, null,
+                "gpt-test", null, null, t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("reverse-win", "ReverseWin", null, null, null,
+                "gpt-test", null, null, t0, null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "reverse-root", AgentDepth: 1));
+            database.UpsertSession(new SessionMetadata("reverse-lose", "ReverseLose", null, null, null,
+                "gpt-test", null, null, t0, null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "reverse-root", AgentDepth: 1));
+            Assert.True(database.AcceptTokenSample("reverse-win", reverseNull, t0.AddMinutes(22),
+                t0.AddMinutes(22), "turn-rev-w", null, null));
+            Assert.True(database.AcceptTokenSample("reverse-lose", reverseNull, t0.AddMinutes(23),
+                t0.AddMinutes(23), "turn-rev-l", null, null));
+            Assert.Equal(16L, database.GetSessionTotal("reverse-win").Total);
+            Assert.Equal(0L, database.GetSessionTotal("reverse-lose").Total);
+            Assert.True(database.RecoverPersistedContextWindow(reverseNull.Fingerprint("reverse-lose"), 128000));
+            Assert.Equal(16L, database.GetSessionTotal("reverse-win").Total);
+            Assert.Equal(16L, database.GetSessionTotal("reverse-lose").Total);
+
+            const string heuristicThread = "ctx-keep";
+            const long window = 258_400;
+            database.UpsertSession(new SessionMetadata(heuristicThread, "CtxKeep", null, null, null, "gpt-test",
+                null, null, t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            long heuristicCumulative = 3_000_000;
+            var heuristicTime = t0.AddHours(2);
+            foreach (var index in Enumerable.Range(0, 3))
+            {
+                var turn = "heuristic-" + index;
+                var time = heuristicTime.AddMinutes(index * 3);
+                Assert.True(database.AcceptTokenSample(heuristicThread,
+                    new TokenUsageSnapshot(new TokenComponents(heuristicCumulative, null, null, null, 0, null,
+                        heuristicCumulative), new TokenComponents(232_000, null, null, null, 0, null, 232_000),
+                        window), time, time, turn, "gpt-test", null));
+                Assert.True(database.AcceptTokenSample(heuristicThread,
+                    new TokenUsageSnapshot(new TokenComponents(heuristicCumulative, null, null, null, 0, null,
+                        heuristicCumulative), new TokenComponents(0, null, null, null, 0, null, 0), window),
+                    time.AddSeconds(10), time.AddSeconds(10), turn, "gpt-test", null));
+                heuristicCumulative += 106_000 + index * 2_000;
+                Assert.True(database.AcceptTokenSample(heuristicThread,
+                    new TokenUsageSnapshot(new TokenComponents(heuristicCumulative, null, null, null, 0, null,
+                        heuristicCumulative),
+                        new TokenComponents(106_000 + index * 2_000, null, null, null, 0, null,
+                            106_000 + index * 2_000), window),
+                    time.AddSeconds(20), time.AddSeconds(20), turn, "gpt-test", null));
+            }
+            var heuristicBefore = database.LoadSessionContextMetrics()[heuristicThread];
+            Assert.Equal(3, heuristicBefore.PostCompactionSampleCount);
+            Assert.Equal(108_000L, heuristicBefore.PostCompactionInputTokens);
+            Assert.Equal(window, heuristicBefore.PostCompactionWindowTokens);
+            Assert.True(heuristicBefore.HasReliablePostCompactionBaseline);
+            Assert.True(heuristicBefore.TurnRunwayChangePercent.HasValue);
+            Assert.True(heuristicBefore.TokenRunwayChangePercent.HasValue);
+            var heuristicLifecycleBefore = database.LoadSessionAggregates(heuristicTime.AddHours(1))
+                .Single(item => item.Metadata.ThreadId == heuristicThread);
+            if (heuristicLifecycleBefore.LifecycleMetrics is not { } heuristicLifeBefore)
+                throw new InvalidOperationException("lifecycle_metrics_missing");
+            var heuristicTokensBefore = heuristicLifeBefore.Recent48HourTokens;
+            Assert.True(heuristicTokensBefore > 0);
+
+            database.UpsertSession(new SessionMetadata("dummy-parent", "DummyParent", null, null, null,
+                "gpt-test", null, null, t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("dummy-child", "DummyChild", null, null, null,
+                "gpt-test", null, null, t0, null, Kind: SessionKind.InternalTask,
+                Surface: SessionSurface.InternalTask, ParentThreadId: "dummy-parent", AgentDepth: 1));
+            Assert.True(database.AcceptTokenSample("dummy-child", LineageSnapshot(9, 1, 9, 1),
+                t0.AddMinutes(40), t0.AddMinutes(40), "turn-dummy", "gpt-test", null));
+            Assert.True(database.ClearSessionParent("dummy-child"));
+            DrainAggregates(database);
+            var heuristicAfter = database.LoadSessionContextMetrics()[heuristicThread];
+            Assert.Equal(heuristicBefore.PostCompactionSampleCount, heuristicAfter.PostCompactionSampleCount);
+            Assert.Equal(heuristicBefore.PostCompactionInputTokens, heuristicAfter.PostCompactionInputTokens);
+            Assert.Equal(heuristicBefore.PostCompactionWindowTokens, heuristicAfter.PostCompactionWindowTokens);
+            Assert.Equal(heuristicBefore.TurnRunwayChangePercent, heuristicAfter.TurnRunwayChangePercent);
+            Assert.Equal(heuristicBefore.TokenRunwayChangePercent, heuristicAfter.TokenRunwayChangePercent);
+            var heuristicLifecycleAfter = database.LoadSessionAggregates(heuristicTime.AddHours(1))
+                .Single(item => item.Metadata.ThreadId == heuristicThread);
+            if (heuristicLifecycleAfter.LifecycleMetrics is not { } heuristicLifeAfter)
+                throw new InvalidOperationException("lifecycle_metrics_missing");
+            Assert.Equal(heuristicTokensBefore, heuristicLifeAfter.Recent48HourTokens);
+
+            Assert.True(database.AcceptTokenSample("late-child", shared, t0.AddMinutes(10), t0.AddMinutes(10),
+                "turn-late", null, null));
+            Assert.Equal(12L, database.GetSessionTotal("late-child").Total);
+            Assert.True(database.AcceptTokenSample("late-parent", shared, t0.AddMinutes(3), t0.AddMinutes(3),
+                "turn-early", null, null));
+            database.UpsertSession(new SessionMetadata("late-parent", "LateParent", null, null, null, "gpt-test",
+                null, null, t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("late-child", "LateChild", null, null, null, "gpt-test",
+                null, null, t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "late-parent", AgentDepth: 1));
+            DrainAggregates(database);
+            Assert.Equal(12L, database.GetSessionTotal("late-parent").Total);
+            Assert.Equal(0L, database.GetSessionTotal("late-child").Total);
+
+            var snapshot = new HudSnapshot(
+                new QuotaObservation(new QuotaBucket("codex", "Codex", 10, 10080, t0.AddDays(7)),
+                    Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, t0.AddHours(1), false),
+                database.LoadSessionAggregates(t0.AddHours(1)),
+                database.GetCycleTotal(t0, t0.AddHours(1)), t0.AddHours(1), false, "fresh",
+                Array.Empty<string>());
+            var display = HudPresentation.BuildRows(snapshot);
+            Assert.Equal(24L, display.Single(row => row.ThreadId == "presence").SessionTotal.Total);
+            Assert.Equal(12L, display.Single(row => row.ThreadId == "late-parent").WorkTotal.Total);
+            Assert.Equal(0L, display.Single(row => row.ThreadId == "late-child").SessionTotal.Total);
+            AssertNonNegativeAggregates(databasePath);
+        }
+
+        using var restarted = new UsageDatabase(databasePath);
+        DrainAggregates(restarted);
+        Assert.Equal(24L, restarted.GetSessionTotal("presence").Total);
+        Assert.Equal(12L, restarted.GetSessionTotal("alpha").Total);
+        Assert.Equal(12L, restarted.GetSessionTotal("beta").Total);
+        Assert.Equal(12L, restarted.GetSessionTotal("late-parent").Total);
+        Assert.Equal(0L, restarted.GetSessionTotal("late-child").Total);
+    }
+
+    private static void LineageIndependentOracleDefectInjection(string runRoot)
+    {
+        AssertLineageSampleSqlForms();
+        AssertLiveSizedIndependentElection();
+
+        var directory = Path.Combine(runRoot, "lineage-oracle");
+        Directory.CreateDirectory(directory);
+        var schema9Path = Path.Combine(directory, "schema9.db");
+        CreateSchemaV9LineageFixture(schema9Path);
+        var schema9 = CaptureLineageCheck(schema9Path);
+        Assert.True(schema9.Text.Contains("schema=9", StringComparison.Ordinal));
+        Assert.True(schema9.Text.Contains("samples=4", StringComparison.Ordinal));
+        Assert.True(!schema9.Text.Contains("no such column", StringComparison.Ordinal));
+
+        var databasePath = Path.Combine(directory, "usage.db");
+        var t0 = DateTimeOffset.Parse("2026-06-01T00:00:00Z", CultureInfo.InvariantCulture);
+        using (var database = new UsageDatabase(databasePath))
+        {
+            database.UpsertSession(new SessionMetadata("oracle-root", "Root", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("oracle-child", "Child", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "oracle-root", AgentDepth: 1));
+            var shared = LineageSnapshot(10, 2, 10, 2);
+            var tail = LineageSnapshot(13, 3, 3, 1);
+            Assert.True(database.AcceptTokenSample("oracle-root", shared, t0, t0, "turn-root", null, null));
+            Assert.True(database.AcceptTokenSample("oracle-child", shared, t0.AddMinutes(1), t0.AddMinutes(1),
+                "turn-child", null, null));
+            Assert.True(database.AcceptTokenSample("oracle-child", tail, t0.AddMinutes(2), t0.AddMinutes(2),
+                "turn-child", null, null));
+            Assert.Equal(12L, database.GetSessionTotal("oracle-root").Total);
+            Assert.Equal(4L, database.GetSessionTotal("oracle-child").Total);
+        }
+
+        var matched = CaptureLineageCheck(databasePath);
+        Assert.Equal(0, matched.Code);
+        Assert.True(matched.Text.Contains("status=MATCH", StringComparison.Ordinal));
+
+        FlipCanonicalOff(databasePath, "oracle-child");
+        var zeroWinners = CaptureLineageCheck(databasePath);
+        Assert.Equal(1, zeroWinners.Code);
+        Assert.True(zeroWinners.Text.Contains("status=MISMATCH", StringComparison.Ordinal));
+
+        RestoreLatestCanonical(databasePath, "oracle-child");
+        CorruptStoredIdentity(databasePath, "oracle-root");
+        var identityDefect = CaptureLineageCheck(databasePath);
+        Assert.Equal(1, identityDefect.Code);
+        Assert.True(identityDefect.Text.Contains("status=MISMATCH", StringComparison.Ordinal));
+
+        var encoderPath = Path.Combine(directory, "encoder.db");
+        using (var encoder = new UsageDatabase(encoderPath))
+        {
+            encoder.UpsertSession(new SessionMetadata("enc-a", "A", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            encoder.UpsertSession(new SessionMetadata("enc-b", "B", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.Cli));
+            encoder.UpsertSession(new SessionMetadata("enc-c", "C", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            Assert.True(encoder.AcceptTokenSample("enc-a", LineageSnapshot(10, 2, 10, 2), t0, t0,
+                "turn-a", null, null));
+            Assert.True(encoder.AcceptTokenSample("enc-b", LineageSnapshot(13, 3, 3, 1), t0, t0,
+                "turn-b", null, null));
+            Assert.True(encoder.AcceptTokenSample("enc-c", LineageSnapshot(15, 1, 15, 1), t0, t0,
+                "turn-c", null, null));
+        }
+
+        var originalA = ReadLiveMaterial(encoderPath, "enc-a");
+        var originalB = ReadLiveMaterial(encoderPath, "enc-b");
+        InjectMatchingHashMaterial(encoderPath, "enc-a", ReorderLiveTupleFields(originalA));
+        InjectMatchingHashMaterial(encoderPath, "enc-b", OmitLiveTupleField(originalB));
+        InjectMatchingHashMaterial(encoderPath, "enc-c", "lineage-semantic-v2|not-a-tuple|m|m");
+        var encoderDefect = CaptureLineageCheck(encoderPath);
+        Assert.Equal(1, encoderDefect.Code);
+        Assert.True(encoderDefect.Text.Contains("status=MISMATCH", StringComparison.Ordinal));
+
+        AssertIndependentEqualTimeOrder(t0);
+        AssertEqualTimeAncestorRebuild(directory, t0);
+    }
+
+    private static LineageCycleRow IndependentOrderRow(long id, string threadId, long? ticks, string? sourceKey,
+        int depth, string root, string identity)
+    {
+        var last = new CanonicalTokenUsage(1, 1, 0, 0, 0, 0, 1, 1);
+        var row = new LineageCycleRow(id, threadId, last, 1, 0, 1, null, ticks, sourceKey, 0, 0, "", "",
+            root, false, "");
+        row.IndependentRoot = root;
+        row.IndependentDepth = depth;
+        row.IndependentIdentity = identity;
+        return row;
+    }
+
+    private static void AssertIndependentEqualTimeOrder(DateTimeOffset t0)
+    {
+        var ticks = t0.UtcTicks;
+        var ancestor = IndependentOrderRow(1, "eq-parent", ticks, "win-v2:zzzz-parent", 0, "eq-parent", "shared");
+        var descendant = IndependentOrderRow(2, "eq-child", ticks, "win-v2:aaaa-child", 1, "eq-parent", "shared");
+        Assert.True(IndependentLineage.CompareOrder(ancestor, descendant) < 0);
+        var elected = IndependentLineage.ElectCanonicalIds(new[] { descendant, ancestor });
+        Assert.True(elected.Contains(1));
+        Assert.True(!elected.Contains(2));
+
+        var sibLateKey = IndependentOrderRow(3, "eq-sib-a", ticks, "win-v2:zzzz-sib", 1, "eq-sib-root", "sib");
+        var sibEarlyKey = IndependentOrderRow(4, "eq-sib-b", ticks, "win-v2:aaaa-sib", 1, "eq-sib-root", "sib");
+        Assert.True(IndependentLineage.CompareOrder(sibEarlyKey, sibLateKey) < 0);
+        var sibElected = IndependentLineage.ElectCanonicalIds(new[] { sibLateKey, sibEarlyKey });
+        Assert.True(sibElected.Contains(4));
+        Assert.True(!sibElected.Contains(3));
+
+        var earlierChild = IndependentOrderRow(5, "early-child", ticks, "win-v2:zzzz-child", 1, "early-parent",
+            "early");
+        var laterParent = IndependentOrderRow(6, "early-parent", ticks + 1, "win-v2:aaaa-parent", 0, "early-parent",
+            "early");
+        Assert.True(IndependentLineage.CompareOrder(earlierChild, laterParent) < 0);
+
+        var unrelatedA = IndependentOrderRow(7, "unrelated-a", ticks, "win-v2:zzzz", 0, "unrelated-a", "shared");
+        var unrelatedB = IndependentOrderRow(8, "unrelated-b", ticks, "win-v2:aaaa", 0, "unrelated-b", "shared");
+        var unrelatedElected = IndependentLineage.ElectCanonicalIds(new[] { unrelatedA, unrelatedB });
+        Assert.True(unrelatedElected.Contains(7) && unrelatedElected.Contains(8));
+
+        var degradedParent = IndependentOrderRow(9, "deg-parent", null, "win-v2:zzzz-parent", 0, "deg-parent",
+            "degraded");
+        var degradedChild = IndependentOrderRow(10, "deg-child", null, "win-v2:aaaa-child", 1, "deg-parent",
+            "degraded");
+        Assert.True(IndependentLineage.CompareOrder(degradedChild, degradedParent) < 0);
+        var degradedElected = IndependentLineage.ElectCanonicalIds(new[] { degradedParent, degradedChild });
+        Assert.True(degradedElected.Contains(10));
+        Assert.True(!degradedElected.Contains(9));
+
+        var parents = new Dictionary<string, string?>(StringComparer.Ordinal)
+        {
+            ["eq-parent"] = null,
+            ["eq-child"] = "eq-parent",
+            ["eq-grand"] = "eq-child",
+            ["missing-child"] = "no-such-parent",
+            ["cycle-a"] = "cycle-b",
+            ["cycle-b"] = "cycle-a",
+        };
+        Assert.Equal(0, IndependentLineage.ResolvedDepth("eq-parent", parents));
+        Assert.Equal(1, IndependentLineage.ResolvedDepth("eq-child", parents));
+        Assert.Equal(2, IndependentLineage.ResolvedDepth("eq-grand", parents));
+        Assert.Equal(0, IndependentLineage.ResolvedDepth("missing-child", parents));
+        Assert.Equal(0, IndependentLineage.ResolvedDepth("cycle-a", parents));
+        Assert.Equal(0, IndependentLineage.ResolvedDepth("cycle-b", parents));
+        Assert.Equal("missing-child", IndependentLineage.ResolveRoot("missing-child", parents));
+        Assert.Equal("cycle-a", IndependentLineage.ResolveRoot("cycle-a", parents));
+    }
+
+    private static void AssertEqualTimeAncestorRebuild(string directory, DateTimeOffset t0)
+    {
+        var equalTimePath = Path.Combine(directory, "equal-time.db");
+        var shared = LineageSnapshot(10, 2, 10, 2);
+        var tail = LineageSnapshot(13, 3, 3, 1);
+        using (var database = new UsageDatabase(equalTimePath))
+        {
+            database.UpsertSession(new SessionMetadata("eq-parent", "Parent", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("eq-child", "Child", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "eq-parent", AgentDepth: 1));
+            database.UpsertSession(new SessionMetadata("eq-sib-root", "SibRoot", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("eq-sib-a", "SibA", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "eq-sib-root", AgentDepth: 1));
+            database.UpsertSession(new SessionMetadata("eq-sib-b", "SibB", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "eq-sib-root", AgentDepth: 1));
+            database.UpsertSession(new SessionMetadata("early-parent", "EarlyParent", null, null, null, null, null,
+                null, t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("early-child", "EarlyChild", null, null, null, null, null,
+                null, t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "early-parent", AgentDepth: 1));
+            database.UpsertSession(new SessionMetadata("unrelated-a", "UA", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("unrelated-b", "UB", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.Cli));
+            database.UpsertSession(new SessionMetadata("missing-child", "Missing", null, null, null, null, null,
+                null, t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "no-such-parent", AgentDepth: 1));
+            database.UpsertSession(new SessionMetadata("cycle-a", "CA", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "cycle-b", AgentDepth: 1));
+            database.UpsertSession(new SessionMetadata("cycle-b", "CB", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "cycle-a", AgentDepth: 1));
+            database.UpsertSession(new SessionMetadata("deg-parent", "DegParent", null, null, null, null, null,
+                null, t0, null, Kind: SessionKind.Primary, Surface: SessionSurface.App));
+            database.UpsertSession(new SessionMetadata("deg-child", "DegChild", null, null, null, null, null, null,
+                t0, null, Kind: SessionKind.InternalTask, Surface: SessionSurface.InternalTask,
+                ParentThreadId: "deg-parent", AgentDepth: 1));
+            var degraded = LineageSnapshot(14, 2, 14, 2);
+            Assert.True(database.AcceptTokenSample("eq-parent", shared, t0, t0, "turn-parent", null, null));
+            Assert.True(database.AcceptTokenSample("eq-child", shared, t0, t0, "turn-child", null, null));
+            Assert.True(database.AcceptTokenSample("eq-child", tail, t0.AddMinutes(2), t0.AddMinutes(2),
+                "turn-child", null, null));
+            Assert.True(database.AcceptTokenSample("eq-sib-a", shared, t0, t0, "turn-sib-a", null, null));
+            Assert.True(database.AcceptTokenSample("eq-sib-b", shared, t0, t0, "turn-sib-b", null, null));
+            Assert.True(database.AcceptTokenSample("early-child", shared, t0, t0, "turn-early-child", null, null));
+            Assert.True(database.AcceptTokenSample("early-parent", shared, t0.AddMinutes(1), t0.AddMinutes(1),
+                "turn-early-parent", null, null));
+            Assert.True(database.AcceptTokenSample("unrelated-a", shared, t0, t0, "turn-ua", null, null));
+            Assert.True(database.AcceptTokenSample("unrelated-b", shared, t0, t0, "turn-ub", null, null));
+            Assert.True(database.AcceptTokenSample("missing-child", shared, t0, t0, "turn-missing", null, null));
+            Assert.True(database.AcceptTokenSample("cycle-a", shared, t0, t0, "turn-ca", null, null));
+            Assert.True(database.AcceptTokenSample("cycle-b", shared, t0, t0, "turn-cb", null, null));
+            Assert.True(database.AcceptTokenSample("deg-parent", degraded, null, t0, "turn-deg-parent", null, null));
+            Assert.True(database.AcceptTokenSample("deg-child", degraded, null, t0, "turn-deg-child", null, null));
+        }
+
+        SetThreadSourceKey(equalTimePath, "eq-parent", "win-v2:zzzz-parent");
+        SetThreadSourceKey(equalTimePath, "eq-child", "win-v2:aaaa-child");
+        SetThreadSourceKey(equalTimePath, "eq-sib-a", "win-v2:zzzz-sib");
+        SetThreadSourceKey(equalTimePath, "eq-sib-b", "win-v2:aaaa-sib");
+        SetThreadSourceKey(equalTimePath, "early-parent", "win-v2:aaaa-early-parent");
+        SetThreadSourceKey(equalTimePath, "early-child", "win-v2:zzzz-early-child");
+        SetThreadSourceKey(equalTimePath, "deg-parent", "win-v2:zzzz-deg-parent");
+        SetThreadSourceKey(equalTimePath, "deg-child", "win-v2:aaaa-deg-child");
+
+        using (var database = new UsageDatabase(equalTimePath))
+        {
+            database.RebuildLineageCanonical();
+            DrainAggregates(database);
+            Assert.Equal(12L, database.GetSessionTotal("eq-parent").Total);
+            Assert.Equal(4L, database.GetSessionTotal("eq-child").Total);
+            Assert.Equal(0L, database.GetSessionTotal("eq-sib-a").Total);
+            Assert.Equal(12L, database.GetSessionTotal("eq-sib-b").Total);
+            Assert.Equal(0L, database.GetSessionTotal("early-parent").Total);
+            Assert.Equal(12L, database.GetSessionTotal("early-child").Total);
+            Assert.Equal(12L, database.GetSessionTotal("unrelated-a").Total);
+            Assert.Equal(12L, database.GetSessionTotal("unrelated-b").Total);
+            Assert.Equal(12L, database.GetSessionTotal("missing-child").Total);
+            Assert.Equal(12L, database.GetSessionTotal("cycle-a").Total);
+            Assert.Equal(12L, database.GetSessionTotal("cycle-b").Total);
+            Assert.Equal(0L, database.GetSessionTotal("deg-parent").Total);
+            Assert.Equal(16L, database.GetSessionTotal("deg-child").Total);
+            var rows = ReadLineageRows(equalTimePath);
+            var parent = rows.Single(row => row.ThreadId == "eq-parent");
+            Assert.Equal(1, parent.Canonical);
+            Assert.Equal("eq-parent", parent.Root);
+            var copied = rows.Single(row => row.ThreadId == "eq-child" && row.Identity == parent.Identity);
+            Assert.Equal(0, copied.Canonical);
+            Assert.Equal("eq-parent", copied.Root);
+            var childTail = rows.Single(row => row.ThreadId == "eq-child" && row.Identity != parent.Identity);
+            Assert.Equal(1, childTail.Canonical);
+            Assert.Equal(0, rows.Single(row => row.ThreadId == "eq-sib-a").Canonical);
+            Assert.Equal(1, rows.Single(row => row.ThreadId == "eq-sib-b").Canonical);
+            Assert.Equal(0, rows.Single(row => row.ThreadId == "early-parent").Canonical);
+            Assert.Equal(1, rows.Single(row => row.ThreadId == "early-child").Canonical);
+            Assert.Equal(1, rows.Single(row => row.ThreadId == "unrelated-a").Canonical);
+            Assert.Equal(1, rows.Single(row => row.ThreadId == "unrelated-b").Canonical);
+            Assert.Equal(1, rows.Single(row => row.ThreadId == "missing-child").Canonical);
+            Assert.Equal("missing-child", rows.Single(row => row.ThreadId == "missing-child").Root);
+            Assert.True(rows.Where(row => row.ThreadId is "cycle-a" or "cycle-b")
+                .All(row => row.Root == row.ThreadId && row.Canonical == 1));
+            Assert.Equal(0, rows.Single(row => row.ThreadId == "deg-parent").Canonical);
+            Assert.Equal(1, rows.Single(row => row.ThreadId == "deg-child").Canonical);
+            Assert.Equal("deg-parent", rows.Single(row => row.ThreadId == "deg-child").Root);
+            Assert.True(!database.ContainsPrivacySentinel(Sentinel));
+            AssertNonNegativeAggregates(equalTimePath);
+        }
+
+        using (var restarted = new UsageDatabase(equalTimePath))
+        {
+            DrainAggregates(restarted);
+            Assert.Equal(12L, restarted.GetSessionTotal("eq-parent").Total);
+            Assert.Equal(4L, restarted.GetSessionTotal("eq-child").Total);
+            Assert.Equal(0L, restarted.GetSessionTotal("deg-parent").Total);
+            Assert.Equal(16L, restarted.GetSessionTotal("deg-child").Total);
+            var restartRows = ReadLineageRows(equalTimePath);
+            Assert.Equal(1, restartRows.Single(row => row.ThreadId == "eq-parent").Canonical);
+            Assert.Equal(0, restartRows.Single(row => row.ThreadId == "deg-parent").Canonical);
+            Assert.Equal(1, restartRows.Single(row => row.ThreadId == "deg-child").Canonical);
+            Assert.True(!restarted.ContainsPrivacySentinel(Sentinel));
+            AssertNonNegativeAggregates(equalTimePath);
+        }
+
+        var matched = CaptureLineageCheck(equalTimePath);
+        Assert.Equal(0, matched.Code);
+        Assert.True(matched.Text.Contains("status=MATCH", StringComparison.Ordinal));
+    }
+
+    private static (int Code, string Text) CaptureLineageCheck(string databasePath)
+    {
+        var original = Console.Out;
+        using var writer = new StringWriter();
+        Console.SetOut(writer);
+        try
+        {
+            return (RunLineageCycleCheck(new[] { databasePath }), writer.ToString());
+        }
+        finally
+        {
+            Console.SetOut(original);
+        }
+    }
+
+    private static void AssertLineageSampleSqlForms()
+    {
+        var schema9 = IndependentLineage.SampleSql(false, false);
+        var schema10 = IndependentLineage.SampleSql(true, true);
+        var schema10NoAlias = IndependentLineage.SampleSql(true, false);
+        Assert.Equal(
+            "SELECT id, thread_id, input_tokens, raw_input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens, canonical_total_tokens, reported_total_tokens, cumulative_input_tokens, cumulative_output_tokens, cumulative_total_tokens, context_window, event_time_ticks, source_key, source_generation, source_offset FROM token_samples",
+            NormalizeSql(schema9));
+        Assert.Equal(
+            "SELECT id, thread_id, input_tokens, raw_input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens, canonical_total_tokens, reported_total_tokens, cumulative_input_tokens, cumulative_output_tokens, cumulative_total_tokens, context_window, event_time_ticks, source_key, source_generation, source_offset, semantic_identity, semantic_material, lineage_root_thread_id, is_lineage_canonical, legacy_semantic_identity FROM token_samples",
+            NormalizeSql(schema10));
+        Assert.Equal(
+            "SELECT id, thread_id, input_tokens, raw_input_tokens, cached_input_tokens, cache_write_input_tokens, output_tokens, reasoning_output_tokens, canonical_total_tokens, reported_total_tokens, cumulative_input_tokens, cumulative_output_tokens, cumulative_total_tokens, context_window, event_time_ticks, source_key, source_generation, source_offset, semantic_identity, semantic_material, lineage_root_thread_id, is_lineage_canonical, '' FROM token_samples",
+            NormalizeSql(schema10NoAlias));
+        Assert.True(schema9.IndexOf("SELECT id", StringComparison.Ordinal) <
+                    schema9.IndexOf("FROM token_samples", StringComparison.Ordinal));
+        Assert.True(schema10.IndexOf("is_lineage_canonical", StringComparison.Ordinal) <
+                    schema10.IndexOf("FROM token_samples", StringComparison.Ordinal));
+        Assert.True(!schema9.Contains("semantic_identity", StringComparison.Ordinal));
+    }
+
+    private static string NormalizeSql(string sql) =>
+        string.Join(' ', sql.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+    private static void AssertLiveSizedIndependentElection()
+    {
+        const int count = 216_000;
+        var rows = new List<LineageCycleRow>(count);
+        var last = new CanonicalTokenUsage(1, 1, 0, 0, 0, 0, 1, 1);
+        for (var index = 0; index < count; index++)
+        {
+            var row = new LineageCycleRow(index + 1, "thread-" + (index % 16), last, index, 0, index, null,
+                index, "src", 0, index, "", "", "root-" + (index % 8), false, "");
+            row.IndependentRoot = "root-" + (index % 8);
+            rows.Add(row);
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        foreach (var row in rows) IndependentLineage.Describe(row);
+        var winners = IndependentLineage.ElectCanonicalIds(rows);
+        stopwatch.Stop();
+        if (stopwatch.ElapsedMilliseconds >= 5_000)
+            throw new InvalidOperationException("live_sized_election_ms=" + stopwatch.ElapsedMilliseconds);
+        Assert.Equal(count, winners.Count);
+    }
+
+    private static string ReadLiveMaterial(string databasePath, string threadId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT semantic_material FROM token_samples
+            WHERE thread_id = $thread_id AND semantic_material LIKE 'lineage-semantic-v2|%'
+            ORDER BY id LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        return Convert.ToString(command.ExecuteScalar(), CultureInfo.InvariantCulture) ??
+               throw new InvalidOperationException("live_material_missing");
+    }
+
+    private static void InjectMatchingHashMaterial(string databasePath, string threadId, string material)
+    {
+        var identity = IndependentLineage.Hash(material);
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE token_samples
+            SET semantic_material = $material, semantic_identity = $identity
+            WHERE thread_id = $thread_id AND semantic_material LIKE 'lineage-semantic-v2|%';
+            """;
+        command.Parameters.AddWithValue("$material", material);
+        command.Parameters.AddWithValue("$identity", identity);
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        command.ExecuteNonQuery();
+    }
+
+    private static string ReorderLiveTupleFields(string material)
+    {
+        var parts = material.Split('|');
+        if (parts.Length != 4) throw new InvalidOperationException("live_material_shape");
+        var fields = parts[1].Split(',');
+        if (fields.Length != 7) throw new InvalidOperationException("live_tuple_shape");
+        (fields[0], fields[6]) = (fields[6], fields[0]);
+        parts[1] = string.Join(',', fields);
+        return string.Join('|', parts);
+    }
+
+    private static string OmitLiveTupleField(string material)
+    {
+        var parts = material.Split('|');
+        if (parts.Length != 4) throw new InvalidOperationException("live_material_shape");
+        var fields = parts[1].Split(',');
+        if (fields.Length != 7) throw new InvalidOperationException("live_tuple_shape");
+        parts[1] = string.Join(',', fields.Take(6));
+        return string.Join('|', parts);
+    }
+
+    private static TokenComponents WithPresenceField(TokenComponents source, string field, long? value) =>
+        field switch
+        {
+            "cached" => source with { CachedInputTokens = value },
+            "read" => source with { CacheReadInputTokens = value },
+            "write" => source with { CacheWriteInputTokens = value },
+            "reasoning" => source with { ReasoningOutputTokens = value },
+            "reported" => source with { TotalTokens = value },
+            _ => throw new InvalidOperationException("unknown_presence_field"),
+        };
+
+    private static void SetThreadSourceKey(string databasePath, string threadId, string sourceKey)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE token_samples SET source_key = $source_key WHERE thread_id = $thread_id;
+            """;
+        command.Parameters.AddWithValue("$source_key", sourceKey);
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        command.ExecuteNonQuery();
+    }
+
+    private static void FlipCanonicalOff(string databasePath, string threadId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE token_samples SET is_lineage_canonical = 0
+            WHERE thread_id = $thread_id AND is_lineage_canonical = 1;
+            """;
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        command.ExecuteNonQuery();
+    }
+
+    private static void RestoreLatestCanonical(string databasePath, string threadId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE token_samples SET is_lineage_canonical = 1
+            WHERE id = (SELECT MAX(id) FROM token_samples WHERE thread_id = $thread_id);
+            """;
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        command.ExecuteNonQuery();
+    }
+
+    private static void CorruptStoredIdentity(string databasePath, string threadId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE token_samples
+            SET semantic_identity = '0000000000000000000000000000000000000000000000000000000000000000'
+            WHERE thread_id = $thread_id AND is_lineage_canonical = 1;
+            """;
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        command.ExecuteNonQuery();
+    }
+
+    private static long ReadFrontierMaximum(string databasePath, string threadId)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            "SELECT COALESCE(maximum_cumulative_total, 0) FROM cumulative_frontiers WHERE thread_id = $thread_id;";
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        var value = command.ExecuteScalar();
+        return value is null or DBNull ? 0 : Convert.ToInt64(value, CultureInfo.InvariantCulture);
+    }
+
+    private static long ReadBucketTotal(string databasePath, DateTimeOffset startUtc, DateTimeOffset endUtc)
+    {
+        using var connection = new SqliteConnection($"Data Source={databasePath};Pooling=False");
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT COALESCE(SUM(canonical_total_tokens), 0) FROM token_time_buckets
+            WHERE bucket_start_ticks >= $start AND bucket_start_ticks < $end;
+            """;
+        command.Parameters.AddWithValue("$start", startUtc.UtcTicks);
+        command.Parameters.AddWithValue("$end", endUtc.UtcTicks);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture);
+    }
 
     private static string TokenLine(string threadId, long timestamp, long totalInput, long totalOutput,
         long lastInput, long lastOutput) =>

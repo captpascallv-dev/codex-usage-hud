@@ -18,7 +18,7 @@ public sealed class UsageEngine : IDisposable
     private readonly StateMetadataReader _stateReader = new();
     private readonly SessionIndexReader _indexReader = new();
     private readonly CodexExecutableDiscovery _executableDiscovery = new();
-    private readonly AppServerClient _appServerClient = new();
+    private readonly AppServerClient _appServerClient = new(HudProduct.Version);
     private readonly QuotaStateMachine _quotaState;
     private readonly RefreshCadence _cadence = new();
     private readonly object _gate = new();
@@ -304,7 +304,9 @@ public sealed class UsageEngine : IDisposable
     {
         var now = DateTimeOffset.UtcNow;
         var aggregateMigrationPending = !_database.IsAggregateRebuildComplete;
-        var sessions = _indexer.LoadAggregates(now);
+        var sessions = aggregateMigrationPending
+            ? Array.Empty<SessionAggregate>()
+            : _indexer.LoadAggregates(now);
         var primaryQuota = _quota.Primary is { HasValidWindow: true } bucket ? bucket : null;
         var hasCurrentWindow = primaryQuota is not null && primaryQuota.CycleStartUtc <= now &&
                                primaryQuota.ResetsAtUtc > now && !aggregateMigrationPending;

@@ -26,6 +26,24 @@ Codex Usage HUD 是一个非官方的 Windows 10/11 x64 本地伴侣应用。它
 Windows 可能因为应用尚未购买代码签名证书而显示 SmartScreen 提示。Release 同时提供
 SHA-256 校验文件，用于确认下载内容没有发生变化。
 
+### v1.0.2 父子 lineage 去重
+
+Fork / 子任务 rollout 会把祖先 token 历史复制到新的 thread id 下。v1.0.1 按 thread
+指纹去重，因此同一语义事件会被每个后代再计一次。v1.0.2 保留原始 thread 指纹与
+`token_samples` 供审计，同时按 `(解析后的父树根, 语义事件身份)` 只保留最早可靠出现；
+会话累计只含本线程的 canonical 事件，父工作合计含子孙 canonical 事件，全局/周期合计
+每个 canonical 事件只计一次。新事件的语义身份是全部七个独立 total/last/context 字段
+（`input`、`cached_input`、`cache_read_input_tokens`、`cache_write`、`output`、
+`reasoning`、`total`，外加 last 元组与 context-window 有无），缺失与显式零不相同，
+不先做 canonical 归一；schema v9 迁移行使用确定性遗留别名，使等价
+的后续 live 祖先回放与迁移结果一致，但不会把共享同一损失别名的不同 live 缺失/零
+事件全部消掉。兼容配对只绑定遗留组赢家与至多一个 live v2 身份，被降级的代表
+在后续写入、重启和全量重建后仍可被发现，因此第二个不同的缺失/零身份保持
+canonical。同一插入上的精确组选举与兼容配对只按净 canonical 变化更新合计；既提升
+又降级的样本不对合计产生净增减。会话元数据合并在省略 `parent_thread_id` 时保留已有父链；显式
+`ClearSessionParent` 才是清父路径。缺失或成环的 `parent_thread_id` 保持为孤立根，不按名称、
+项目或时间推断。
+
 ### v1.0.1 额度刷新修复
 
 Codex App Server 现会同时返回名为 `primary` 与 `secondary` 的额度窗口。v1.0.0 因无法
@@ -169,10 +187,12 @@ accepted fingerprint/sample values, scrubs legacy path bytes, and rebuilds
 derived aggregates in restart-safe batches of at most 2,000 samples. Rollout
 commits remain frozen during that rebuild.
 
-The current schema is v9. V8 added the metadata-only manual drift assessment;
+The current schema is v10. V8 added the metadata-only manual drift assessment;
 v9 adds only normalized `session_surface`, `parent_thread_id`, and bounded
-`agent_depth` fields for APP/CLI labels and subagent hierarchy. Raw source JSON
-is never copied into the HUD database.
+`agent_depth` fields for APP/CLI labels and subagent hierarchy. v10 keeps those
+hierarchy fields and adds lineage identity, alias, root, and canonical flag
+columns on `token_samples`. Raw source JSON is never copied into the HUD
+database.
 
 Turn/source migrations reset source cursors and rebuild derived aggregates from
 accepted samples. A subsequent exact replay may fill only missing safe
@@ -379,9 +399,10 @@ left/right/top docking plus the 9-pixel reveal handle. This is separate from
 the screenshot comparison: visual QA proves appearance; the WPF stress test
 proves the implemented controls remain responsive.
 
-The complete suite currently contains 78 checks, including source classification,
-parent/child rollup without double counting, cycle/orphan degradation, official compaction-boundary
-capture, same-model/window segmentation, baseline/runway trend calculations,
+The complete suite currently contains 84 checks, including source classification,
+parent/child rollup without double counting, implemented root-scoped lineage
+deduplication, cycle/orphan isolation, official compaction-boundary capture,
+same-model/window segmentation, baseline/runway trend calculations,
 metadata backfill without token duplication, restart persistence, fallback
 false-positive rejection across turn boundaries, and absence of current-context
 or compression-count UI.
@@ -407,10 +428,12 @@ HUD database.
 - The HUD reports only sessions present in local Codex metadata/logs; deleted
   or unavailable local history cannot be reconstructed.
 - Recent parent/subagent logs on this installation do not share token tuples.
-  Some other Codex versions may copy parent history into a child rollout. The
-  MVP intentionally does not deduplicate across different thread ids because
-  doing so could suppress legitimate child work; inherited-history handling
-  remains a version-dependent future validation item.
+  Some other Codex versions may copy parent history into a child rollout. v1.0.2
+  implements root-scoped lineage deduplication: raw thread fingerprints stay
+  durable for audit, while consumption uniqueness is `(parent-tree root, seven-field
+  semantic identity)` including `cache_read_input_tokens`, with missing distinct
+  from explicit zero. Missing or cyclic `parent_thread_id` values stay isolated
+  roots and are never inferred from name, project, or time.
 - The application is Windows x64 and unsigned. It does not estimate money,
   billing, or platform quota from raw tokens.
 - Login startup occurs after the current user signs in to Windows; it does not

@@ -1,14 +1,20 @@
 # Codex Usage HUD — package acceptance summary
 
-Status: `FINAL_PACKAGE_VERIFIED`
+Status: `PRE_RELEASE_CANDIDATE`
 
-Release: `1.0.1` quota-rollover compatibility hotfix.
+Release: `1.0.2` lineage-dedup hotfix (source and automated-test acceptance).
 
-This is the package-safe acceptance summary. Detailed internal diagnostics,
-machine paths, local session identifiers, local usage values, and private test
-records are intentionally not distributed with the application.
+This is the package-safe acceptance summary for a pre-release candidate.
+Detailed internal diagnostics, machine paths, local session identifiers, local
+usage values, and private test records are intentionally not distributed with
+the application.
 
-## Verified release properties
+Source and automated-test acceptance are recorded here. Package hash,
+extraction, isolated startup, privacy scan, local-replacement, and GitHub
+verification are performed only after final-audit PASS. This document is not a
+final package-verified claim.
+
+## Source and test acceptance
 
 - Windows 10/11 x64, self-contained single-file application; no separately
   installed .NET runtime or administrator permission is required.
@@ -84,12 +90,27 @@ records are intentionally not distributed with the application.
   those sources and labels the bounded activity view Recent Sessions rather
   than making an unsupported Current claim.
 - Malformed, partial, rotated, replaced, and replayed rollout files are handled
-  without double-counting accepted token events. Database-busy and parser-error
+  without double-counting accepted token events. Cross-thread inherited-history
+  replay is canonicalized to the earliest reliable occurrence in the resolved
+  parent tree before quota-cycle filtering. Live semantic identity preserves
+  missing-versus-zero tuple and context presence; schema v9 rows keep a
+  deterministic legacy alias so equivalent later live ancestor replay matches
+  migrated history without erasing every distinct live missing/zero event that
+  shares the lossy alias. Compatibility pairing elects one live v2 identity per
+  alias and keeps that demoted representative discoverable, so later distinct
+  live identities are not cascade-suppressed. Exact replay of the same thread
+  fingerprint is rejected before lineage election; a distinct descendant
+  fingerprint with the same semantic identity loses exact-group election without
+  a net aggregate delta when compatibility immediately re-demotes the
+  representative. Independent lineage/cycle
+  reconciliation parses live
+  tuple material itself rather than accepting stored material verbatim.
+  Database-busy and parser-error
   paths degrade to safe status codes instead of blocking the WPF dispatcher.
 - The release workflow runs the complete automated suite, isolated diagnostics,
   an isolated launch/exit smoke check, internal file-manifest verification,
   extracted-ZIP verification, and a package privacy scan.
-- The 78-check suite mounts a real WPF window with 1,000 synthetic sessions, exercises
+- The 84 automated tests mount a real WPF window with 1,000 synthetic sessions, exercises
   navigation and sorting, performs 30 collapse/expand pairs, submits 30 rapid
   refresh requests, performs 20 rapid manual-drift clicks under a single-flight
   guard, exercises a real parent-row expand click, and verifies all three dock
@@ -105,6 +126,12 @@ records are intentionally not distributed with the application.
 - After final startup settled, a 20-second live sample consumed 0.0938 CPU
   seconds (about 0.47% of one logical core), used about 184.7MB working set,
   and remained responsive.
+
+## Later package verification
+
+Package hash, ZIP extraction, isolated startup, privacy scan, local-replacement,
+and GitHub verification are not claimed here. Those gates run only after
+final-audit PASS.
 
 ## Privacy and integrity boundary
 

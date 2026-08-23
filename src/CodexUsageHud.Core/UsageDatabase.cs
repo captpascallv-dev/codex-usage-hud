@@ -8,8 +8,10 @@ namespace CodexUsageHud.Core;
 public sealed class UsageDatabase : IDisposable
 {
     private const string TupleOracleMigrationVersion = "2";
-    private const string AggregateSchemaVersion = "5";
+    private const string AggregateSchemaVersion = "6";
     private const string ContextCaptureMigrationVersion = "2";
+    private const string SchemaVersion = "10";
+    private const string LineageSemanticVersion = "2";
     private const string PrivateIdentityLogicalComplete = "logical_complete";
     private const string PrivateScrubPending = "pending";
     private const string PrivateScrubComplete = "complete";
@@ -43,6 +45,8 @@ public sealed class UsageDatabase : IDisposable
     private DateTimeOffset _lifecycleInputsValidUntilUtc = DateTimeOffset.MinValue;
     private Dictionary<string, long> _cachedLifecycleTurnCounts = new(StringComparer.Ordinal);
     private Dictionary<string, RecentSessionActivity> _cachedRecentSessionActivity = new(StringComparer.Ordinal);
+    private IReadOnlyDictionary<string, string?> _canonicalParentMap =
+        new Dictionary<string, string?>(StringComparer.Ordinal);
     private bool _disposed;
 
     public UsageDatabase(string databasePath)
@@ -107,6 +111,7 @@ public sealed class UsageDatabase : IDisposable
             EnsureV5Columns();
             EnsureContextV2Columns();
             EnsureSessionHierarchyColumns();
+            EnsureLineageColumns();
             var scrubPrivateSourceBytes = ApplyPrivateSourceIdentityMigration();
             if (scrubPrivateSourceBytes) CompletePrivateSourceScrub();
             CreateV5Indexes();
@@ -115,10 +120,11 @@ public sealed class UsageDatabase : IDisposable
             ApplyTurnKeyMigration();
             ApplySampleSourceMigration();
             ApplyContextCaptureMigration();
+            ApplyLineageSemanticMigration();
             PrepareAggregateMigration();
             using (var transaction = BeginImmediate())
             {
-                WriteSchemaValue("version", "9", transaction);
+                WriteSchemaValue("version", SchemaVersion, transaction);
                 transaction.Commit();
             }
 
@@ -192,7 +198,12 @@ public sealed class UsageDatabase : IDisposable
                 confidence TEXT NOT NULL,
                 turn_confidence TEXT NOT NULL DEFAULT 'unavailable',
                 event_order_confidence TEXT NOT NULL DEFAULT 'unavailable',
-                context_window INTEGER
+                context_window INTEGER,
+                semantic_identity TEXT NOT NULL DEFAULT '',
+                semantic_material TEXT,
+                legacy_semantic_identity TEXT NOT NULL DEFAULT '',
+                lineage_root_thread_id TEXT NOT NULL DEFAULT '',
+                is_lineage_canonical INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS sessions (
@@ -481,6 +492,15 @@ public sealed class UsageDatabase : IDisposable
         EnsureColumn("sessions", "agent_depth", "INTEGER");
     }
 
+    private void EnsureLineageColumns()
+    {
+        EnsureColumn("token_samples", "semantic_identity", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn("token_samples", "semantic_material", "TEXT");
+        EnsureColumn("token_samples", "legacy_semantic_identity", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn("token_samples", "lineage_root_thread_id", "TEXT NOT NULL DEFAULT ''");
+        EnsureColumn("token_samples", "is_lineage_canonical", "INTEGER NOT NULL DEFAULT 0");
+    }
+
     private void ApplyServiceTierProvenanceMigration()
     {
         if (!string.Equals(ReadSchemaValueCore("service_tier_provenance_v1"), "1", StringComparison.Ordinal))
@@ -532,6 +552,14 @@ public sealed class UsageDatabase : IDisposable
             CREATE INDEX IF NOT EXISTS ix_structural_observation_order
                 ON structural_observations(source_key, source_generation, base_identity, source_offset);
             CREATE INDEX IF NOT EXISTS ix_quota_time ON quota_observations(observed_at_utc);
+            CREATE INDEX IF NOT EXISTS ix_token_lineage_lookup
+                ON token_samples(lineage_root_thread_id, semantic_identity, is_lineage_canonical);
+            CREATE INDEX IF NOT EXISTS ix_token_legacy_lookup
+                ON token_samples(lineage_root_thread_id, legacy_semantic_identity, is_lineage_canonical);
+            CREATE INDEX IF NOT EXISTS ix_token_canonical_event_ticks
+                ON token_samples(event_time_ticks, id) WHERE is_lineage_canonical = 1;
+            CREATE UNIQUE INDEX IF NOT EXISTS ux_token_lineage_canonical
+                ON token_samples(lineage_root_thread_id, semantic_identity) WHERE is_lineage_canonical = 1;
             """;
         command.ExecuteNonQuery();
     }
@@ -638,6 +666,10 @@ public sealed class UsageDatabase : IDisposable
             var duplicates = 0;
             var tokenWrites = 0;
             var currentThreadId = request.ProposedSource.Identity.ThreadId;
+            var parentMap = LoadParentMap(transaction);
+            var contextReplayThreads = new HashSet<string>(StringComparer.Ordinal);
+            var lineageOrigins = new Dictionary<string, (bool WasInsert, string? PreviousParent)>(
+                StringComparer.Ordinal);
 
             foreach (var parsed in request.OrderedSanitizedEvents.OrderBy(item => item.SourceOffset ?? long.MaxValue))
             {
@@ -650,6 +682,8 @@ public sealed class UsageDatabase : IDisposable
                 }
 
                 var session = GetSessionWork(currentThreadId, sessions, transaction);
+                if (!lineageOrigins.ContainsKey(currentThreadId))
+                    lineageOrigins[currentThreadId] = (!session.Exists, session.Metadata.ParentThreadId);
                 var scanTurn = GetScanTurn(currentThreadId, scanTurns, session,
                     request.ExpectedSource.Exists ? request.ProposedSource.CursorTurnKey : null);
                 if (parsed.TokenSnapshot is null)
@@ -678,18 +712,25 @@ public sealed class UsageDatabase : IDisposable
                 tokenDispositions.Add(new TokenDispositionRecord(token.Fingerprint, token.Disposition,
                     token.SampleId, currentThreadId, token.MetadataRecovered));
                 tokenWrites += token.Writes;
-                if (token.SampleId.HasValue)
-                    ObserveContextCandidate(candidate, token.SampleId.Value, transaction);
                 if (token.Disposition == TokenDisposition.Duplicate)
                 {
+                    if (token.SampleId.HasValue && token.IsLineageCanonical)
+                        ObserveContextCandidate(candidate, token.SampleId.Value, transaction);
                     duplicates++;
                     if (token.MetadataRecovered) diagnostics.Add("duplicate_metadata_recovered");
                     continue;
                 }
 
                 accepted++;
-                aggregates.Register(candidate, token.SampleId!.Value, token.Usage, token.CumulativeTotal,
-                    diagnostics, transaction, this);
+                var lineage = AssignLineageAfterInsert(candidate, token, parentMap, transaction);
+                ApplyLineageAggregateTransitions(lineage, aggregates, contextReplayThreads);
+                if (lineage.Retired.Count > 0) contextReplayThreads.Add(candidate.ThreadId);
+                if (lineage.IsCanonical)
+                {
+                    aggregates.Register(candidate, token.SampleId!.Value, token.Usage, token.CumulativeTotal,
+                        diagnostics, transaction, this);
+                    ObserveContextCandidate(candidate, token.SampleId.Value, transaction);
+                }
                 if (parsed.EventTimeUtc.HasValue && CanAdvanceState(session, parsed.EventTimeUtc.Value.UtcTicks,
                         request.ProposedSource.Identity.StableKey, request.ProposedSource.Generation,
                         parsed.SourceOffset ?? 0, reliableWithoutTime: false))
@@ -714,6 +755,28 @@ public sealed class UsageDatabase : IDisposable
                 };
                 UpsertSessionCore(session, transaction);
                 committedSessions.Add(session.Metadata);
+            }
+
+            var lineageInvalidated = false;
+            foreach (var origin in lineageOrigins)
+            {
+                if (!sessions.TryGetValue(origin.Key, out var work)) continue;
+                if (!RequiresLineageGraphInvalidation(work, origin.Value.WasInsert, origin.Value.PreviousParent,
+                        transaction))
+                    continue;
+                InvalidateLineageForGraphChange(transaction);
+                lineageInvalidated = true;
+                break;
+            }
+
+            if (!lineageInvalidated)
+            {
+                foreach (var replayThread in contextReplayThreads)
+                {
+                    RecomputeLatestEvent(replayThread, transaction);
+                    RecomputeFrontier(replayThread, transaction);
+                    ReplayContextForThread(replayThread, transaction);
+                }
             }
 
             var finalTurn = scanTurns.TryGetValue(currentThreadId, out var finalScanTurn)
@@ -755,19 +818,34 @@ public sealed class UsageDatabase : IDisposable
                 turnKey, model, serviceTier, null, 0, null, turnKey is null ? "unavailable" : "reliable",
                 eventTimeUtc.HasValue ? "reliable" : "degraded");
             var result = InsertTokenCandidate(candidate, transaction);
-            if (result.SampleId.HasValue)
-                ObserveContextCandidate(candidate, result.SampleId.Value, transaction);
             if (result.Disposition == TokenDisposition.Duplicate)
             {
+                if (result.SampleId.HasValue && result.IsLineageCanonical)
+                    ObserveContextCandidate(candidate, result.SampleId.Value, transaction);
                 transaction.Commit();
                 return false;
             }
 
             var diagnostics = new HashSet<string>(StringComparer.Ordinal);
             var aggregates = new AggregateAccumulator();
-            aggregates.Register(candidate, result.SampleId!.Value, result.Usage, result.CumulativeTotal,
-                diagnostics, transaction, this);
+            var parentMap = LoadParentMap(transaction);
+            var lineage = AssignLineageAfterInsert(candidate, result, parentMap, transaction);
+            var replayThreads = new HashSet<string>(StringComparer.Ordinal);
+            ApplyLineageAggregateTransitions(lineage, aggregates, replayThreads);
+            if (lineage.Retired.Count > 0) replayThreads.Add(candidate.ThreadId);
+            if (lineage.IsCanonical)
+            {
+                aggregates.Register(candidate, result.SampleId!.Value, result.Usage, result.CumulativeTotal,
+                    diagnostics, transaction, this);
+                ObserveContextCandidate(candidate, result.SampleId.Value, transaction);
+            }
             ApplyAggregateDeltas(aggregates, transaction);
+            foreach (var replayThread in replayThreads)
+            {
+                RecomputeLatestEvent(replayThread, transaction);
+                RecomputeFrontier(replayThread, transaction);
+                ReplayContextForThread(replayThread, transaction);
+            }
             transaction.Commit();
             return true;
         }
@@ -805,7 +883,9 @@ public sealed class UsageDatabase : IDisposable
                            source_key, source_generation, source_offset,
                            input_tokens, raw_input_tokens, cached_input_tokens, cache_write_input_tokens,
                            output_tokens, reasoning_output_tokens, canonical_total_tokens, reported_total_tokens,
-                           cumulative_total_tokens, turn_confidence, event_order_confidence
+                           cumulative_total_tokens, turn_confidence, event_order_confidence,
+                           context_window, is_lineage_canonical, cumulative_input_tokens, cumulative_output_tokens,
+                           model
                     FROM token_samples WHERE id > $cursor ORDER BY id LIMIT {maximumRows};
                     """;
                 command.Parameters.AddWithValue("$cursor", cursor);
@@ -839,10 +919,11 @@ public sealed class UsageDatabase : IDisposable
                     update.ExecuteNonQuery();
                 }
 
-                var candidate = new TokenSampleCandidate(row.ThreadId, EmptySnapshot, ticks.HasValue
+                var candidate = new TokenSampleCandidate(row.ThreadId, RebuildSnapshot(row), ticks.HasValue
                         ? new DateTimeOffset(ticks.Value, TimeSpan.Zero) : null,
-                    DateTimeOffset.MinValue, row.TurnKey, null, null, row.SourceKey,
+                    DateTimeOffset.MinValue, row.TurnKey, row.Model, null, row.SourceKey,
                     row.SourceGeneration, row.SourceOffset, turnConfidence, orderConfidence);
+                if (!row.IsLineageCanonical) continue;
                 accumulator.Register(candidate, row.Id, row.Usage, row.CumulativeTotal,
                     diagnostics, transaction, this);
             }
@@ -878,6 +959,8 @@ public sealed class UsageDatabase : IDisposable
             using var transaction = BeginImmediate();
             var work = GetSessionWork(metadata.ThreadId, new Dictionary<string, SessionWork>(StringComparer.Ordinal),
                 transaction);
+            var wasInsert = !work.Exists;
+            var previousParent = work.Metadata.ParentThreadId;
             var tier = SelectServiceTier(work.Metadata.ServiceTier, work.Metadata.ServiceTierSource,
                 metadata.ServiceTier, metadata.ServiceTierSource, preferIncomingOnEqual: true);
             work.Metadata = work.Metadata with
@@ -913,6 +996,7 @@ public sealed class UsageDatabase : IDisposable
                 work.StateEventKind = "structural";
             }
             UpsertSessionCore(work, transaction);
+            MaybeInvalidateLineageGraph(work, previousParent, wasInsert, transaction);
             transaction.Commit();
         }
     }
@@ -925,6 +1009,8 @@ public sealed class UsageDatabase : IDisposable
             var map = new Dictionary<string, SessionWork>(StringComparer.Ordinal);
             var work = GetSessionWork(metadata.ThreadId, map, transaction);
             var before = work.Metadata;
+            var wasInsert = !work.Exists;
+            var previousParent = before.ParentThreadId;
             var orderedRolloutExists = work.StateSourceKey is not null;
             var tier = SelectServiceTier(before.ServiceTier, before.ServiceTierSource,
                 metadata.ServiceTier, metadata.ServiceTierSource, preferIncomingOnEqual: false);
@@ -952,6 +1038,73 @@ public sealed class UsageDatabase : IDisposable
                 return false;
             }
             UpsertSessionCore(work, transaction);
+            MaybeInvalidateLineageGraph(work, previousParent, wasInsert, transaction);
+            transaction.Commit();
+            return true;
+        }
+    }
+
+    public bool ClearSessionParent(string threadId)
+    {
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            using var transaction = BeginImmediate();
+            var work = GetSessionWork(threadId, new Dictionary<string, SessionWork>(StringComparer.Ordinal),
+                transaction);
+            if (!work.Exists || work.Metadata.ParentThreadId is null)
+            {
+                transaction.Rollback();
+                return false;
+            }
+
+            var previousParent = work.Metadata.ParentThreadId;
+            work.Metadata = work.Metadata with { ParentThreadId = null };
+            work.Dirty = true;
+            UpsertSessionCore(work, transaction);
+            MaybeInvalidateLineageGraph(work, previousParent, wasInsert: false, transaction);
+            transaction.Commit();
+            return true;
+        }
+    }
+
+    public void RebuildLineageCanonical()
+    {
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            using var transaction = BeginImmediate();
+            ReassignLineageCanonical(transaction);
+            ReplayAllDerivedContext(transaction);
+            InvalidateAggregateRebuild(transaction);
+            _lifecycleInputsValidUntilUtc = DateTimeOffset.MinValue;
+            transaction.Commit();
+        }
+    }
+
+    public bool RecoverPersistedContextWindow(string fingerprint, long contextWindow)
+    {
+        if (string.IsNullOrWhiteSpace(fingerprint)) return false;
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            using var transaction = BeginImmediate();
+            using var recover = _connection.CreateCommand();
+            recover.Transaction = transaction;
+            recover.CommandText = """
+                UPDATE token_samples SET context_window = $context_window
+                WHERE fingerprint = $fingerprint AND context_window IS NULL;
+                """;
+            recover.Parameters.AddWithValue("$context_window", contextWindow);
+            recover.Parameters.AddWithValue("$fingerprint", fingerprint);
+            if (recover.ExecuteNonQuery() <= 0)
+            {
+                transaction.Rollback();
+                return false;
+            }
+
+            var persisted = LoadPersistedTokenSample(fingerprint, transaction);
+            RefreshSemanticFromStored(persisted.SampleId, transaction);
             transaction.Commit();
             return true;
         }
@@ -1247,7 +1400,9 @@ public sealed class UsageDatabase : IDisposable
                 samples.Transaction = transaction;
                 samples.CommandText = $"""
                     SELECT {AggregateColumns} FROM token_samples
-                    WHERE event_time_ticks >= $start AND event_time_ticks < $end ORDER BY event_time_ticks, id;
+                    WHERE event_time_ticks >= $start AND event_time_ticks < $end
+                      AND is_lineage_canonical = 1
+                    ORDER BY event_time_ticks, id;
                     """;
                 samples.Parameters.AddWithValue("$start", range.Start);
                 samples.Parameters.AddWithValue("$end", range.End);
@@ -1294,6 +1449,7 @@ public sealed class UsageDatabase : IDisposable
                 command.CommandText = $"""
                     SELECT {AggregateColumns} FROM token_samples
                     WHERE event_time_ticks >= $start AND event_time_ticks < $end
+                      AND is_lineage_canonical = 1
                       AND thread_id IN ({string.Join(", ", parameters)})
                     ORDER BY thread_id, event_time_ticks, id;
                     """;
@@ -1594,7 +1750,7 @@ public sealed class UsageDatabase : IDisposable
             }
 
             var contextRows = 0;
-            if (candidate.Snapshot.ContextWindow is > 0)
+            if (candidate.Snapshot.ContextWindow.HasValue)
             {
                 using var recoverContext = _connection.CreateCommand();
                 recoverContext.Transaction = transaction;
@@ -1621,13 +1777,17 @@ public sealed class UsageDatabase : IDisposable
                 modelRows = recoverModel.ExecuteNonQuery();
             }
 
-            if (turnRows > 0)
+            if (turnRows > 0 && persisted.IsLineageCanonical)
                 UpsertTurnAggregate(persisted.ThreadId, candidate.TurnKey!, persisted.Usage, transaction);
+            var stillCanonical = persisted.IsLineageCanonical;
+            if (contextRows > 0)
+                stillCanonical = RefreshSemanticFromStored(persisted.SampleId, transaction);
             var metadataRecovered = turnRows + sourceRows + contextRows + modelRows > 0;
             if (turnRows + sourceRows > 0) RecomputeLatestEvent(persisted.ThreadId, transaction);
+            if (contextRows > 0) _lifecycleInputsValidUntilUtc = DateTimeOffset.MinValue;
             return new TokenInsertResult(fingerprint, TokenDisposition.Duplicate, persisted.SampleId,
                 1 + turnRows + sourceRows + contextRows + modelRows, persisted.Usage, persisted.CumulativeTotal,
-                metadataRecovered);
+                metadataRecovered, persisted.SemanticIdentity, stillCanonical);
         }
 
         var disposition = inserted ? TokenDisposition.Accepted : TokenDisposition.OrphanRecovered;
@@ -1647,6 +1807,9 @@ public sealed class UsageDatabase : IDisposable
 
         var usage = candidate.Snapshot.LastUsage.ToCanonical();
         var cumulative = candidate.Snapshot.TotalUsage.ToCanonical();
+        var semanticMaterial = candidate.Snapshot.SemanticMaterial();
+        var semanticIdentity = candidate.Snapshot.SemanticIdentity();
+        var legacyIdentity = candidate.Snapshot.LegacySemanticIdentity();
         using var sample = _connection.CreateCommand();
         sample.Transaction = transaction;
         sample.CommandText = """
@@ -1656,12 +1819,15 @@ public sealed class UsageDatabase : IDisposable
                 cumulative_input_tokens, cumulative_output_tokens, cumulative_total_tokens,
                 canonical_total_tokens, reported_total_tokens, event_time_utc, event_time_ticks,
                 observed_at_utc, source_key, source_generation, source_offset, turn_key, model,
-                service_tier, confidence, turn_confidence, event_order_confidence, context_window)
+                service_tier, confidence, turn_confidence, event_order_confidence, context_window,
+                semantic_identity, semantic_material, legacy_semantic_identity, lineage_root_thread_id,
+                is_lineage_canonical)
             VALUES ($fingerprint, $thread_id, $input, $raw_input, $cached, $cache_write,
                 $output, $reasoning, $cumulative_input, $cumulative_output, $cumulative_total,
                 $canonical_total, $reported_total, $event_time, $event_ticks, $observed,
                 $source_key, $source_generation, $source_offset, $turn_key, $model, $service_tier,
-                'trusted', $turn_confidence, $event_order_confidence, $context_window);
+                'trusted', $turn_confidence, $event_order_confidence, $context_window,
+                $semantic_identity, $semantic_material, $legacy_identity, $lineage_root, 0);
             """;
         AddUsageParameters(sample, usage);
         sample.Parameters.AddWithValue("$fingerprint", fingerprint);
@@ -1683,14 +1849,19 @@ public sealed class UsageDatabase : IDisposable
         sample.Parameters.AddWithValue("$service_tier", (object?)candidate.ServiceTier ?? DBNull.Value);
         sample.Parameters.AddWithValue("$turn_confidence", candidate.TurnConfidence);
         sample.Parameters.AddWithValue("$event_order_confidence", candidate.EventOrderConfidence);
-        sample.Parameters.AddWithValue("$context_window", candidate.Snapshot.ContextWindow is > 0
+        sample.Parameters.AddWithValue("$context_window", candidate.Snapshot.ContextWindow.HasValue
             ? candidate.Snapshot.ContextWindow.Value : DBNull.Value);
+        sample.Parameters.AddWithValue("$semantic_identity", semanticIdentity);
+        sample.Parameters.AddWithValue("$semantic_material", semanticMaterial);
+        sample.Parameters.AddWithValue("$legacy_identity", legacyIdentity);
+        sample.Parameters.AddWithValue("$lineage_root", candidate.ThreadId);
         sample.ExecuteNonQuery();
         using var identity = _connection.CreateCommand();
         identity.Transaction = transaction;
         identity.CommandText = "SELECT last_insert_rowid();";
         var sampleId = Convert.ToInt64(identity.ExecuteScalar(), CultureInfo.InvariantCulture);
-        return new TokenInsertResult(fingerprint, disposition, sampleId, 2, usage, cumulative.Total, false);
+        return new TokenInsertResult(fingerprint, disposition, sampleId, 2, usage, cumulative.Total, false,
+            semanticIdentity, false);
     }
 
     private void ObserveExplicitCompactionBoundary(ParsedEvent parsed, string threadId,
@@ -1700,8 +1871,15 @@ public sealed class UsageDatabase : IDisposable
         if (!parsed.EventTimeUtc.HasValue || string.IsNullOrWhiteSpace(resolution.Disposition.EventIdentity))
             return;
 
-        var eventTicks = parsed.EventTimeUtc.Value.UtcTicks;
-        var sourceOffset = parsed.SourceOffset ?? 0;
+        ApplyExplicitCompactionMarker(threadId, parsed.EventTimeUtc.Value.UtcTicks, source.Identity.StableKey,
+            source.Generation, parsed.SourceOffset ?? 0, resolution.Disposition.EventIdentity,
+            resolution.AssociationKey ?? scanTurn.Key, transaction);
+    }
+
+    private void ApplyExplicitCompactionMarker(string threadId, long eventTicks, string sourceKey,
+        int sourceGeneration, long sourceOffset, string eventIdentity, string? turnKey,
+        SqliteTransaction transaction)
+    {
         using var command = _connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = """
@@ -1723,12 +1901,11 @@ public sealed class UsageDatabase : IDisposable
             """;
         command.Parameters.AddWithValue("$thread_id", threadId);
         command.Parameters.AddWithValue("$ticks", eventTicks);
-        command.Parameters.AddWithValue("$source_key", source.Identity.StableKey);
-        command.Parameters.AddWithValue("$generation", source.Generation);
+        command.Parameters.AddWithValue("$source_key", sourceKey);
+        command.Parameters.AddWithValue("$generation", sourceGeneration);
         command.Parameters.AddWithValue("$offset", sourceOffset);
-        command.Parameters.AddWithValue("$identity", resolution.Disposition.EventIdentity);
-        command.Parameters.AddWithValue("$turn_key", (object?)resolution.AssociationKey ??
-            (object?)scanTurn.Key ?? DBNull.Value);
+        command.Parameters.AddWithValue("$identity", eventIdentity);
+        command.Parameters.AddWithValue("$turn_key", (object?)turnKey ?? DBNull.Value);
         command.ExecuteNonQuery();
     }
 
@@ -1774,7 +1951,9 @@ public sealed class UsageDatabase : IDisposable
                                    string.Equals(candidate.SourceKey, explicitSourceKey, StringComparison.Ordinal) &&
                                    candidate.SourceGeneration == explicitGeneration &&
                                    candidate.SourceOffset.HasValue &&
-                                   candidate.SourceOffset.Value > explicitOffset.Value;
+                                   candidate.SourceOffset.Value > explicitOffset.Value &&
+                                   !HasNonCanonicalSampleBetween(candidate.ThreadId, explicitTicks.Value,
+                                       eventTicks, transaction);
             if (explicitBaseline)
             {
                 InsertContextBaseline(candidate.ThreadId, sampleId, inputTokens, contextWindow,
@@ -2022,6 +2201,7 @@ public sealed class UsageDatabase : IDisposable
                   AND COALESCE(model, '') = $model
                   AND event_time_ticks >= $start_ticks AND event_time_ticks < $end_ticks
                   AND event_order_confidence = 'reliable'
+                  AND is_lineage_canonical = 1
                 ORDER BY event_time_ticks, id;
                 """;
             interval.Parameters.AddWithValue("$thread_id", threadId);
@@ -2090,14 +2270,16 @@ public sealed class UsageDatabase : IDisposable
         using var command = _connection.CreateCommand();
         command.Transaction = transaction;
         command.CommandText = $"""
-            SELECT id, thread_id, {AggregateColumns}, cumulative_total_tokens
+            SELECT id, thread_id, {AggregateColumns}, cumulative_total_tokens, semantic_identity,
+                   is_lineage_canonical
             FROM token_samples WHERE fingerprint = $fingerprint;
             """;
         command.Parameters.AddWithValue("$fingerprint", fingerprint);
         using var reader = command.ExecuteReader();
         if (!reader.Read()) throw new InvalidOperationException("DUPLICATE_SAMPLE_MISSING");
         return new PersistedTokenSample(reader.GetInt64(0), reader.GetString(1), ReadAggregate(reader, 2),
-            reader.GetInt64(10));
+            reader.GetInt64(10), reader.IsDBNull(11) ? string.Empty : reader.GetString(11),
+            reader.GetInt64(12) != 0);
     }
 
     private void RecomputeLatestEvent(string threadId, SqliteTransaction transaction)
@@ -2107,7 +2289,9 @@ public sealed class UsageDatabase : IDisposable
         command.CommandText = $"""
             SELECT thread_id, id, turn_key, event_time_ticks, source_key, source_generation,
                    source_offset, turn_confidence, event_order_confidence, {AggregateColumns}
-            FROM token_samples WHERE thread_id = $thread_id ORDER BY id;
+            FROM token_samples
+            WHERE thread_id = $thread_id AND is_lineage_canonical = 1
+            ORDER BY id;
             """;
         command.Parameters.AddWithValue("$thread_id", threadId);
         using var reader = command.ExecuteReader();
@@ -2122,6 +2306,139 @@ public sealed class UsageDatabase : IDisposable
         }
         reader.Close();
         if (latest is not null) UpsertLatestEvent(latest, transaction);
+        else
+        {
+            using var delete = _connection.CreateCommand();
+            delete.Transaction = transaction;
+            delete.CommandText = "DELETE FROM latest_token_events WHERE thread_id = $thread_id;";
+            delete.Parameters.AddWithValue("$thread_id", threadId);
+            delete.ExecuteNonQuery();
+        }
+    }
+
+    private void RecomputeFrontier(string threadId, SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT cumulative_total_tokens, id
+            FROM token_samples
+            WHERE thread_id = $thread_id AND is_lineage_canonical = 1
+            ORDER BY cumulative_total_tokens DESC, id DESC
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        using var reader = command.ExecuteReader();
+        if (reader.Read())
+        {
+            var frontier = new FrontierState(reader.GetInt64(0), reader.GetInt64(1));
+            reader.Close();
+            UpsertFrontier(threadId, frontier, transaction);
+            return;
+        }
+        reader.Close();
+        using var delete = _connection.CreateCommand();
+        delete.Transaction = transaction;
+        delete.CommandText = "DELETE FROM cumulative_frontiers WHERE thread_id = $thread_id;";
+        delete.Parameters.AddWithValue("$thread_id", threadId);
+        delete.ExecuteNonQuery();
+    }
+
+    private bool RefreshSemanticFromStored(long sampleId, SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            SELECT thread_id, {AggregateColumns}, cumulative_input_tokens, cumulative_output_tokens,
+                   cumulative_total_tokens, context_window, semantic_identity, semantic_material,
+                   legacy_semantic_identity, lineage_root_thread_id, is_lineage_canonical, turn_key,
+                   event_time_ticks, source_key, source_generation, source_offset, turn_confidence,
+                   event_order_confidence
+            FROM token_samples WHERE id = $id;
+            """;
+        command.Parameters.AddWithValue("$id", sampleId);
+        using var reader = command.ExecuteReader();
+        if (!reader.Read()) return false;
+        var threadId = reader.GetString(0);
+        var last = ReadAggregate(reader, 1);
+        var cumulativeInput = ReadLong(reader, 9);
+        var cumulativeOutput = ReadLong(reader, 10);
+        var cumulativeTotal = ReadLong(reader, 11);
+        var storedContext = OptionalLong(reader, 12);
+        var existingIdentity = OptionalString(reader, 13) ?? string.Empty;
+        var existingMaterial = OptionalString(reader, 14) ?? string.Empty;
+        var existingLegacy = OptionalString(reader, 15) ?? string.Empty;
+        var root = OptionalString(reader, 16) ?? string.Empty;
+        var canonical = reader.GetInt64(17) != 0;
+        var turnKey = OptionalString(reader, 18);
+        var eventTicks = OptionalLong(reader, 19);
+        var sourceKey = OptionalString(reader, 20);
+        var sourceGeneration = reader.GetInt32(21);
+        var sourceOffset = OptionalLong(reader, 22);
+        var turnConfidence = reader.GetString(23);
+        var eventOrderConfidence = reader.GetString(24);
+        reader.Close();
+
+        var material = TokenUsageSnapshot.IsLiveSemanticMaterial(existingMaterial)
+            ? TokenUsageSnapshot.ReplaceLiveContextWindow(existingMaterial, storedContext)
+            : TokenUsageSnapshot.LineageSemanticMaterialFromStored(last, cumulativeInput, cumulativeOutput,
+                cumulativeTotal, storedContext);
+        var identity = TokenUsageSnapshot.HashText(material);
+        var legacyIdentity = TokenUsageSnapshot.LineageSemanticIdentityFromStored(last, cumulativeInput,
+            cumulativeOutput, cumulativeTotal, storedContext);
+        if (string.Equals(existingIdentity, identity, StringComparison.Ordinal) &&
+            string.Equals(existingMaterial, material, StringComparison.Ordinal) &&
+            string.Equals(existingLegacy, legacyIdentity, StringComparison.Ordinal))
+        {
+            return canonical;
+        }
+
+        var self = new CanonicalSample(sampleId, threadId, last, turnKey, eventTicks, sourceKey,
+            sourceGeneration, sourceOffset, turnConfidence, eventOrderConfidence, cumulativeTotal);
+        var aggregates = new AggregateAccumulator();
+        var replayThreads = new HashSet<string>(StringComparer.Ordinal) { threadId };
+        _canonicalParentMap = LoadParentMap(transaction);
+        if (canonical) aggregates.SubtractConsumption(self);
+
+        using (var write = _connection.CreateCommand())
+        {
+            write.Transaction = transaction;
+            write.CommandText = """
+                UPDATE token_samples
+                SET semantic_identity = $identity, semantic_material = $material,
+                    legacy_semantic_identity = $legacy, is_lineage_canonical = 0
+                WHERE id = $id;
+                """;
+            write.Parameters.AddWithValue("$identity", identity);
+            write.Parameters.AddWithValue("$material", material);
+            write.Parameters.AddWithValue("$legacy", legacyIdentity);
+            write.Parameters.AddWithValue("$id", sampleId);
+            write.ExecuteNonQuery();
+        }
+
+        var oldExact = ApplyExactGroupElection(root, existingIdentity, transaction);
+        ApplyLineageAggregateTransitions(oldExact, aggregates, replayThreads);
+        var newExact = ApplyExactGroupElection(root, identity, transaction);
+        ApplyLineageAggregateTransitions(newExact, aggregates, replayThreads);
+        if (!string.IsNullOrWhiteSpace(existingLegacy))
+            ApplyLineageAggregateTransitions(ApplyLegacyCompatibility(root, existingLegacy, transaction),
+                aggregates, replayThreads);
+        if (!string.IsNullOrWhiteSpace(legacyIdentity) &&
+            !string.Equals(existingLegacy, legacyIdentity, StringComparison.Ordinal))
+        {
+            ApplyLineageAggregateTransitions(ApplyLegacyCompatibility(root, legacyIdentity, transaction),
+                aggregates, replayThreads);
+        }
+
+        ApplyAggregateDeltas(aggregates, transaction);
+        foreach (var replayThread in replayThreads)
+        {
+            RecomputeLatestEvent(replayThread, transaction);
+            RecomputeFrontier(replayThread, transaction);
+            ReplayContextForThread(replayThread, transaction);
+        }
+        _lifecycleInputsValidUntilUtc = DateTimeOffset.MinValue;
+        return IsSampleLineageCanonical(sampleId, transaction);
     }
 
     private StructuralResolution ResolveStructural(ParsedEvent parsed, string threadId,
@@ -2598,6 +2915,7 @@ public sealed class UsageDatabase : IDisposable
                            COUNT(DISTINCT CASE WHEN turn_confidence = 'reliable' THEN turn_key END)
                     FROM token_samples INDEXED BY ix_token_event_ticks_id
                     WHERE event_time_ticks >= $cutoff AND event_time_ticks <= $now
+                      AND is_lineage_canonical = 1
                     GROUP BY thread_id ORDER BY thread_id;
                     """;
                 command.Parameters.AddWithValue("$cutoff", nowUtc.Subtract(TimeSpan.FromHours(48)).UtcTicks);
@@ -3397,6 +3715,778 @@ public sealed class UsageDatabase : IDisposable
         transaction.Commit();
     }
 
+    private void ApplyLineageSemanticMigration()
+    {
+        var already = string.Equals(ReadSchemaValueCore("lineage_semantic_version"), LineageSemanticVersion,
+            StringComparison.Ordinal);
+        using var transaction = BeginImmediate();
+        var backfilled = BackfillLineageIdentities(transaction);
+        if (already && backfilled == 0)
+        {
+            transaction.Commit();
+            return;
+        }
+
+        ReassignLineageCanonical(transaction);
+        ReplayAllDerivedContext(transaction);
+        ResetSources("lineage_semantic_rescan", transaction);
+        InvalidateAggregateRebuild(transaction);
+        WriteSchemaValue("lineage_semantic_version", LineageSemanticVersion, transaction);
+        transaction.Commit();
+    }
+
+    private void MaybeInvalidateLineageGraph(SessionWork work, string? previousParent, bool wasInsert,
+        SqliteTransaction transaction)
+    {
+        if (!RequiresLineageGraphInvalidation(work, wasInsert, previousParent, transaction)) return;
+        InvalidateLineageForGraphChange(transaction);
+    }
+
+    private bool RequiresLineageGraphInvalidation(SessionWork work, bool wasInsert, string? previousParent,
+        SqliteTransaction transaction)
+    {
+        var parentChanged = !string.Equals(previousParent, work.Metadata.ParentThreadId, StringComparison.Ordinal);
+        if (!parentChanged && !wasInsert) return false;
+        if (!parentChanged && wasInsert &&
+            work.Metadata.ParentThreadId is null && !IsTargetedAsParent(work.Metadata.ThreadId, transaction))
+        {
+            return false;
+        }
+
+        if (!ThreadHasTokenSamples(work.Metadata.ThreadId, transaction) &&
+            !IsTargetedAsParent(work.Metadata.ThreadId, transaction) &&
+            (work.Metadata.ParentThreadId is null ||
+             !ThreadHasTokenSamples(work.Metadata.ParentThreadId, transaction)))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private void InvalidateLineageForGraphChange(SqliteTransaction transaction)
+    {
+        ReassignLineageCanonical(transaction);
+        ReplayAllDerivedContext(transaction);
+        InvalidateAggregateRebuild(transaction);
+        _lifecycleInputsValidUntilUtc = DateTimeOffset.MinValue;
+    }
+
+    private bool IsTargetedAsParent(string threadId, SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT 1 FROM sessions WHERE parent_thread_id = $thread_id LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        return command.ExecuteScalar() is not null;
+    }
+
+    private bool ThreadHasTokenSamples(string threadId, SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT 1 FROM token_samples WHERE thread_id = $thread_id LIMIT 1;";
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        return command.ExecuteScalar() is not null;
+    }
+
+    private int BackfillLineageIdentities(SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            SELECT id, {AggregateColumns}, cumulative_input_tokens, cumulative_output_tokens,
+                   cumulative_total_tokens, context_window, semantic_identity, semantic_material,
+                   legacy_semantic_identity
+            FROM token_samples
+            WHERE semantic_identity = '' OR semantic_identity IS NULL OR semantic_material IS NULL
+               OR legacy_semantic_identity = '' OR legacy_semantic_identity IS NULL
+               OR (
+                    semantic_material NOT LIKE '{TokenUsageSnapshot.LineageSemanticLegacyPrefix}|%'
+                    AND semantic_material NOT LIKE '{TokenUsageSnapshot.LineageSemanticPrefix}|%'
+                  );
+            """;
+        using var reader = command.ExecuteReader();
+        var updates = new List<(long Id, string Identity, string Material, string Legacy)>();
+        while (reader.Read())
+        {
+            var last = ReadAggregate(reader, 1);
+            var cumulativeInput = ReadLong(reader, 9);
+            var cumulativeOutput = ReadLong(reader, 10);
+            var cumulativeTotal = ReadLong(reader, 11);
+            var contextWindow = OptionalLong(reader, 12);
+            var existingIdentity = OptionalString(reader, 13);
+            var existingMaterial = OptionalString(reader, 14);
+            var existingLegacy = OptionalString(reader, 15);
+            string material;
+            string identity;
+            if (TokenUsageSnapshot.IsLiveSemanticMaterial(existingMaterial))
+            {
+                material = existingMaterial!;
+                identity = string.IsNullOrWhiteSpace(existingIdentity)
+                    ? TokenUsageSnapshot.HashText(material)
+                    : existingIdentity;
+            }
+            else
+            {
+                material = TokenUsageSnapshot.LineageSemanticMaterialFromStored(last, cumulativeInput,
+                    cumulativeOutput, cumulativeTotal, contextWindow);
+                identity = TokenUsageSnapshot.HashText(material);
+            }
+            var legacy = TokenUsageSnapshot.LineageSemanticIdentityFromStored(last, cumulativeInput,
+                cumulativeOutput, cumulativeTotal, contextWindow);
+            if (string.Equals(existingIdentity, identity, StringComparison.Ordinal) &&
+                string.Equals(existingMaterial, material, StringComparison.Ordinal) &&
+                string.Equals(existingLegacy, legacy, StringComparison.Ordinal))
+            {
+                continue;
+            }
+            updates.Add((reader.GetInt64(0), identity, material, legacy));
+        }
+        reader.Close();
+        foreach (var update in updates)
+        {
+            using var write = _connection.CreateCommand();
+            write.Transaction = transaction;
+            write.CommandText = """
+                UPDATE token_samples
+                SET semantic_identity = $identity, semantic_material = $material,
+                    legacy_semantic_identity = $legacy
+                WHERE id = $id;
+                """;
+            write.Parameters.AddWithValue("$identity", update.Identity);
+            write.Parameters.AddWithValue("$material", update.Material);
+            write.Parameters.AddWithValue("$legacy", update.Legacy);
+            write.Parameters.AddWithValue("$id", update.Id);
+            write.ExecuteNonQuery();
+        }
+        return updates.Count;
+    }
+
+    private Dictionary<string, string?> LoadParentMap(SqliteTransaction? transaction = null)
+    {
+        using var command = _connection.CreateCommand();
+        if (transaction is not null) command.Transaction = transaction;
+        command.CommandText = "SELECT thread_id, parent_thread_id FROM sessions;";
+        using var reader = command.ExecuteReader();
+        var map = new Dictionary<string, string?>(StringComparer.Ordinal);
+        while (reader.Read())
+            map[reader.GetString(0)] = OptionalString(reader, 1);
+        return map;
+    }
+
+    private static string ResolveLineageRoot(string threadId, IReadOnlyDictionary<string, string?> parentMap)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var current = threadId;
+        while (true)
+        {
+            if (!parentMap.TryGetValue(current, out var parent) || string.IsNullOrWhiteSpace(parent))
+                return current;
+            if (!parentMap.ContainsKey(parent))
+                return current;
+            if (!seen.Add(current) || seen.Contains(parent) ||
+                string.Equals(parent, current, StringComparison.Ordinal))
+            {
+                return threadId;
+            }
+            current = parent;
+        }
+    }
+
+    private static int ResolvedLineageDepth(string threadId, IReadOnlyDictionary<string, string?> parentMap)
+    {
+        var root = ResolveLineageRoot(threadId, parentMap);
+        if (string.Equals(threadId, root, StringComparison.Ordinal)) return 0;
+        var depth = 0;
+        var seen = new HashSet<string>(StringComparer.Ordinal) { threadId };
+        var current = threadId;
+        while (true)
+        {
+            if (!parentMap.TryGetValue(current, out var parent) || string.IsNullOrWhiteSpace(parent))
+                return depth;
+            if (!parentMap.ContainsKey(parent)) return depth;
+            if (!seen.Add(parent) || string.Equals(parent, current, StringComparison.Ordinal))
+                return depth;
+            depth++;
+            if (string.Equals(parent, root, StringComparison.Ordinal)) return depth;
+            current = parent;
+        }
+    }
+
+    private void ReassignLineageCanonical(SqliteTransaction transaction)
+    {
+        var parentMap = LoadParentMap(transaction);
+        _canonicalParentMap = parentMap;
+        using (var clear = _connection.CreateCommand())
+        {
+            clear.Transaction = transaction;
+            clear.CommandText = "UPDATE token_samples SET is_lineage_canonical = 0;";
+            clear.ExecuteNonQuery();
+        }
+
+        var sampleThreads = new HashSet<string>(StringComparer.Ordinal);
+        using (var threads = _connection.CreateCommand())
+        {
+            threads.Transaction = transaction;
+            threads.CommandText = "SELECT DISTINCT thread_id FROM token_samples;";
+            using var reader = threads.ExecuteReader();
+            while (reader.Read()) sampleThreads.Add(reader.GetString(0));
+        }
+
+        foreach (var threadId in sampleThreads)
+        {
+            var root = ResolveLineageRoot(threadId, parentMap);
+            using var updateRoot = _connection.CreateCommand();
+            updateRoot.Transaction = transaction;
+            updateRoot.CommandText = """
+                UPDATE token_samples SET lineage_root_thread_id = $root WHERE thread_id = $thread_id;
+                """;
+            updateRoot.Parameters.AddWithValue("$root", root);
+            updateRoot.Parameters.AddWithValue("$thread_id", threadId);
+            updateRoot.ExecuteNonQuery();
+        }
+
+        var groups = new List<(string Root, string Identity)>();
+        using (var distinct = _connection.CreateCommand())
+        {
+            distinct.Transaction = transaction;
+            distinct.CommandText = """
+                SELECT DISTINCT lineage_root_thread_id, semantic_identity
+                FROM token_samples
+                WHERE semantic_identity <> '';
+                """;
+            using var reader = distinct.ExecuteReader();
+            while (reader.Read()) groups.Add((reader.GetString(0), reader.GetString(1)));
+        }
+
+        foreach (var (root, identity) in groups)
+            ApplyExactGroupElection(root, identity, transaction);
+
+        ApplyAllLegacyCompatibility(transaction);
+    }
+
+    private void ApplyAllLegacyCompatibility(SqliteTransaction transaction)
+    {
+        _canonicalParentMap = LoadParentMap(transaction);
+        if (!AnyLiveSample(transaction)) return;
+        var aliases = new HashSet<(string Root, string Legacy)>();
+        using (var command = _connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT DISTINCT lineage_root_thread_id, legacy_semantic_identity
+                FROM token_samples
+                WHERE legacy_semantic_identity <> '';
+                """;
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+                aliases.Add((reader.GetString(0), reader.GetString(1)));
+        }
+
+        foreach (var (root, legacy) in aliases)
+            ApplyLegacyCompatibility(root, legacy, transaction);
+    }
+
+    private bool AnyLiveSample(SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            SELECT 1 FROM token_samples
+            WHERE semantic_material LIKE '{TokenUsageSnapshot.LineageSemanticPrefix}|%'
+            LIMIT 1;
+            """;
+        return command.ExecuteScalar() is not null;
+    }
+
+    private LineageAssignment AssignLineageAfterInsert(TokenSampleCandidate candidate, TokenInsertResult inserted,
+        IReadOnlyDictionary<string, string?> parentMap, SqliteTransaction transaction)
+    {
+        var sampleId = inserted.SampleId ?? throw new InvalidOperationException("LINEAGE_SAMPLE_MISSING");
+        var semanticIdentity = string.IsNullOrWhiteSpace(inserted.SemanticIdentity)
+            ? candidate.Snapshot.SemanticIdentity()
+            : inserted.SemanticIdentity;
+        var legacyIdentity = candidate.Snapshot.LegacySemanticIdentity();
+        _canonicalParentMap = parentMap;
+        var root = ResolveLineageRoot(candidate.ThreadId, parentMap);
+        using (var rootUpdate = _connection.CreateCommand())
+        {
+            rootUpdate.Transaction = transaction;
+            rootUpdate.CommandText = """
+                UPDATE token_samples
+                SET lineage_root_thread_id = $root, semantic_identity = $identity,
+                    legacy_semantic_identity = $legacy
+                WHERE id = $id;
+                """;
+            rootUpdate.Parameters.AddWithValue("$root", root);
+            rootUpdate.Parameters.AddWithValue("$identity", semanticIdentity);
+            rootUpdate.Parameters.AddWithValue("$legacy", legacyIdentity);
+            rootUpdate.Parameters.AddWithValue("$id", sampleId);
+            rootUpdate.ExecuteNonQuery();
+        }
+
+        var retired = new List<CanonicalSample>();
+        var promoted = new List<CanonicalSample>();
+        var exact = ApplyExactGroupElection(root, semanticIdentity, transaction);
+        AppendUniqueSamples(retired, exact.Retired);
+        AppendUniqueSamples(promoted, exact.Promoted);
+        var compat = ApplyLegacyCompatibility(root, legacyIdentity, transaction);
+        AppendUniqueSamples(retired, compat.Retired);
+        AppendUniqueSamples(promoted, compat.Promoted);
+        retired.RemoveAll(sample => sample.Id == sampleId);
+        promoted.RemoveAll(sample => sample.Id == sampleId);
+        NetLineageTransitions(retired, promoted);
+        var isCanonical = IsSampleLineageCanonical(sampleId, transaction);
+        return new LineageAssignment(isCanonical, retired, promoted);
+    }
+
+    private void ApplyLineageAggregateTransitions(LineageAssignment assignment, AggregateAccumulator aggregates,
+        ISet<string> replayThreads)
+    {
+        var retiredIds = new HashSet<long>();
+        var uniqueRetired = new List<CanonicalSample>();
+        foreach (var retired in assignment.Retired)
+        {
+            if (!retiredIds.Add(retired.Id)) continue;
+            uniqueRetired.Add(retired);
+        }
+
+        var promotedIds = new HashSet<long>();
+        var uniquePromoted = new List<CanonicalSample>();
+        foreach (var promoted in assignment.Promoted)
+        {
+            if (!promotedIds.Add(promoted.Id)) continue;
+            uniquePromoted.Add(promoted);
+        }
+
+        var cancelled = new HashSet<long>(retiredIds);
+        cancelled.IntersectWith(promotedIds);
+        foreach (var retired in uniqueRetired)
+        {
+            if (cancelled.Contains(retired.Id)) continue;
+            aggregates.SubtractConsumption(retired);
+            replayThreads.Add(retired.ThreadId);
+        }
+
+        foreach (var promoted in uniquePromoted)
+        {
+            if (cancelled.Contains(promoted.Id)) continue;
+            aggregates.AddConsumption(promoted);
+            replayThreads.Add(promoted.ThreadId);
+        }
+
+        if (uniqueRetired.Exists(sample => !cancelled.Contains(sample.Id)) ||
+            uniquePromoted.Exists(sample => !cancelled.Contains(sample.Id)))
+            _lifecycleInputsValidUntilUtc = DateTimeOffset.MinValue;
+    }
+
+    private LineageAssignment ApplyExactGroupElection(string root, string identity, SqliteTransaction transaction)
+    {
+        if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(identity))
+            return LineageAssignment.Empty;
+        return ElectLineageGroup(LoadExactLineageGroup(root, identity, transaction), transaction);
+    }
+
+    private LineageAssignment ApplyLegacyCompatibility(string root, string legacyIdentity,
+        SqliteTransaction transaction)
+    {
+        if (string.IsNullOrWhiteSpace(root) || string.IsNullOrWhiteSpace(legacyIdentity))
+            return LineageAssignment.Empty;
+        var legacyWinner = LoadLegacyExactWinner(root, legacyIdentity, transaction);
+        var liveRepresentatives = LoadLiveExactRepresentativesByAlias(root, legacyIdentity, transaction);
+        if (legacyWinner is null || liveRepresentatives.Count == 0) return LineageAssignment.Empty;
+
+        var pairedLive = liveRepresentatives[0];
+        var legacyEarlier = CompareCanonicalOrder(ToCanonicalSample(legacyWinner),
+            ToCanonicalSample(pairedLive)) < 0;
+        var overlay = new List<LineageMember>(liveRepresentatives.Count + 1) { legacyWinner };
+        overlay.AddRange(liveRepresentatives);
+        var desired = new Dictionary<long, bool>();
+        desired[legacyWinner.Id] = legacyEarlier;
+        foreach (var live in liveRepresentatives)
+            desired[live.Id] = !(legacyEarlier && live.Id == pairedLive.Id);
+
+        var retired = new List<CanonicalSample>();
+        var promoted = new List<CanonicalSample>();
+        foreach (var member in overlay)
+        {
+            if (!desired.TryGetValue(member.Id, out var want) || want || !member.Canonical) continue;
+            SetLineageCanonical(member.Id, false, transaction);
+            retired.Add(ToCanonicalSample(member));
+        }
+
+        foreach (var member in overlay)
+        {
+            if (!desired.TryGetValue(member.Id, out var want) || !want || member.Canonical) continue;
+            SetLineageCanonical(member.Id, true, transaction);
+            promoted.Add(ToCanonicalSample(member));
+        }
+
+        return new LineageAssignment(false, retired, promoted);
+    }
+
+    private LineageAssignment ElectLineageGroup(IReadOnlyList<LineageMember> group, SqliteTransaction transaction)
+    {
+        if (group.Count == 0) return LineageAssignment.Empty;
+        var winner = EarliestLineageMember(group);
+        var retired = new List<CanonicalSample>();
+        var promoted = new List<CanonicalSample>();
+        foreach (var member in group)
+        {
+            if (!member.Canonical || member.Id == winner.Id) continue;
+            SetLineageCanonical(member.Id, false, transaction);
+            retired.Add(ToCanonicalSample(member));
+        }
+
+        foreach (var member in group)
+        {
+            if (member.Id != winner.Id || member.Canonical) continue;
+            SetLineageCanonical(member.Id, true, transaction);
+            promoted.Add(ToCanonicalSample(member));
+        }
+
+        return new LineageAssignment(false, retired, promoted);
+    }
+
+    private List<LineageMember> LoadExactLineageGroup(string root, string identity, SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            SELECT id, thread_id, {AggregateColumns}, turn_key, event_time_ticks, source_key,
+                   source_generation, source_offset, turn_confidence, event_order_confidence,
+                   cumulative_total_tokens, is_lineage_canonical, semantic_identity,
+                   semantic_material, legacy_semantic_identity
+            FROM token_samples
+            WHERE lineage_root_thread_id = $root AND semantic_identity = $identity;
+            """;
+        command.Parameters.AddWithValue("$root", root);
+        command.Parameters.AddWithValue("$identity", identity);
+        return ReadLineageMembers(command);
+    }
+
+    private LineageMember? LoadLegacyExactWinner(string root, string legacyIdentity,
+        SqliteTransaction transaction)
+    {
+        LineageMember? winner = null;
+        foreach (var member in LoadExactLineageGroup(root, legacyIdentity, transaction))
+        {
+            if (!TokenUsageSnapshot.IsLegacySemanticMaterial(member.Material)) continue;
+            if (winner is null ||
+                CompareCanonicalOrder(ToCanonicalSample(member), ToCanonicalSample(winner)) < 0)
+            {
+                winner = member;
+            }
+        }
+
+        return winner;
+    }
+
+    private List<LineageMember> LoadLiveExactRepresentativesByAlias(string root, string legacyIdentity,
+        SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            SELECT id, thread_id, {AggregateColumns}, turn_key, event_time_ticks, source_key,
+                   source_generation, source_offset, turn_confidence, event_order_confidence,
+                   cumulative_total_tokens, is_lineage_canonical, semantic_identity,
+                   semantic_material, legacy_semantic_identity
+            FROM token_samples
+            WHERE lineage_root_thread_id = $root AND legacy_semantic_identity = $legacy
+              AND semantic_material LIKE '{TokenUsageSnapshot.LineageSemanticPrefix}|%';
+            """;
+        command.Parameters.AddWithValue("$root", root);
+        command.Parameters.AddWithValue("$legacy", legacyIdentity);
+        var representatives = new Dictionary<string, LineageMember>(StringComparer.Ordinal);
+        foreach (var row in ReadLineageMembers(command))
+        {
+            var key = string.IsNullOrWhiteSpace(row.Identity) ? row.Material : row.Identity;
+            if (!representatives.TryGetValue(key, out var current) ||
+                CompareCanonicalOrder(ToCanonicalSample(row), ToCanonicalSample(current)) < 0)
+            {
+                representatives[key] = row;
+            }
+        }
+
+        var ordered = representatives.Values.ToList();
+        ordered.Sort((left, right) =>
+            CompareCanonicalOrder(ToCanonicalSample(left), ToCanonicalSample(right)));
+        return ordered;
+    }
+
+    private List<LineageMember> ReadLineageMembers(SqliteCommand command)
+    {
+        using var reader = command.ExecuteReader();
+        var rows = new List<LineageMember>();
+        while (reader.Read())
+        {
+            rows.Add(new LineageMember(reader.GetInt64(0), reader.GetString(1), ReadAggregate(reader, 2),
+                OptionalString(reader, 10), OptionalLong(reader, 11), OptionalString(reader, 12),
+                reader.GetInt32(13), OptionalLong(reader, 14), reader.GetString(15), reader.GetString(16),
+                reader.GetInt64(17), reader.GetInt64(18) != 0, OptionalString(reader, 19) ?? string.Empty,
+                OptionalString(reader, 20) ?? string.Empty, OptionalString(reader, 21) ?? string.Empty));
+        }
+        return rows;
+    }
+
+    private LineageMember EarliestLineageMember(IReadOnlyList<LineageMember> group)
+    {
+        var winner = group[0];
+        foreach (var member in group)
+        {
+            if (CompareCanonicalOrder(ToCanonicalSample(member), ToCanonicalSample(winner)) < 0)
+                winner = member;
+        }
+
+        return winner;
+    }
+
+    private static void AppendUniqueSamples(List<CanonicalSample> target, IReadOnlyList<CanonicalSample> extra)
+    {
+        foreach (var sample in extra)
+        {
+            if (target.Exists(existing => existing.Id == sample.Id)) continue;
+            target.Add(sample);
+        }
+    }
+
+    private static void NetLineageTransitions(List<CanonicalSample> retired, List<CanonicalSample> promoted)
+    {
+        var retiredIds = new HashSet<long>();
+        var uniqueRetired = new List<CanonicalSample>();
+        foreach (var sample in retired)
+        {
+            if (!retiredIds.Add(sample.Id)) continue;
+            uniqueRetired.Add(sample);
+        }
+
+        var promotedIds = new HashSet<long>();
+        var uniquePromoted = new List<CanonicalSample>();
+        foreach (var sample in promoted)
+        {
+            if (!promotedIds.Add(sample.Id)) continue;
+            uniquePromoted.Add(sample);
+        }
+
+        var cancelled = new HashSet<long>(retiredIds);
+        cancelled.IntersectWith(promotedIds);
+        retired.Clear();
+        promoted.Clear();
+        foreach (var sample in uniqueRetired)
+        {
+            if (cancelled.Contains(sample.Id)) continue;
+            retired.Add(sample);
+        }
+
+        foreach (var sample in uniquePromoted)
+        {
+            if (cancelled.Contains(sample.Id)) continue;
+            promoted.Add(sample);
+        }
+    }
+
+    private static CanonicalSample ToCanonicalSample(LineageMember member) => new(member.Id, member.ThreadId,
+        member.Usage, member.TurnKey, member.EventTimeTicks, member.SourceKey, member.SourceGeneration,
+        member.SourceOffset, member.TurnConfidence, member.EventOrderConfidence, member.CumulativeTotal);
+
+    private void SetLineageCanonical(long sampleId, bool canonical, SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "UPDATE token_samples SET is_lineage_canonical = $flag WHERE id = $id;";
+        command.Parameters.AddWithValue("$flag", canonical ? 1 : 0);
+        command.Parameters.AddWithValue("$id", sampleId);
+        command.ExecuteNonQuery();
+    }
+
+    private bool IsSampleLineageCanonical(long sampleId, SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = "SELECT is_lineage_canonical FROM token_samples WHERE id = $id;";
+        command.Parameters.AddWithValue("$id", sampleId);
+        return Convert.ToInt64(command.ExecuteScalar(), CultureInfo.InvariantCulture) != 0;
+    }
+
+    private int CompareCanonicalOrder(CanonicalSample left, CanonicalSample right)
+    {
+        var leftReliable = left.EventTimeTicks.HasValue;
+        var rightReliable = right.EventTimeTicks.HasValue;
+        if (leftReliable != rightReliable) return leftReliable ? -1 : 1;
+        if (leftReliable)
+        {
+            var time = left.EventTimeTicks!.Value.CompareTo(right.EventTimeTicks!.Value);
+            if (time != 0) return time;
+            var depth = ResolvedLineageDepth(left.ThreadId, _canonicalParentMap)
+                .CompareTo(ResolvedLineageDepth(right.ThreadId, _canonicalParentMap));
+            if (depth != 0) return depth;
+        }
+
+        var source = string.Compare(left.SourceKey ?? string.Empty, right.SourceKey ?? string.Empty,
+            StringComparison.Ordinal);
+        if ((left.SourceKey is null) != (right.SourceKey is null))
+            return left.SourceKey is null ? 1 : -1;
+        if (source != 0) return source;
+        var generation = left.SourceGeneration.CompareTo(right.SourceGeneration);
+        if (generation != 0) return generation;
+        if ((left.SourceOffset is null) != (right.SourceOffset is null))
+            return left.SourceOffset is null ? 1 : -1;
+        if (left.SourceOffset.HasValue)
+        {
+            var offset = left.SourceOffset.Value.CompareTo(right.SourceOffset!.Value);
+            if (offset != 0) return offset;
+        }
+        return left.Id.CompareTo(right.Id);
+    }
+
+    private bool HasNonCanonicalSampleBetween(string threadId, long explicitTicks, long candidateTicks,
+        SqliteTransaction transaction)
+    {
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = """
+            SELECT 1 FROM token_samples
+            WHERE thread_id = $thread_id AND is_lineage_canonical = 0
+              AND event_time_ticks IS NOT NULL
+              AND event_time_ticks >= $explicit_ticks
+              AND event_time_ticks < $candidate_ticks
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        command.Parameters.AddWithValue("$explicit_ticks", explicitTicks);
+        command.Parameters.AddWithValue("$candidate_ticks", candidateTicks);
+        return command.ExecuteScalar() is not null;
+    }
+
+    private void ReplayAllDerivedContext(SqliteTransaction transaction)
+    {
+        var threads = new HashSet<string>(StringComparer.Ordinal);
+        using (var command = _connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = """
+                SELECT DISTINCT thread_id FROM token_samples
+                UNION
+                SELECT DISTINCT thread_id FROM structural_events
+                WHERE event_kind = 'event_msg:context_compacted';
+                """;
+            using var reader = command.ExecuteReader();
+            while (reader.Read()) threads.Add(reader.GetString(0));
+        }
+
+        foreach (var threadId in threads) ReplayContextForThread(threadId, transaction);
+    }
+
+    private void ReplayContextForThread(string threadId, SqliteTransaction transaction)
+    {
+        using (var clear = _connection.CreateCommand())
+        {
+            clear.Transaction = transaction;
+            clear.CommandText = """
+                DELETE FROM session_context_state WHERE thread_id = $thread_id;
+                DELETE FROM context_baseline_observations WHERE thread_id = $thread_id;
+                """;
+            clear.Parameters.AddWithValue("$thread_id", threadId);
+            clear.ExecuteNonQuery();
+        }
+
+        var compactEvents = new List<CompactReplayEvent>();
+        using (var compact = _connection.CreateCommand())
+        {
+            compact.Transaction = transaction;
+            compact.CommandText = """
+                SELECT event_identity, association_key, event_time_utc, source_identity_hash,
+                       source_generation, source_offset
+                FROM structural_events
+                WHERE thread_id = $thread_id AND event_kind = 'event_msg:context_compacted'
+                ORDER BY source_offset, event_identity;
+                """;
+            compact.Parameters.AddWithValue("$thread_id", threadId);
+            using var compactReader = compact.ExecuteReader();
+            while (compactReader.Read())
+            {
+                var eventTime = OptionalDate(compactReader, 2);
+                if (eventTime is null || string.IsNullOrWhiteSpace(compactReader.GetString(0))) continue;
+                compactEvents.Add(new CompactReplayEvent(eventTime.Value.UtcTicks, compactReader.GetInt64(5),
+                    compactReader.GetString(3), compactReader.GetInt32(4), compactReader.GetString(0),
+                    OptionalString(compactReader, 1)));
+            }
+        }
+
+        using var command = _connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            SELECT id, thread_id, turn_key, event_time_utc, event_time_ticks, source_key,
+                   source_generation, source_offset, {AggregateColumns}, cumulative_total_tokens,
+                   turn_confidence, event_order_confidence, context_window,
+                   cumulative_input_tokens, cumulative_output_tokens, model
+            FROM token_samples
+            WHERE thread_id = $thread_id AND is_lineage_canonical = 1
+            ORDER BY CASE WHEN event_time_ticks IS NULL THEN 1 ELSE 0 END, event_time_ticks, id;
+            """;
+        command.Parameters.AddWithValue("$thread_id", threadId);
+        using var reader = command.ExecuteReader();
+        var rows = new List<RebuildSample>();
+        while (reader.Read())
+        {
+            rows.Add(new RebuildSample(reader.GetInt64(0), reader.GetString(1), OptionalString(reader, 2),
+                OptionalDate(reader, 3), OptionalLong(reader, 4), OptionalString(reader, 5), reader.GetInt32(6),
+                OptionalLong(reader, 7), ReadAggregate(reader, 8), reader.GetInt64(16), reader.GetString(17),
+                reader.GetString(18), OptionalLong(reader, 19), true, ReadLong(reader, 20), ReadLong(reader, 21),
+                OptionalString(reader, 22)));
+        }
+        reader.Close();
+
+        var steps = new List<(long Ticks, long Offset, int Kind, int Index)>(compactEvents.Count + rows.Count);
+        for (var index = 0; index < compactEvents.Count; index++)
+        {
+            var item = compactEvents[index];
+            steps.Add((item.Ticks, item.Offset, 0, index));
+        }
+        for (var index = 0; index < rows.Count; index++)
+        {
+            var row = rows[index];
+            steps.Add((row.EventTimeTicks ?? long.MaxValue, row.SourceOffset ?? long.MaxValue, 1, index));
+        }
+        steps.Sort((left, right) =>
+        {
+            var time = left.Ticks.CompareTo(right.Ticks);
+            if (time != 0) return time;
+            var offset = left.Offset.CompareTo(right.Offset);
+            if (offset != 0) return offset;
+            var kind = left.Kind.CompareTo(right.Kind);
+            return kind != 0 ? kind : left.Index.CompareTo(right.Index);
+        });
+
+        foreach (var step in steps)
+        {
+            if (step.Kind == 0)
+            {
+                var compact = compactEvents[step.Index];
+                ApplyExplicitCompactionMarker(threadId, compact.Ticks, compact.SourceKey, compact.Generation,
+                    compact.Offset, compact.EventIdentity, compact.AssociationKey, transaction);
+                continue;
+            }
+
+            var row = rows[step.Index];
+            var candidate = new TokenSampleCandidate(row.ThreadId, RebuildSnapshot(row),
+                row.EventTimeTicks.HasValue ? new DateTimeOffset(row.EventTimeTicks.Value, TimeSpan.Zero) : null,
+                DateTimeOffset.MinValue, row.TurnKey, row.Model, null, row.SourceKey, row.SourceGeneration,
+                row.SourceOffset, row.TurnConfidence, row.EventOrderConfidence);
+            ObserveContextCandidate(candidate, row.Id, transaction);
+        }
+    }
+
+    private static TokenUsageSnapshot RebuildSnapshot(RebuildSample row) => new(
+        new TokenComponents(row.CumulativeInput, null, null, null, row.CumulativeOutput, null, row.CumulativeTotal),
+        new TokenComponents(row.Usage.Input, row.Usage.CachedInput, null, row.Usage.CacheWriteInput,
+            row.Usage.Output, row.Usage.Reasoning, row.Usage.ReportedTotal),
+        row.ContextWindow);
+
     private void InvalidateAggregateRebuild(SqliteTransaction transaction)
     {
         foreach (var table in new[] { "session_token_aggregates", "turn_token_aggregates",
@@ -3599,7 +4689,9 @@ public sealed class UsageDatabase : IDisposable
     private static RebuildSample ReadRebuildSample(SqliteDataReader reader) => new(
         reader.GetInt64(0), reader.GetString(1), OptionalString(reader, 2), OptionalDate(reader, 3),
         OptionalLong(reader, 4), OptionalString(reader, 5), reader.GetInt32(6), OptionalLong(reader, 7),
-        ReadAggregate(reader, 8), reader.GetInt64(16), reader.GetString(17), reader.GetString(18));
+        ReadAggregate(reader, 8), reader.GetInt64(16), reader.GetString(17), reader.GetString(18),
+        OptionalLong(reader, 19), reader.GetInt64(20) != 0, ReadLong(reader, 21), ReadLong(reader, 22),
+        OptionalString(reader, 23));
 
     private static CanonicalTokenUsage ReadAggregate(SqliteDataReader reader, int start = 0) => new(
         ReadLong(reader, start), ReadLong(reader, start + 1), ReadLong(reader, start + 2),
@@ -3764,8 +4856,6 @@ public sealed class UsageDatabase : IDisposable
         FROM sessions
         """;
 
-    private static readonly TokenUsageSnapshot EmptySnapshot = new(TokenComponents.Empty, TokenComponents.Empty, null);
-
     private sealed class AggregateAccumulator
     {
         public Dictionary<string, CanonicalTokenUsage> SessionDeltas { get; } = new(StringComparer.Ordinal);
@@ -3805,6 +4895,41 @@ public sealed class UsageDatabase : IDisposable
                 candidate.SourceOffset, candidate.TurnConfidence, candidate.EventOrderConfidence, usage);
             if (ShouldReplaceLatest(current, next)) Latest[candidate.ThreadId] = next;
             else if (current is not null) Latest[candidate.ThreadId] = current;
+        }
+
+        public void SubtractConsumption(CanonicalSample retired)
+        {
+            SessionDeltas[retired.ThreadId] = SessionDeltas.GetValueOrDefault(retired.ThreadId) +
+                                              retired.Usage.Negate();
+            if (retired.TurnKey is not null)
+            {
+                var key = (retired.ThreadId, retired.TurnKey);
+                TurnDeltas[key] = TurnDeltas.GetValueOrDefault(key) + retired.Usage.Negate();
+            }
+            if (retired.EventTimeTicks.HasValue)
+            {
+                var ticks = retired.EventTimeTicks.Value;
+                var bucket = FloorMinute(ticks);
+                BucketDeltas[bucket] = BucketDeltas.GetValueOrDefault(bucket) + retired.Usage.Negate();
+                TimedDeltas.Add(new TimedDelta(ticks, retired.Usage.Negate()));
+            }
+        }
+
+        public void AddConsumption(CanonicalSample promoted)
+        {
+            SessionDeltas[promoted.ThreadId] = SessionDeltas.GetValueOrDefault(promoted.ThreadId) + promoted.Usage;
+            if (promoted.TurnKey is not null)
+            {
+                var key = (promoted.ThreadId, promoted.TurnKey);
+                TurnDeltas[key] = TurnDeltas.GetValueOrDefault(key) + promoted.Usage;
+            }
+            if (promoted.EventTimeTicks.HasValue)
+            {
+                var ticks = promoted.EventTimeTicks.Value;
+                var bucket = FloorMinute(ticks);
+                BucketDeltas[bucket] = BucketDeltas.GetValueOrDefault(bucket) + promoted.Usage;
+                TimedDeltas.Add(new TimedDelta(ticks, promoted.Usage));
+            }
         }
     }
 
@@ -3858,10 +4983,11 @@ public sealed class UsageDatabase : IDisposable
 
     private readonly record struct TokenInsertResult(string Fingerprint, TokenDisposition Disposition,
         long? SampleId, int Writes, CanonicalTokenUsage Usage, long CumulativeTotal,
-        bool MetadataRecovered);
+        bool MetadataRecovered, string SemanticIdentity = "", bool IsLineageCanonical = false);
 
     private readonly record struct PersistedTokenSample(long SampleId, string ThreadId,
-        CanonicalTokenUsage Usage, long CumulativeTotal);
+        CanonicalTokenUsage Usage, long CumulativeTotal, string SemanticIdentity = "",
+        bool IsLineageCanonical = false);
 
     private readonly record struct StructuralResolution(StructuralDispositionRecord Disposition,
         string? AssociationKey, bool Canonical, bool Advanced, string? DiagnosticCode);
@@ -3889,7 +5015,24 @@ public sealed class UsageDatabase : IDisposable
     private sealed record RebuildSample(long Id, string ThreadId, string? TurnKey,
         DateTimeOffset? EventTimeUtc, long? EventTimeTicks, string? SourceKey, int SourceGeneration,
         long? SourceOffset, CanonicalTokenUsage Usage, long CumulativeTotal,
-        string TurnConfidence, string EventOrderConfidence);
+        string TurnConfidence, string EventOrderConfidence, long? ContextWindow = null,
+        bool IsLineageCanonical = true, long CumulativeInput = 0, long CumulativeOutput = 0,
+        string? Model = null);
+    private readonly record struct CompactReplayEvent(long Ticks, long Offset, string SourceKey, int Generation,
+        string EventIdentity, string? AssociationKey);
+    private readonly record struct LineageAssignment(bool IsCanonical, IReadOnlyList<CanonicalSample> Retired,
+        IReadOnlyList<CanonicalSample> Promoted)
+    {
+        public static LineageAssignment Empty { get; } = new(false, Array.Empty<CanonicalSample>(),
+            Array.Empty<CanonicalSample>());
+    }
+    private sealed record LineageMember(long Id, string ThreadId, CanonicalTokenUsage Usage,
+        string? TurnKey, long? EventTimeTicks, string? SourceKey, int SourceGeneration,
+        long? SourceOffset, string TurnConfidence, string EventOrderConfidence, long CumulativeTotal,
+        bool Canonical, string Identity, string Material, string LegacyIdentity);
+    private sealed record CanonicalSample(long Id, string ThreadId, CanonicalTokenUsage Usage,
+        string? TurnKey, long? EventTimeTicks, string? SourceKey, int SourceGeneration,
+        long? SourceOffset, string TurnConfidence, string EventOrderConfidence, long CumulativeTotal);
     private sealed record LegacySource(string SourceKey, string ThreadId, string VolumeSerial,
         string FileId, string FallbackKey, bool IsDegraded, string RelativePath, int Generation,
         long CompleteOffset, long LastLength, long LastWriteTicks, string? CursorTurnKey,

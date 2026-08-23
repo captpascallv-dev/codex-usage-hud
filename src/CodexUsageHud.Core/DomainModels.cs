@@ -70,6 +70,15 @@ public readonly record struct CanonicalTokenUsage(
             TokenComponents.SaturatingAdd(left.Reasoning, right.Reasoning),
             TokenComponents.SaturatingAdd(left.Total, right.Total),
             TokenComponents.SaturatingAdd(left.ReportedTotal, right.ReportedTotal));
+
+    public CanonicalTokenUsage Negate() => new(
+        0L - Input, 0L - RawInput, 0L - CachedInput, 0L - CacheWriteInput,
+        0L - Output, 0L - Reasoning, 0L - Total, 0L - ReportedTotal);
+}
+
+public static class HudProduct
+{
+    public const string Version = "1.0.2";
 }
 
 public sealed record TokenUsageSnapshot(
@@ -77,16 +86,81 @@ public sealed record TokenUsageSnapshot(
     TokenComponents LastUsage,
     long? ContextWindow)
 {
+    public const string LineageSemanticPrefix = "lineage-semantic-v2";
+    public const string LineageSemanticLegacyPrefix = "lineage-semantic-v1";
+
     public string Fingerprint(string threadId)
     {
         var canonical = string.Join('|', "schema-1", threadId, TotalUsage.ToFingerprintPart(),
-            LastUsage.ToFingerprintPart(), ContextWindow.HasValue
-                ? "v:" + ContextWindow.Value.ToString(CultureInfo.InvariantCulture)
-                : "m");
+            LastUsage.ToFingerprintPart(), FormatPresence(ContextWindow));
         return HashText(canonical);
     }
 
-    internal static string HashText(string value) =>
+    public string SemanticMaterial() => FormatLiveSemanticMaterial(TotalUsage, LastUsage, ContextWindow);
+
+    public string SemanticIdentity() => HashText(SemanticMaterial());
+
+    public string LineageSemanticIdentity() => SemanticIdentity();
+
+    public string LegacySemanticMaterial()
+    {
+        var last = LastUsage.ToCanonical();
+        var total = TotalUsage.ToCanonical();
+        return FormatLegacySemanticMaterial(last, total.Input, total.Output, total.Total, ContextWindow);
+    }
+
+    public string LegacySemanticIdentity() => HashText(LegacySemanticMaterial());
+
+    public static string FormatLiveSemanticMaterial(TokenComponents total, TokenComponents last,
+        long? contextWindow) =>
+        string.Join('|', LineageSemanticPrefix, total.ToFingerprintPart(), last.ToFingerprintPart(),
+            FormatPresence(contextWindow));
+
+    public static string FormatLineageSemanticMaterial(CanonicalTokenUsage last,
+        long cumulativeInput, long cumulativeOutput, long cumulativeTotal, long? contextWindow) =>
+        FormatLegacySemanticMaterial(last, cumulativeInput, cumulativeOutput, cumulativeTotal, contextWindow);
+
+    public static string FormatLegacySemanticMaterial(CanonicalTokenUsage last,
+        long cumulativeInput, long cumulativeOutput, long cumulativeTotal, long? contextWindow)
+    {
+        static string Number(long value) => value.ToString(CultureInfo.InvariantCulture);
+        var lastPart = string.Join(',', Number(last.Input), Number(last.RawInput), Number(last.CachedInput),
+            Number(last.CacheWriteInput), Number(last.Output), Number(last.Reasoning), Number(last.Total),
+            Number(last.ReportedTotal));
+        var totalPart = string.Join(',', Number(cumulativeInput), Number(cumulativeOutput),
+            Number(cumulativeTotal));
+        var context = contextWindow is > 0 ? "v:" + Number(contextWindow.Value) : "m";
+        return string.Join('|', LineageSemanticLegacyPrefix, lastPart, totalPart, context);
+    }
+
+    public static string LineageSemanticMaterialFromStored(CanonicalTokenUsage last,
+        long cumulativeInput, long cumulativeOutput, long cumulativeTotal, long? contextWindow) =>
+        FormatLegacySemanticMaterial(last, cumulativeInput, cumulativeOutput, cumulativeTotal, contextWindow);
+
+    public static string LineageSemanticIdentityFromStored(CanonicalTokenUsage last,
+        long cumulativeInput, long cumulativeOutput, long cumulativeTotal, long? contextWindow) =>
+        HashText(LineageSemanticMaterialFromStored(last, cumulativeInput, cumulativeOutput, cumulativeTotal,
+            contextWindow));
+
+    public static bool IsLiveSemanticMaterial(string? material) =>
+        material is not null && material.StartsWith(LineageSemanticPrefix + "|", StringComparison.Ordinal);
+
+    public static bool IsLegacySemanticMaterial(string? material) =>
+        material is not null && material.StartsWith(LineageSemanticLegacyPrefix + "|", StringComparison.Ordinal);
+
+    public static string ReplaceLiveContextWindow(string material, long? contextWindow)
+    {
+        if (!IsLiveSemanticMaterial(material)) return material;
+        var separator = material.LastIndexOf('|');
+        if (separator <= 0) return material;
+        return material[..separator] + "|" + FormatPresence(contextWindow);
+    }
+
+    public static string FormatPresence(long? value) => value.HasValue
+        ? "v:" + value.Value.ToString(CultureInfo.InvariantCulture)
+        : "m";
+
+    public static string HashText(string value) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 }
 

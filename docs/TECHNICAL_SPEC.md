@@ -134,10 +134,17 @@ Do not sum cumulative snapshots. Create a canonical SHA-256 fingerprint from:
 
 ```text
 schema-version | thread-id |
-total(input,cached,cache-write,output,reasoning,total) |
-last(input,cached,cache-write,output,reasoning,total) |
+total(input,cached,cache_read,cache_write,output,reasoning,total) |
+last(input,cached,cache_read,cache_write,output,reasoning,total) |
 context-window
 ```
+
+Semantic v2 identity uses the same seven independent total/last/context fields
+(`input`, `cached_input`, `cache_read_input_tokens`, `cache_write`, `output`,
+`reasoning`, `total`) on both tuples plus context-window presence; missing is
+distinct from explicit zero. Raw thread fingerprints remain durable metadata;
+lineage consumption uniqueness is `(parent-tree root, semantic identity)` and
+does not replace the thread-scoped fingerprint.
 
 Normalize missing numeric fields distinctly from zero. Exclude timestamp,
 path, and byte offset so that the same snapshot replayed later or copied to an
@@ -158,10 +165,12 @@ turn key per thread. Aggregate all unique model-call increments in that turn
 for `最近一轮增量`. If no reliable turn boundary exists, show the latest event
 as `最近事件（降级）` rather than asserting a turn.
 
-`会话累计` is the sum of all unique accepted increments for that thread.
-`本额度周期全部会话合计` is the sum of unique sample event timestamps within the
-mechanically determined current quota window. Global deduplication happens
-first, so an old snapshot replayed during a new window does not count again.
+`会话累计` is the sum of canonical own events for that thread after parent-tree
+semantic uniqueness. `父工作合计` adds descendant canonical events. `本额度周期全部会话合计`
+is the sum of canonical sample event timestamps within the mechanically determined
+current quota window. Lineage canonicalization happens after thread-scoped
+fingerprint insert and before quota-window filtering, so an ancestor snapshot
+replayed onto a child thread during a new window does not count again.
 
 ### 6.3 Context continuation reference
 
@@ -170,6 +179,13 @@ boundary. The post-compaction baseline is the first reliable non-zero token
 sample later in the same source generation. If that event is absent, a
 same-turn high/zero/lower sequence may provide a labeled heuristic fallback.
 Never infer a boundary from cumulative raw-token volume alone.
+
+Lineage migration, root reselection, and explicit rebuild reconstruct eligible
+`context_compacted` boundaries from durable `structural_events` together with
+canonical token samples. Explicit evidence keeps priority over heuristics.
+Reconstruction does not require deleted rollout logs. Inherited or noncanonical
+ancestor evidence cannot create a false child baseline; genuine child-specific
+boundaries remain attributed once.
 
 Persist only boundary identity/time/source order, baseline token/window/model,
 detection source, and the reliable turn/token work between adjacent comparable
@@ -326,6 +342,34 @@ At minimum model these durable concepts:
 - event fingerprints with first/last seen and duplicate count
 - token samples with approved components, turn key, source offset, model/tier,
   event time, observation time, and confidence
+- lineage metadata on token samples: live semantic identity/material (nullable
+  total tuple, nullable last tuple, context-window, missing-versus-zero, no
+  thread id), SHA-256 identity matching stored material, a deterministic v1
+  legacy compatibility alias for schema-v9 rows, resolved parent-tree root, and
+  canonical flag. Consumption uniqueness is `(root thread id, semantic identity)`;
+  earliest reliable `(event time, source, generation, offset, id)` is canonical.
+  Schema v9 rows are rebuilt from allowlisted stored token columns without
+  requiring deleted logs; equivalent later live ancestor replay matches migrated
+  v9 through a bounded, non-transitive legacy alias that pairs the legacy
+  exact-group winner with at most one live v2 identity. The paired live
+  representative stays discoverable after compatibility demotion, later inserts,
+  restart, root reassignment, and full rebuild, so additional distinct live
+  missing/zero/presence identities remain canonical. Pairing follows existing
+  canonical order and moves reversibly when an earlier representative arrives.
+  Combined exact-election and compatibility-overlay flag changes for one insert
+  are applied as a net canonical delta: a sample both promoted and retired has
+  no aggregate effect. Merging session metadata preserves an existing
+  `parent_thread_id` when the incoming value is omitted; an explicit
+  `ClearSessionParent` write is the distinguished parent-removal path. Inserting a
+  previously missing parent through rollout `CommitScan`, or otherwise changing
+  root-relevant session membership, marks lineage unavailable and schedules the
+  same deterministic rebuild used by other late-parent paths. Identity,
+  alias, or root changes re-elect both the old and new groups so a group never
+  has zero or two winners. Missing, malformed, or cyclic `parent_thread_id`
+  chains remain isolated roots. Context and lifecycle consumers rebuild from
+  durable metadata: canonical samples including persisted model, plus explicit
+  `context_compacted` rows in `structural_events`. Derived context replay is
+  lossless and idempotent across lineage migration, reparent, rebuild, and restart.
 - safe session metadata and derived status
 - quota observations and suspected-reset events
 - metadata-only parser/source errors
@@ -420,6 +464,10 @@ Also test:
 - status transitions and stale open-task -> unknown
 - session metadata query contains no forbidden column names
 - long-session ranking, manual drift override, clear/restart persistence, and rapid-click single-flight behavior
+- lineage missing-versus-zero tuples and context, v9 plus equivalent live replay,
+  re-election after identity/root change, independent lineage-cycle oracle
+  defect injection, and exact session/turn/latest/frontier/bucket/cycle/context/
+  lifecycle/parent-work/render values
 - a high-entropy secret/message sentinel in an unknown record never appears in
   database rows, app logs, diagnostics, or rendered view models
 

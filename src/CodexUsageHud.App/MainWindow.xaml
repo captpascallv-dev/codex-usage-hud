@@ -8,13 +8,16 @@
         MinHeight="8"
         WindowStyle="None"
         ResizeMode="NoResize"
-        AllowsTransparency="True"
-        Background="Transparent"
+        AllowsTransparency="False"
+        Background="#FF111719"
         ShowInTaskbar="False"
         Topmost="False"
         WindowStartupLocation="Manual"
         UseLayoutRounding="True"
-        SnapsToDevicePixels="True">
+        SnapsToDevicePixels="True"
+        TextOptions.TextFormattingMode="Display"
+        TextOptions.TextRenderingMode="ClearType"
+        TextOptions.TextHintingMode="Fixed">
     <Window.Resources>
         <Style x:Key="HudButton" TargetType="Button">
             <Setter Property="Height" Value="38" />
@@ -102,9 +105,6 @@
     <Grid x:Name="WindowRoot" MouseLeftButtonDown="OnDrag">
         <Border x:Name="ExpandedShell" Visibility="Collapsed" Background="#FF111719"
                 BorderBrush="#FF39534A" BorderThickness="1" CornerRadius="13">
-            <Border.Effect>
-                <DropShadowEffect BlurRadius="18" ShadowDepth="5" Opacity="0.35" Color="#FF000000" />
-            </Border.Effect>
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="58" />
@@ -125,7 +125,7 @@
                             <TextBlock Text="V2" Foreground="{StaticResource HudMint}" FontSize="10" FontWeight="SemiBold" />
                         </Border>
                         <Border Background="#FF20322D" CornerRadius="4" Padding="6,2" Margin="6,0,0,0">
-                            <TextBlock Text="1.0.3" Foreground="{StaticResource HudMint}" FontSize="10" FontWeight="SemiBold" />
+                            <TextBlock Text="1.0.4" Foreground="{StaticResource HudMint}" FontSize="11" FontWeight="SemiBold" />
                         </Border>
                     </StackPanel>
                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
@@ -205,7 +205,7 @@
                                     <TextBlock Text="本周期摘要" Foreground="{StaticResource HudMuted}" FontSize="11" />
                                     <TextBlock Text="{Binding CycleCompactText}" FontFamily="Cascadia Mono, Consolas"
                                                FontSize="23" FontWeight="SemiBold" Margin="0,9,0,0" />
-                                    <TextBlock Text="全部会话 · raw tokens" Foreground="{StaticResource HudSubtle}" FontSize="9.5" />
+                                    <TextBlock Text="全部会话 · raw tokens" Foreground="{StaticResource HudSubtle}" FontSize="11" />
                                     <Border Background="#FF263234" Height="1" Margin="0,13,0,11" />
                                     <Grid Margin="0,0,0,7">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
@@ -233,7 +233,7 @@
                                         <TextBlock Grid.Column="1" Text="{Binding InternalTaskCountText}" FontFamily="Cascadia Mono, Consolas" FontSize="11" />
                                     </Grid>
                                     <TextBlock Text="子任务归并显示；本机总量仍只计一次" Foreground="{StaticResource HudSubtle}"
-                                               FontSize="9.5" TextWrapping="Wrap" Margin="0,12,0,0" />
+                                               FontSize="11" TextWrapping="Wrap" Margin="0,12,0,0" />
                                 </StackPanel>
                             </Border>
                             <Button x:Name="DataStatusButton" Grid.Row="9" Style="{StaticResource HudButton}"
@@ -367,7 +367,7 @@
                                                         <StackPanel Orientation="Horizontal">
                                                             <Border BorderBrush="#FF4B595B" BorderThickness="1" CornerRadius="4" Padding="5,1"
                                                                     Margin="0,0,7,0" VerticalAlignment="Center">
-                                                                <TextBlock Text="{Binding SourceLabel}" Foreground="{StaticResource HudMuted}" FontSize="9" />
+                                                                <TextBlock Text="{Binding SourceLabel}" Foreground="{StaticResource HudMuted}" FontSize="11" />
                                                             </Border>
                                                             <TextBlock Text="{Binding Name}" FontSize="13" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                                                         </StackPanel>
@@ -395,7 +395,7 @@
                                             <DataTemplate>
                                                 <StackPanel VerticalAlignment="Center">
                                                     <TextBlock Text="{Binding WorkTotalText}" FontFamily="Cascadia Mono, Consolas" FontSize="11.5" />
-                                                    <TextBlock Text="{Binding WorkBreakdownText}" Foreground="{StaticResource HudSubtle}" FontSize="9" TextTrimming="CharacterEllipsis" />
+                                                    <TextBlock Text="{Binding WorkBreakdownText}" Foreground="{StaticResource HudSubtle}" FontSize="11" TextTrimming="CharacterEllipsis" />
                                                 </StackPanel>
                                             </DataTemplate>
                                         </DataGridTemplateColumn.CellTemplate>
@@ -504,7 +504,7 @@
                                         <TextBlock Text="{Binding LifecycleRecentText}" FontFamily="Cascadia Mono, Consolas"
                                                    Foreground="{StaticResource HudMuted}" FontSize="10.5" Margin="0,3,0,0" TextWrapping="Wrap" />
                                         <TextBlock Text="{Binding LifecycleRiskDetailText}" Foreground="{StaticResource HudSubtle}"
-                                                   FontSize="9.5" Margin="0,3,0,10" TextWrapping="Wrap" />
+                                                   FontSize="11" Margin="0,3,0,10" TextWrapping="Wrap" />
                                         <TextBlock Text="实际漂移（人工确认）" Foreground="{StaticResource HudMuted}"
                                                    FontSize="11.5" Margin="0,0,0,6" />
                                         <Grid Margin="0,0,0,5">
@@ -527,7 +527,7 @@
                                             </Button>
                                         </Grid>
                                         <TextBlock Text="{Binding DriftAssessmentDetailText}" Foreground="{StaticResource HudSubtle}"
-                                                   FontSize="9.5" TextWrapping="Wrap" Margin="0,0,0,10" />
+                                                   FontSize="11" TextWrapping="Wrap" Margin="0,0,0,10" />
                                         <Border Background="#FF2A383A" Height="1" Margin="0,0,0,10" />
                                         <Grid>
                                             <Grid.ColumnDefinitions><ColumnDefinition Width="42" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
@@ -538,7 +538,7 @@
                                                            VerticalAlignment="Center" />
                                             </Border>
                                             <StackPanel Grid.Column="1">
-                                                <TextBlock Text="综合续接建议" Foreground="{StaticResource HudMuted}" FontSize="9.5" />
+                                                <TextBlock Text="综合续接建议" Foreground="{StaticResource HudMuted}" FontSize="11" />
                                                 <TextBlock Text="{Binding ContinuationAdviceText}" FontSize="12"
                                                            FontWeight="SemiBold" TextWrapping="Wrap" />
                                                 <TextBlock Text="{Binding ContinuationEvidenceText}" Foreground="{StaticResource HudSubtle}"
@@ -633,7 +633,7 @@
                                 </StackPanel>
                                 <TextBlock x:Name="SettingsStatusText" Foreground="{StaticResource HudMint}" FontSize="11" TextWrapping="Wrap" Margin="0,12,0,0" />
                             </StackPanel>
-                            <TextBlock Grid.Row="3" Text="v1.0.3 · 数据库：%LOCALAPPDATA%\CodexUsageHUD\usage.db" Foreground="{StaticResource HudSubtle}" FontSize="10" TextWrapping="Wrap" />
+                            <TextBlock Grid.Row="3" Text="v1.0.4 · 数据库：%LOCALAPPDATA%\CodexUsageHUD\usage.db" Foreground="{StaticResource HudSubtle}" FontSize="11" TextWrapping="Wrap" />
                         </Grid>
                     </Border>
                 </Grid>
@@ -659,7 +659,6 @@
 
         <Border x:Name="CompactVerticalShell" Background="#FF141C1E" BorderBrush="#FF446D5E"
                 BorderThickness="1" CornerRadius="12" Padding="12,10">
-            <Border.Effect><DropShadowEffect BlurRadius="14" ShadowDepth="4" Opacity="0.32" Color="#FF000000" /></Border.Effect>
             <Grid>
                 <Grid.RowDefinitions><RowDefinition Height="32" /><RowDefinition Height="1" /><RowDefinition Height="102" /><RowDefinition Height="1" /><RowDefinition Height="42" /><RowDefinition Height="42" /><RowDefinition Height="42" /><RowDefinition Height="*" /></Grid.RowDefinitions>
                 <Grid>
@@ -681,9 +680,9 @@
                     <StackPanel VerticalAlignment="Center"><TextBlock Text="剩余额度" Foreground="{StaticResource HudMuted}" FontSize="11" HorizontalAlignment="Center" /><TextBlock x:Name="QuotaPercentText" Text="{Binding RemainingText}" Foreground="{StaticResource HudMint}" FontFamily="Cascadia Mono, Consolas" FontSize="38" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,5,0,0" /><TextBlock x:Name="CompactQuotaStateText" Text="{Binding QuotaStateText}" Foreground="{StaticResource HudMint}" FontSize="11" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,3,0,0" ToolTip="{Binding QuotaStateDetailText}" /></StackPanel>
                 </Button>
                 <Border Grid.Row="3" Background="#FF2C383A" />
-                <StackPanel Grid.Row="4" VerticalAlignment="Center"><TextBlock Text="{Binding CountdownCompactText}" FontFamily="Cascadia Mono, Consolas" FontSize="16" HorizontalAlignment="Center" /><TextBlock Text="后重置" Foreground="{StaticResource HudSubtle}" FontSize="9.5" HorizontalAlignment="Center" /></StackPanel>
-                <StackPanel Grid.Row="5" VerticalAlignment="Center"><TextBlock Text="{Binding RunningCountText}" FontFamily="Cascadia Mono, Consolas" FontSize="18" HorizontalAlignment="Center" /><TextBlock Text="运行中" Foreground="{StaticResource HudSubtle}" FontSize="9.5" HorizontalAlignment="Center" /></StackPanel>
-                <StackPanel Grid.Row="6" VerticalAlignment="Center"><TextBlock Text="{Binding CycleCompactText}" FontFamily="Cascadia Mono, Consolas" FontSize="15" HorizontalAlignment="Center" /><TextBlock Text="本机本周期" Foreground="{StaticResource HudSubtle}" FontSize="9.5" HorizontalAlignment="Center" /></StackPanel>
+                <StackPanel Grid.Row="4" VerticalAlignment="Center"><TextBlock Text="{Binding CountdownCompactText}" FontFamily="Cascadia Mono, Consolas" FontSize="16" HorizontalAlignment="Center" /><TextBlock Text="后重置" Foreground="{StaticResource HudSubtle}" FontSize="11" HorizontalAlignment="Center" /></StackPanel>
+                <StackPanel Grid.Row="5" VerticalAlignment="Center"><TextBlock Text="{Binding RunningCountText}" FontFamily="Cascadia Mono, Consolas" FontSize="18" HorizontalAlignment="Center" /><TextBlock Text="运行中" Foreground="{StaticResource HudSubtle}" FontSize="11" HorizontalAlignment="Center" /></StackPanel>
+                <StackPanel Grid.Row="6" VerticalAlignment="Center"><TextBlock Text="{Binding CycleCompactText}" FontFamily="Cascadia Mono, Consolas" FontSize="15" HorizontalAlignment="Center" /><TextBlock Text="本机本周期" Foreground="{StaticResource HudSubtle}" FontSize="11" HorizontalAlignment="Center" /></StackPanel>
                 <Button x:Name="CompactExpandButton" Grid.Row="7" Style="{StaticResource HudButton}" Height="34" Content="›" FontSize="22" ToolTip="展开完整仪表" Click="OnToggleExpand" />
             </Grid>
         </Border>

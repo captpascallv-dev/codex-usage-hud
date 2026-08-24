@@ -74,6 +74,7 @@ public partial class MainWindow : Window, IDisposable
         bool startRuntimeOnLoad = true)
     {
         InitializeComponent();
+        SourceInitialized += (_, _) => ApplyNativeWindowClarity();
         _engine = engine;
         _disposeRuntimeAsync = disposeRuntimeAsync;
         DataContext = _viewModel;
@@ -384,9 +385,7 @@ public partial class MainWindow : Window, IDisposable
             ? Math.Min(420, Math.Max(360, workWidth * 0.28))
             : 330);
         DetailPanel.Padding = fullscreen ? new Thickness(17) : new Thickness(14);
-        DetailContentGrid.LayoutTransform = fullscreen
-            ? new ScaleTransform(1.08, 1.08)
-            : Transform.Identity;
+        DetailContentGrid.LayoutTransform = Transform.Identity;
     }
 
     private void UpdateFullscreenState()
@@ -852,7 +851,7 @@ public partial class MainWindow : Window, IDisposable
         if (_isEdgeHidden)
         {
             _revealTimer.Stop();
-            _revealTimer.Start();
+            SetEdgeHidden(false);
         }
     }
 
@@ -1218,6 +1217,19 @@ public partial class MainWindow : Window, IDisposable
 
     public void Dispose() => DisposeResources();
 
+    private void ApplyNativeWindowClarity()
+    {
+        if (!OperatingSystem.IsWindowsVersionAtLeast(10, 0, 22000)) return;
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+        var preference = 2; // DWMWCP_ROUND
+        _ = DwmSetWindowAttribute(handle, 33, ref preference, sizeof(int));
+    }
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr handle);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr window, int attribute,
+        ref int value, int valueSize);
 }

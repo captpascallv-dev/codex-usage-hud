@@ -11,7 +11,7 @@
         <Color x:Key="HudLineColor">#FF354044</Color>
         <Color x:Key="HudTextColor">#FFF2F5F4</Color>
         <Color x:Key="HudMutedColor">#FFA9B2B1</Color>
-        <Color x:Key="HudSubtleColor">#FF737E7D</Color>
+        <Color x:Key="HudSubtleColor">#FF95A09F</Color>
         <Color x:Key="HudMintColor">#FF79E2B2</Color>
 
         <SolidColorBrush x:Key="HudBackground" Color="{StaticResource HudCanvasColor}" />
@@ -31,6 +31,8 @@
             <Setter Property="Foreground" Value="{StaticResource HudText}" />
             <Setter Property="FontFamily" Value="Segoe UI" />
             <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+            <Setter Property="TextOptions.TextRenderingMode" Value="ClearType" />
+            <Setter Property="TextOptions.TextHintingMode" Value="Fixed" />
         </Style>
 
         <Style x:Key="IconButtonStyle" TargetType="Button">

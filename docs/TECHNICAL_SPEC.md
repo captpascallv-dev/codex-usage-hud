@@ -395,6 +395,11 @@ The borderless WPF window is always-on-top, draggable, DPI-aware, and remembers
 position. Closing hides to the system tray; tray commands are Show/Hide,
 Refresh, Settings, and Exit. Exit cancels workers and closes SQLite cleanly.
 
+The top-level HUD window is opaque so Windows can use ClearType text rendering.
+Do not apply bitmap effects or fractional layout transforms to containers that
+own text. Use native DWM corner rounding, fixed text hinting, integer layout
+rounding, readable minimum label sizes, and sufficient muted-text contrast.
+
 Collapsed form shows one line equivalent to:
 
 ```text

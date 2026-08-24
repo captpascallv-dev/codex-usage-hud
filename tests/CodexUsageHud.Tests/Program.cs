@@ -262,6 +262,8 @@ internal static class Program
         window.Show();
         InvokeWindowMethod(window, "UpdateTextBlocks");
         RenderWindow(window, Path.Combine(outputDirectory, "hud-expanded.png"));
+        RenderWindow(window, Path.Combine(outputDirectory, "hud-expanded-125.png"), 120);
+        RenderWindow(window, Path.Combine(outputDirectory, "hud-expanded-150.png"), 144);
         InvokeWindowMethod(window, "OnToggleFullscreen", window, new System.Windows.RoutedEventArgs());
         window.UpdateLayout();
         RenderWindow(window, Path.Combine(outputDirectory, "hud-fullscreen.png"));
@@ -277,6 +279,8 @@ internal static class Program
         InvokeWindowMethod(window, "ApplyExpansionState", false);
         InvokeWindowMethod(window, "UpdateTextBlocks");
         RenderWindow(window, Path.Combine(outputDirectory, "hud-collapsed.png"));
+        RenderWindow(window, Path.Combine(outputDirectory, "hud-collapsed-125.png"), 120);
+        RenderWindow(window, Path.Combine(outputDirectory, "hud-collapsed-150.png"), 144);
         var dockField = typeof(MainWindow).GetField("_dockSide",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("dock_field_missing");
@@ -634,16 +638,18 @@ internal static class Program
         task.GetAwaiter().GetResult();
     }
 
-    private static void RenderWindow(MainWindow window, string outputPath)
+    private static void RenderWindow(MainWindow window, string outputPath, double dpi = 96)
     {
         var width = (int)Math.Ceiling(window.Width);
         var height = (int)Math.Ceiling(window.Height);
+        var pixelWidth = (int)Math.Ceiling(window.Width * dpi / 96d);
+        var pixelHeight = (int)Math.Ceiling(window.Height * dpi / 96d);
         var visual = (System.Windows.FrameworkElement)window.Content;
         visual.Measure(new System.Windows.Size(width, height));
         visual.Arrange(new System.Windows.Rect(0, 0, width, height));
         visual.UpdateLayout();
         window.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
-        var bitmap = new RenderTargetBitmap(width, height, 96, 96, PixelFormats.Pbgra32);
+        var bitmap = new RenderTargetBitmap(pixelWidth, pixelHeight, dpi, dpi, PixelFormats.Pbgra32);
         bitmap.Render(visual);
         var encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(bitmap));
@@ -3074,6 +3080,7 @@ internal static class Program
     {
         var root = ProjectRoot();
         var xaml = File.ReadAllText(Path.Combine(root, "src", "CodexUsageHud.App", "MainWindow.xaml"));
+        var appXaml = File.ReadAllText(Path.Combine(root, "src", "CodexUsageHud.App", "App.xaml"));
         var window = File.ReadAllText(Path.Combine(root, "src", "CodexUsageHud.App", "MainWindow.xaml.cs"));
         foreach (var required in new[]
                  {
@@ -3113,6 +3120,11 @@ internal static class Program
         Assert.True(!xaml.Contains("当前上下文（最近调用）", StringComparison.Ordinal));
         Assert.True(!xaml.Contains("•••", StringComparison.Ordinal));
         Assert.True(!window.Contains("MessageBox.Show", StringComparison.Ordinal));
+        Assert.True(xaml.Contains("AllowsTransparency=\"False\"", StringComparison.Ordinal));
+        Assert.True(xaml.Contains("TextOptions.TextRenderingMode=\"ClearType\"", StringComparison.Ordinal));
+        Assert.True(appXaml.Contains("TextOptions.TextHintingMode\" Value=\"Fixed\"", StringComparison.Ordinal));
+        Assert.True(!xaml.Contains("DropShadowEffect", StringComparison.Ordinal));
+        Assert.True(!window.Contains("new ScaleTransform(1.08", StringComparison.Ordinal));
         var conversationColumn = xaml[xaml.IndexOf("Header=\"对话 / ID\"", StringComparison.Ordinal)..];
         conversationColumn = conversationColumn[..conversationColumn.IndexOf("</DataGridTemplateColumn>", StringComparison.Ordinal)];
         Assert.True(conversationColumn.IndexOf("Text=\"{Binding Name}\"", StringComparison.Ordinal) <
@@ -3389,7 +3401,7 @@ internal static class Program
         Assert.Near(work.Width, window.Width, 1.5d);
         Assert.Near(work.Height, window.Height, 1.5d);
         Assert.True(detailColumn.Width.Value > 330d);
-        Assert.True(detailContent.LayoutTransform is System.Windows.Media.ScaleTransform { ScaleX: > 1d });
+        Assert.True(detailContent.LayoutTransform.Value.IsIdentity);
         InvokeWindowMethod(window, "OnToggleFullscreen", window, new System.Windows.RoutedEventArgs());
         Assert.Near(1180d, window.Width, 0.5d);
         Assert.Near(720d, window.Height, 0.5d);
@@ -7053,7 +7065,7 @@ internal static class Program
         var engineSource = File.ReadAllText(Path.Combine(ProjectRoot(), "src", "CodexUsageHud.Core",
             "UsageEngine.cs"));
         Assert.True(engineSource.Contains("HudProduct.Version", StringComparison.Ordinal));
-        Assert.Equal("1.0.3", HudProduct.Version);
+        Assert.Equal("1.0.4", HudProduct.Version);
     }
 
     private static void LineageCycleTimingAndIsolation(string runRoot)

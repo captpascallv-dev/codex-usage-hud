@@ -125,7 +125,7 @@
                             <TextBlock Text="V2" Foreground="{StaticResource HudMint}" FontSize="10" FontWeight="SemiBold" />
                         </Border>
                         <Border Background="#FF20322D" CornerRadius="4" Padding="6,2" Margin="6,0,0,0">
-                            <TextBlock Text="1.0.2" Foreground="{StaticResource HudMint}" FontSize="10" FontWeight="SemiBold" />
+                            <TextBlock Text="1.0.3" Foreground="{StaticResource HudMint}" FontSize="10" FontWeight="SemiBold" />
                         </Border>
                     </StackPanel>
                     <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
@@ -633,7 +633,7 @@
                                 </StackPanel>
                                 <TextBlock x:Name="SettingsStatusText" Foreground="{StaticResource HudMint}" FontSize="11" TextWrapping="Wrap" Margin="0,12,0,0" />
                             </StackPanel>
-                            <TextBlock Grid.Row="3" Text="v1.0.2 · 数据库：%LOCALAPPDATA%\CodexUsageHUD\usage.db" Foreground="{StaticResource HudSubtle}" FontSize="10" TextWrapping="Wrap" />
+                            <TextBlock Grid.Row="3" Text="v1.0.3 · 数据库：%LOCALAPPDATA%\CodexUsageHUD\usage.db" Foreground="{StaticResource HudSubtle}" FontSize="10" TextWrapping="Wrap" />
                         </Grid>
                     </Border>
                 </Grid>

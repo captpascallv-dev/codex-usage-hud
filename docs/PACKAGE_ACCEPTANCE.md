@@ -2,7 +2,7 @@
 
 Status: `PRE_RELEASE_CANDIDATE`
 
-Release: `1.0.2` lineage-dedup hotfix (source and automated-test acceptance).
+Release: `1.0.3` Codex CLI App Server compatibility hotfix (source and automated-test acceptance).
 
 This is the package-safe acceptance summary for a pre-release candidate.
 Detailed internal diagnostics, machine paths, local session identifiers, local

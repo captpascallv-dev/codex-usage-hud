@@ -289,11 +289,13 @@ Service tier resolution:
 ## 9. Official quota adapter
 
 The application itself must not implement an authenticated HTTP client.
-Discover a local `codex.exe` from configured override, PATH, the npm package,
-or the installed Codex Desktop package. Launch a short-lived child process:
+Discover a local `codex.exe` from configured override, the npm package's native
+binary, PATH, or the installed Codex Desktop package. Prefer a native binary;
+use `codex.cmd`/`codex.bat` only as compatibility fallbacks. Launch a short-lived
+child process:
 
 ```text
-codex -s read-only -a untrusted app-server
+codex -s read-only -a never app-server
 ```
 
 Do not pass a service-tier override. Use JSON-RPC over stdin/stdout:
@@ -306,6 +308,11 @@ Use a bounded startup timeout (10 s), per-request timeout (5 s), cancellation,
 and process-tree termination. Do not retain stdout lines beyond the matching
 response. Quota polling defaults to 60 seconds; countdown rendering uses the
 local clock and does not repoll each second.
+
+`never` is the non-interactive approval policy; it does not weaken the separate
+`read-only` sandbox. An App Server process that exits or closes stdout before
+`initialize`/`account/rateLimits/read` is classified as an early-exit/EOF
+compatibility failure rather than mislabeled as a timeout.
 
 Select the main Codex bucket by stable limit id/name, not by array position.
 If selection is ambiguous, show unavailable. Preserve additional model buckets

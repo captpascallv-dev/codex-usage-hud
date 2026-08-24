@@ -1536,6 +1536,8 @@ internal static class Program
         File.WriteAllText(args[1], Environment.ProcessId.ToString(CultureInfo.InvariantCulture), Encoding.ASCII);
         if (Console.ReadLine() is null) return 4;
 
+        if (mode.Equals("initialize-exit", StringComparison.Ordinal)) return 7;
+
         if (mode.Equals("bounded-success", StringComparison.Ordinal))
         {
             Console.Error.Write(new string('e', PrivacyJsonlReader.AllowlistedRecordLimit + 4096));
@@ -2913,7 +2915,8 @@ internal static class Program
     private static void AppServerContract(string runRoot)
     {
         var info = AppServerProtocol.CreateStartInfo("codex");
-        Assert.SequenceEqual(new[] { "-s", "read-only", "-a", "untrusted", "app-server" }, info.ArgumentList);
+        Assert.SequenceEqual(new[] { "-s", "read-only", "-a", "never", "app-server" }, info.ArgumentList);
+        Assert.Equal("-s read-only -a never app-server", AppServerProtocol.ReadOnlyFlag);
         Assert.True(!info.ArgumentList.Any(argument => argument.Contains("fast", StringComparison.OrdinalIgnoreCase) ||
                                                        argument.Contains("priority", StringComparison.OrdinalIgnoreCase) ||
                                                        argument.Contains("ultrafast", StringComparison.OrdinalIgnoreCase)));
@@ -2923,6 +2926,20 @@ internal static class Program
         var candidate = Path.Combine(directory, "codex.cmd");
         File.WriteAllText(candidate, "@exit /b 0", Encoding.ASCII);
         Assert.Equal(candidate, new CodexExecutableDiscovery().Find(null, directory, "", "", ""));
+        var wrapperInfo = AppServerProtocol.CreateStartInfo(candidate);
+        Assert.True(wrapperInfo.Arguments.Contains("-a never", StringComparison.Ordinal));
+        Assert.True(!wrapperInfo.Arguments.Contains("untrusted", StringComparison.Ordinal));
+
+        var appData = Path.Combine(runRoot, "fake-appdata");
+        var npmWrapper = Path.Combine(appData, "npm", "codex.cmd");
+        var npmNative = Path.Combine(appData, "npm", "node_modules", "@openai", "codex",
+            "node_modules", "@openai", "codex-win32-x64", "vendor",
+            "x86_64-pc-windows-msvc", "bin", "codex.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(npmNative)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(npmWrapper)!);
+        File.WriteAllText(npmWrapper, "@exit /b 0", Encoding.ASCII);
+        File.WriteAllText(npmNative, "native", Encoding.ASCII);
+        Assert.Equal(npmNative, new CodexExecutableDiscovery().Find(null, "", appData, "", ""));
         var source = File.ReadAllText(Path.Combine(ProjectRoot(), "src", "CodexUsageHud.Core", "QuotaAdapters.cs"));
         Assert.True(!source.Contains("HttpClient", StringComparison.Ordinal));
     }
@@ -4757,6 +4774,15 @@ internal static class Program
         Assert.True(!unavailable.TierOverrideRequested);
         Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(5));
         AssertProcessExited(ReadPidWithin(timeoutPidPath));
+
+        var exitPidPath = Path.Combine(directory, "initialize-exit.pid");
+        var exitWrapper = CreateAppServerHelperWrapper(directory, "initialize-exit", exitPidPath);
+        var exitClient = new AppServerClient("test", TimeSpan.FromSeconds(3),
+            TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(2));
+        var exited = await exitClient.ReadRateLimitsAsync(exitWrapper);
+        Assert.Equal(QuotaSource.Unavailable, exited.Observation.Source);
+        Assert.Equal("app_server_initialize_exit", exited.ErrorCode);
+        AssertProcessExited(ReadPidWithin(exitPidPath));
     }
 
     private static void PrivateScrubHardDeathMatrix(string runRoot)
@@ -7027,7 +7053,7 @@ internal static class Program
         var engineSource = File.ReadAllText(Path.Combine(ProjectRoot(), "src", "CodexUsageHud.Core",
             "UsageEngine.cs"));
         Assert.True(engineSource.Contains("HudProduct.Version", StringComparison.Ordinal));
-        Assert.Equal("1.0.2", HudProduct.Version);
+        Assert.Equal("1.0.3", HudProduct.Version);
     }
 
     private static void LineageCycleTimingAndIsolation(string runRoot)

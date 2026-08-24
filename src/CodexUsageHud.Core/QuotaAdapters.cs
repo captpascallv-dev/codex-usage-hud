@@ -10,7 +10,8 @@ public static class AppServerProtocol
     public const string InitializeMethod = "initialize";
     public const string RateLimitsMethod = "account/rateLimits/read";
     public const string ModelCatalogMethod = "model/list";
-    public const string ReadOnlyFlag = "-s read-only -a untrusted app-server";
+    public const string ApprovalPolicy = "never";
+    public const string ReadOnlyFlag = "-s read-only -a never app-server";
 
     public static ProcessStartInfo CreateStartInfo(string executable)
     {
@@ -26,7 +27,7 @@ public static class AppServerProtocol
             Path.GetExtension(executable).Equals(".bat", StringComparison.OrdinalIgnoreCase))
         {
             startInfo.FileName = Environment.GetEnvironmentVariable("ComSpec") ?? "cmd.exe";
-            startInfo.Arguments = $"/d /s /c \"\"{executable}\" -s read-only -a untrusted app-server\"";
+            startInfo.Arguments = $"/d /s /c \"\"{executable}\" -s read-only -a {ApprovalPolicy} app-server\"";
         }
         else
         {
@@ -34,7 +35,7 @@ public static class AppServerProtocol
             startInfo.ArgumentList.Add("-s");
             startInfo.ArgumentList.Add("read-only");
             startInfo.ArgumentList.Add("-a");
-            startInfo.ArgumentList.Add("untrusted");
+            startInfo.ArgumentList.Add(ApprovalPolicy);
             startInfo.ArgumentList.Add("app-server");
         }
         return startInfo;
@@ -56,13 +57,13 @@ public sealed class CodexExecutableDiscovery
         {
             configuredOverride,
             Environment.GetEnvironmentVariable("CODEX_DESKTOP_EXE"),
-            string.IsNullOrWhiteSpace(appData) ? null : Path.Combine(appData, "npm", "codex.cmd"),
-            string.IsNullOrWhiteSpace(appData) ? null : Path.Combine(appData, "npm", "codex.exe"),
-            string.IsNullOrWhiteSpace(localAppData) ? null : Path.Combine(localAppData, "Programs", "Codex", "codex.exe"),
-            string.IsNullOrWhiteSpace(localAppData) ? null : Path.Combine(localAppData, "Programs", "Codex", "resources", "codex.exe"),
-            string.IsNullOrWhiteSpace(programFiles) ? null : Path.Combine(programFiles, "Codex", "codex.exe"),
-            string.IsNullOrWhiteSpace(programFiles) ? null : Path.Combine(programFiles, "Codex", "resources", "codex.exe"),
         };
+
+        if (!string.IsNullOrWhiteSpace(appData)) candidates.AddRange(NpmNativeCandidates(appData));
+        candidates.Add(string.IsNullOrWhiteSpace(localAppData) ? null : Path.Combine(localAppData, "Programs", "Codex", "codex.exe"));
+        candidates.Add(string.IsNullOrWhiteSpace(localAppData) ? null : Path.Combine(localAppData, "Programs", "Codex", "resources", "codex.exe"));
+        candidates.Add(string.IsNullOrWhiteSpace(programFiles) ? null : Path.Combine(programFiles, "Codex", "codex.exe"));
+        candidates.Add(string.IsNullOrWhiteSpace(programFiles) ? null : Path.Combine(programFiles, "Codex", "resources", "codex.exe"));
 
         if (!string.IsNullOrWhiteSpace(pathValue))
         {
@@ -70,11 +71,23 @@ public sealed class CodexExecutableDiscovery
                          StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             {
                 candidates.Add(Path.Combine(directory.Trim('"'), OperatingSystem.IsWindows() ? "codex.exe" : "codex"));
-                if (OperatingSystem.IsWindows())
-                {
-                    candidates.Add(Path.Combine(directory.Trim('"'), "codex.cmd"));
-                    candidates.Add(Path.Combine(directory.Trim('"'), "codex.bat"));
-                }
+            }
+        }
+
+        // Command wrappers are a compatibility fallback. Prefer a native executable so a
+        // global npm update cannot change App Server framing underneath a running HUD.
+        if (!string.IsNullOrWhiteSpace(appData))
+        {
+            candidates.Add(Path.Combine(appData, "npm", "codex.exe"));
+            candidates.Add(Path.Combine(appData, "npm", "codex.cmd"));
+        }
+        if (!string.IsNullOrWhiteSpace(pathValue) && OperatingSystem.IsWindows())
+        {
+            foreach (var directory in pathValue.Split(Path.PathSeparator,
+                         StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                candidates.Add(Path.Combine(directory.Trim('"'), "codex.cmd"));
+                candidates.Add(Path.Combine(directory.Trim('"'), "codex.bat"));
             }
         }
 
@@ -87,6 +100,22 @@ public sealed class CodexExecutableDiscovery
         }
 
         return null;
+    }
+
+    private static IEnumerable<string> NpmNativeCandidates(string appData)
+    {
+        var openAiRoot = Path.Combine(appData, "npm", "node_modules", "@openai");
+        foreach (var packageRoot in new[]
+                 {
+                     Path.Combine(openAiRoot, "codex", "node_modules", "@openai"),
+                     openAiRoot,
+                 })
+        {
+            yield return Path.Combine(packageRoot, "codex-win32-x64", "vendor",
+                "x86_64-pc-windows-msvc", "bin", "codex.exe");
+            yield return Path.Combine(packageRoot, "codex-win32-arm64", "vendor",
+                "aarch64-pc-windows-msvc", "bin", "codex.exe");
+        }
     }
 
     private static bool TryResolveExecutable(string? candidate, out string? resolved)
@@ -216,7 +245,7 @@ public sealed class AppServerClient
     private readonly TimeSpan _requestTimeout;
     private readonly TimeSpan _cleanupTimeout;
 
-    public AppServerClient(string hudVersion = "1.0.1", TimeSpan? startupTimeout = null,
+    public AppServerClient(string hudVersion = HudProduct.Version, TimeSpan? startupTimeout = null,
         TimeSpan? requestTimeout = null, TimeSpan? cleanupTimeout = null)
     {
         _hudVersion = hudVersion;
@@ -251,7 +280,7 @@ public sealed class AppServerClient
             var initialize = await ReadResponseAsync(stdout, 1, startupTimeout.Token);
             if (initialize is null)
             {
-                return Unavailable("app_server_initialize_timeout");
+                return Unavailable(HasExited(process) ? "app_server_initialize_exit" : "app_server_initialize_eof");
             }
 
             using var requestTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -260,7 +289,7 @@ public sealed class AppServerClient
             var response = await ReadResponseAsync(stdout, 2, requestTimeout.Token);
             if (response is null)
             {
-                return Unavailable("app_server_rate_limits_timeout");
+                return Unavailable(HasExited(process) ? "app_server_rate_limits_exit" : "app_server_rate_limits_eof");
             }
 
             var observation = QuotaJsonParser.Parse(response, observedAt);
@@ -276,12 +305,18 @@ public sealed class AppServerClient
         }
         catch (IOException)
         {
-            return Unavailable("app_server_io");
+            return Unavailable(HasExited(process) ? "app_server_process_exit" : "app_server_io");
         }
         finally
         {
             await CleanupProcessAsync(process, drainCancellation, stderrDrain, stdout, stderr, _cleanupTimeout);
         }
+    }
+
+    private static bool HasExited(Process process)
+    {
+        try { return process.HasExited; }
+        catch (InvalidOperationException) { return false; }
     }
 
     public async Task<IReadOnlyDictionary<string, string?>?> ReadModelCatalogAsync(

@@ -26,6 +26,14 @@ Codex Usage HUD 是一个非官方的 Windows 10/11 x64 本地伴侣应用。它
 Windows 可能因为应用尚未购买代码签名证书而显示 SmartScreen 提示。Release 同时提供
 SHA-256 校验文件，用于确认下载内容没有发生变化。
 
+### v1.0.3 Codex CLI 兼容修复
+
+Codex CLI 0.149.1 不再接受命令行参数 `-a untrusted`，会在 App Server 初始化前退出，
+使 HUD 的官方额度和重置时间停止刷新。v1.0.3 在继续使用独立 `read-only` sandbox 的同时，
+改用适合非交互读取的 `-a never`；额度读取仍不执行模型命令、不请求提权、不修改 Codex
+设置或 service tier。HUD 还会优先使用 npm 包内的原生 `codex.exe`，仅在没有原生程序时
+才退回 `codex.cmd`/`codex.bat` 包装脚本，并把初始化前退出与真正超时区分显示。
+
 ### v1.0.2 父子 lineage 去重
 
 Fork / 子任务 rollout 会把祖先 token 历史复制到新的 thread id 下。v1.0.1 按 thread
@@ -263,7 +271,7 @@ Codex 与 GPT Work 的产品形态。明确标记为 `subagent` 且父 thread �
 Quota is requested through a short-lived local child using exactly:
 
 ```text
-codex -s read-only -a untrusted app-server
+codex -s read-only -a never app-server
 ```
 
 The app sends `initialize` and `account/rateLimits/read` over JSON-RPC with
@@ -276,6 +284,12 @@ raw tokens never estimate quota. A large increase is labeled only `疑似 reset
 信号`. Official quota polling is every 60 seconds plus manual refresh. A
 temporary failure shows the last valid official observation only as
 `本机最后观测/陈旧`, or `不可用` when none exists.
+
+The approval policy and sandbox are independent controls: `never` prevents a
+non-interactive metadata read from waiting for approval, while `read-only`
+continues to enforce the filesystem sandbox. Native package executables are
+preferred over command wrappers so a wrapper update cannot change stdio
+behavior underneath a running HUD.
 
 The displayed service tier has persisted provenance. Ordered rollout evidence
 is `rollout-explicit`; prior non-empty values migrate as `legacy-preserved`;

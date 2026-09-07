@@ -40,7 +40,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private IReadOnlyList<SessionDisplayRow> _rows = Array.Empty<SessionDisplayRow>();
     private readonly Dictionary<(string Filter, string Sort), IReadOnlyList<SessionDisplayRow>> _rowViews = new();
     private readonly HashSet<string> _expandedParents = new(StringComparer.Ordinal);
-    private string _filter = "running";
+    private string _filter = "recent";
     private string _sort = "activity";
 
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -316,4 +316,15 @@ public sealed class MainViewModel : INotifyPropertyChanged
         field = value;
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
     }
+}
+
+// Display formatting only: precise counts remain available in the inspector
+// and tooltips. All arithmetic continues to use the original token values.
+public sealed class CompactTokenConverter : System.Windows.Data.IValueConverter
+{
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>
+        value is long count ? TokenFormat.Compact(count) : "—";
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture) =>
+        System.Windows.Data.Binding.DoNothing;
 }

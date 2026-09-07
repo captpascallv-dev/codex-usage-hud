@@ -78,7 +78,7 @@ public readonly record struct CanonicalTokenUsage(
 
 public static class HudProduct
 {
-    public const string Version = "1.0.4";
+    public const string Version = "1.0.5";
 }
 
 public sealed record TokenUsageSnapshot(

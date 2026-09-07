@@ -391,7 +391,7 @@ full exception dumps.
 
 ## 11. UI contract
 
-The borderless WPF window is always-on-top, draggable, DPI-aware, and remembers
+The borderless WPF window supports optional always-on-top, dragging, DPI awareness, and remembers
 position. Closing hides to the system tray; tray commands are Show/Hide,
 Refresh, Settings, and Exit. Exit cancels workers and closes SQLite cleanly.
 
@@ -406,23 +406,28 @@ Collapsed form shows one line equivalent to:
 剩余 84% · 6天18时 · 运行中 3 · 本周期 12.4M raw tokens
 ```
 
-The collapsed visual may use the community-inspired two-potion/compact-meter
-motif, but must retain readable text and not copy assets or code.
+The compact visual uses an opaque light card, deep-green normal state,
+readable Chinese typography and a horizontal remaining-quota bar. Vertical
+size is 224 by 324 logical pixels; top size is 660 by 80. Both retain quota,
+reset countdown, running count and local-cycle raw total, plus settings,
+window-topmost, tray and expand controls. Iconography uses Windows system assets.
 
 Expanded form contains:
 
-1. overview card: used/remaining, official reset time, countdown, running count,
-   current-cycle aggregate for running sessions, all-session cycle aggregate,
-   source freshness. The running-session aggregate must never use those
-   sessions' all-history totals.
-2. switches: current / running / all
-3. session table with identity/model/tier/status/activity plus grouped columns
-   for latest turn and session cumulative: raw input, cached input, output,
-   reasoning, total
-4. sorting by total tokens or recent activity and grouping by project
-5. recent quota/reset/error events
+1. overview: used/remaining, official reset time, countdown, running count,
+   all-session cycle aggregate and quota source. The data-status drawer retains
+   the running-session cycle aggregate and source freshness; the running
+   aggregate never uses those sessions' all-history totals.
+2. horizontal filters: recent (default) / running / all / orphan history
+3. name-first session list with source/project/model, status, work total and
+   expandable child tasks. The inspector retains full identity/metadata and
+   precise latest-turn and session-lifetime input/cache/output/reasoning/total
+   columns. Long values have ellipsis and full-value tooltips; the complete
+   thread ID is selectable under session information.
+4. pinned-first activity or work-token sorting; no project-group button
+5. data-status drawer with recent quota/reset/error events
 6. permanent note: `raw token 与平台额度不是同一单位，不能直接换算`
-7. selected-session continuation risk: structural grade, local-relative long-session
+7. expandable selected-session continuation risk: structural grade, local-relative long-session
    risk, three-state manual drift control, and worst-case composite recommendation
 
 Color is used only for normal, below 20%, below 10%, and unavailable/stale.

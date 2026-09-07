@@ -8,8 +8,10 @@
 
 ![Codex Usage HUD 展开面板](docs/images/hud-expanded.png)
 
+截图使用示例数据，仅展示界面布局。
+
 <p align="center">
-  <img src="docs/images/hud-collapsed.png" alt="Codex Usage HUD 紧凑卡" width="112">
+  <img src="docs/images/hud-collapsed.png" alt="Codex Usage HUD 紧凑卡" width="224">
 </p>
 
 Codex Usage HUD 是一个非官方的 Windows 10/11 x64 本地伴侣应用。它把官方额度、
@@ -25,6 +27,16 @@ Codex Usage HUD 是一个非官方的 Windows 10/11 x64 本地伴侣应用。它
 
 Windows 可能因为应用尚未购买代码签名证书而显示 SmartScreen 提示。Release 同时提供
 SHA-256 校验文件，用于确认下载内容没有发生变化。
+
+### v1.0.5 视觉与阅读体验
+
+白底深绿界面重新安排了额度、会话列表和详情的层级，使用清晰的中文字体、较大的会话名称和
+一致的控件反馈。最近一轮与会话累计并排显示精确数字；过长内容保留省略提示和完整内容工具提示。
+续接指标与人工漂移标记收纳在可展开的“续接参考”中，统计逻辑与数据边界保持不变。
+
+竖向紧凑卡为 224×324 逻辑像素，顶部条为 660×80；两者都显示额度、倒计时、运行数和周期用量。
+全屏扩大详情区域并直接增大字体，不缩放文字位图；托盘使用独立、清晰的标记。
+本地构建版本与 GitHub 已发布版本可能不同，公开下载以 Releases 为准。
 
 ### v1.0.4 文字清晰度修复
 
@@ -130,10 +142,10 @@ the source with the project-local scripts below.
 
 竖向和顶部紧凑卡都显示官方剩余额度、运行中会话数、本机当前额度周期 raw token 和重置倒计时，
 并都提供窗口置顶按钮。置顶后，自动隐藏留下的 9 像素把手仍位于网页等普通前台窗口之上。
-展开面板提供“运行中 / 最近会话 / 全部 / 未归属历史”导航、按活动或 token 排序、
+展开面板默认显示“最近会话”，并提供“运行中 / 全部 / 未归属”导航、按活动或 token 排序、
 APP/CLI 来源标记、可展开的子任务层级，以及最近一轮与会话累计明细。父会话同时显示
 自身 token、所辖子任务 token 与工作合计；全局和本额度周期总量仍按每个 thread 只计一次。
-选中会话还显示结构承载、长会话风险、人工漂移状态和六档综合
+选中会话的“续接参考”可展开查看结构承载、长会话风险、人工漂移状态和六档综合
 续接建议；不显示或使用当前上下文占用及压缩次数。会话名称是主标题，
 thread ID 是次级识别信息。颜色仅表达
 正常、低于 20%、低于 10% 和数据不可用。应用无
@@ -227,7 +239,7 @@ Cache-write input is retained as metadata but is not added to canonical total.
 Raw token and platform quota are different units and cannot be converted.
 
 “运行中”只统计当前状态为 `Running` 的会话；最近 15 分钟活动过但已经空闲的
-会话不会计入。展开页的“运行中会话本额度周期合计”按这些线程与官方当前窗口
+会话不会计入。“数据状态与隐私”中的运行中会话周期合计按这些线程与官方当前窗口
 同时过滤 token 样本，不是这些会话的全历史累计。“本额度周期全部会话合计”则
 使用同一官方窗口统计所有可见会话。
 
@@ -336,9 +348,9 @@ the selected activity or token order. Session pinning is independent of the
 window's always-on-top setting. A reliable
 associated turn is labeled `最近一轮`; a
 token event without a reliable turn is labeled `最近事件（降级）`; no evidence is
-`不可用`. The five recent-value columns use the `最近统计·` prefix. The
+`不可用`. The inspector places recent-turn and lifetime values in separate columns. The
 expanded header also provides a reversible work-area fullscreen mode. Fullscreen
-widens and scales the detail pane for readability; restoring returns to the exact
+widens the detail pane and increases font sizes without bitmap scaling; restoring returns to the exact
 previous expanded bounds. Collapsing a docked auto-hidden panel returns directly
 to its preserved 9-pixel edge handle instead of using the expanded-window position.
 Mouse clicks on the window-topmost control update its active border immediately.

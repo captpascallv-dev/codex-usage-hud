@@ -58,12 +58,12 @@ public partial class MainWindow : Window, IDisposable
     private double _compactAxis = double.NaN;
     private Rect _expandedRestoreBounds = Rect.Empty;
 
-    private const double CompactWidth = 112;
-    private const double CompactHeight = 330;
-    private const double CompactTopWidth = 520;
-    private const double CompactTopHeight = 96;
+    private const double CompactWidth = 224;
+    private const double CompactHeight = 324;
+    private const double CompactTopWidth = 660;
+    private const double CompactTopHeight = 80;
     private const double ExpandedWidth = 1180;
-    private const double ExpandedHeight = 720;
+    private const double ExpandedHeight = 820;
     private const double EdgeHandle = 9;
     private const double MinimumVisible = 48;
     private const double DockSnapDistance = 30;
@@ -252,22 +252,22 @@ public partial class MainWindow : Window, IDisposable
                 DateTimeOffset.UtcNow, false));
         var accent = threshold.Code switch
         {
-            "critical" => System.Windows.Media.Color.FromRgb(255, 93, 103),
-            "warning" => System.Windows.Media.Color.FromRgb(255, 200, 87),
-            "normal" => System.Windows.Media.Color.FromRgb(121, 226, 178),
-            _ => System.Windows.Media.Color.FromRgb(126, 138, 145),
+            "critical" => System.Windows.Media.Color.FromRgb(181, 40, 45),
+            "warning" => System.Windows.Media.Color.FromRgb(151, 92, 0),
+            "normal" => System.Windows.Media.Color.FromRgb(20, 108, 75),
+            _ => System.Windows.Media.Color.FromRgb(101, 116, 107),
         };
         var accentBrush = new SolidColorBrush(accent);
         if (accentBrush.CanFreeze) accentBrush.Freeze();
-        var borderBrush = new SolidColorBrush(System.Windows.Media.Color.FromArgb(
-            threshold.Code is "critical" or "warning" ? (byte)220 : (byte)150,
-            accent.R, accent.G, accent.B));
-        if (borderBrush.CanFreeze) borderBrush.Freeze();
+        var borderBrush = threshold.Code is "critical" or "warning"
+            ? accentBrush : (System.Windows.Media.Brush)FindResource("HudLine");
         QuotaPercentText.Foreground = accentBrush;
         CompactQuotaStateText.Foreground = accentBrush;
         CompactTopRemainingText.Foreground = accentBrush;
         ExpandedRemainingText.Foreground = accentBrush;
         ThresholdStateText.Foreground = accentBrush;
+        OverviewProgress.Foreground = accentBrush;
+        CompactProgress.Foreground = accentBrush;
         CompactVerticalShell.BorderBrush = borderBrush;
         CompactTopShell.BorderBrush = borderBrush;
         ExpandedShell.BorderBrush = borderBrush;
@@ -382,9 +382,14 @@ public partial class MainWindow : Window, IDisposable
     private void ApplyExpandedResponsiveLayout(bool fullscreen, double workWidth)
     {
         DetailColumn.Width = new GridLength(fullscreen
-            ? Math.Min(420, Math.Max(360, workWidth * 0.28))
-            : 330);
-        DetailPanel.Padding = fullscreen ? new Thickness(17) : new Thickness(14);
+            ? Math.Min(640, Math.Max(404, workWidth * 0.34))
+            : Math.Min(404, Math.Max(340, workWidth * 0.35)));
+        DetailPanel.Padding = new Thickness(20);
+        // Change font sizes at layout time, never scale a rendered text bitmap.
+        Resources["HudBodyFontSize"] = fullscreen ? 16d : 14d;
+        Resources["HudCaptionFontSize"] = fullscreen ? 14d : 13d;
+        Resources["HudNumberFontSize"] = fullscreen ? 16d : 14d;
+        Resources["HudSectionFontSize"] = fullscreen ? 18d : 16d;
         DetailContentGrid.LayoutTransform = Transform.Identity;
     }
 
@@ -962,17 +967,19 @@ public partial class MainWindow : Window, IDisposable
         {
             const int renderSize = 64;
             const int iconSize = 32;
-            CompactVerticalShell.UpdateLayout();
             var visual = new DrawingVisual();
             using (var context = visual.RenderOpen())
             {
-                var brush = new VisualBrush(CompactVerticalShell)
-                {
-                    AlignmentX = AlignmentX.Center,
-                    AlignmentY = AlignmentY.Center,
-                    Stretch = Stretch.Uniform,
-                };
-                context.DrawRectangle(brush, null, new Rect(0, 0, renderSize, renderSize));
+                // A tray-sized mark stays recognizable even when the compact
+                // panel is hidden; shrinking the entire card loses its detail.
+                context.DrawRoundedRectangle((System.Windows.Media.Brush)FindResource("HudMint"),
+                    null, new Rect(0, 0, renderSize, renderSize), 11, 11);
+                var mark = new FormattedText("\uE9D2", CultureInfo.InvariantCulture,
+                    System.Windows.FlowDirection.LeftToRight,
+                    new Typeface((System.Windows.Media.FontFamily)FindResource("HudIconFont"), FontStyles.Normal,
+                        FontWeights.Normal, FontStretches.Normal), 41, System.Windows.Media.Brushes.White, 1d);
+                context.DrawText(mark, new System.Windows.Point(
+                    (renderSize - mark.Width) / 2, (renderSize - mark.Height) / 2));
             }
             var rendered = new RenderTargetBitmap(renderSize, renderSize, 96, 96, PixelFormats.Pbgra32);
             rendered.Render(visual);

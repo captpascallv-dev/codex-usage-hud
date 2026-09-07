@@ -140,6 +140,17 @@ internal static class Program
             ("lineage_independent_oracle_defect_injection", () => LineageIndependentOracleDefectInjection(runRoot)),
         };
 
+        if (args.Length == 2 && args[0] == "--filter")
+        {
+            var filters = args[1].Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            tests = tests.Where(test => filters.Any(filter => test.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))).ToArray();
+            if (tests.Length == 0)
+            {
+                Console.WriteLine("No tests matched the requested filter.");
+                return 2;
+            }
+        }
+
         var failures = 0;
         foreach (var test in tests)
         {
@@ -255,7 +266,9 @@ internal static class Program
             ?? throw new InvalidOperationException("view_model_field_missing");
         var viewModel = (MainViewModel)(viewModelField.GetValue(window)
             ?? throw new InvalidOperationException("view_model_missing"));
-        viewModel.Apply(CreateDesignCaptureSnapshot());
+        var captureSnapshot = args.Contains("--polish", StringComparer.Ordinal)
+            ? CreatePolishCaptureSnapshot() : CreateDesignCaptureSnapshot();
+        viewModel.Apply(captureSnapshot);
         viewModel.ToggleChildren("019fcac6-82e");
         viewModel.IsExpanded = true;
         InvokeWindowMethod(window, "ApplyExpansionState", false);
@@ -288,6 +301,62 @@ internal static class Program
         InvokeWindowMethod(window, "ApplyExpansionState", false);
         InvokeWindowMethod(window, "UpdateTextBlocks");
         RenderWindow(window, Path.Combine(outputDirectory, "hud-top.png"));
+        if (args.Contains("--states", StringComparer.Ordinal))
+        {
+            dockField.SetValue(window, Enum.Parse(dockField.FieldType, "Right"));
+            foreach (var used in new[] { 87d, 94d })
+            {
+                viewModel.Apply(captureSnapshot with { Quota = captureSnapshot.Quota with
+                {
+                    Primary = captureSnapshot.Quota.Primary! with { UsedPercent = used },
+                } });
+                InvokeWindowMethod(window, "ApplyExpansionState", false);
+                InvokeWindowMethod(window, "UpdateTextBlocks");
+                RenderWindow(window, Path.Combine(outputDirectory, used == 87 ? "hud-warning.png" : "hud-critical.png"));
+            }
+            var unavailable = captureSnapshot with
+            {
+                Quota = new QuotaObservation(null, Array.Empty<QuotaBucket>(), QuotaSource.Unavailable,
+                    captureSnapshot.GeneratedAtUtc, true),
+                Sessions = Array.Empty<SessionAggregate>(), CycleTotal = null, RunningCycleTotal = null,
+            };
+            viewModel.Apply(unavailable);
+            InvokeWindowMethod(window, "UpdateTextBlocks");
+            RenderWindow(window, Path.Combine(outputDirectory, "hud-unavailable.png"));
+            viewModel.IsExpanded = true;
+            InvokeWindowMethod(window, "ApplyExpansionState", false);
+            RenderWindow(window, Path.Combine(outputDirectory, "hud-empty.png"));
+            var longRow = UiSession("polish-long-id-0123456789012345678901234567890",
+                "需要完整显示的中文会话名称：跨模块界面验证、长数字与续接说明在正常缩放下仍然可读",
+                "reviewer", "", "project-with-a-deliberately-long-name-for-layout-verification",
+                "gpt-6-astra", "Standard（默认）", SessionStatus.Idle, captureSnapshot.GeneratedAtUtc,
+                UiUsage(long.MaxValue - 1, 1_000_000, 1, 0), Usage(1000));
+            viewModel.Apply(captureSnapshot with { Sessions = new[] { longRow } });
+            InvokeWindowMethod(window, "UpdateTextBlocks");
+            RenderWindow(window, Path.Combine(outputDirectory, "hud-long-content.png"));
+            viewModel.Apply(captureSnapshot);
+            InvokeWindowMethod(window, "UpdateTextBlocks");
+        }
+        if (args.Contains("--interactive", StringComparer.Ordinal))
+        {
+            // A real native window using only synthetic data, for pointer and
+            // keyboard acceptance. No timer reads the user's Codex sessions.
+            window.Title = "Codex Usage HUD · 视觉验收（示例数据）";
+            window.Topmost = false;
+            window.ShowInTaskbar = true;
+            var settingsReady = typeof(MainWindow).GetField("_settingsReady",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            settingsReady.SetValue(window, true);
+            dockField.SetValue(window, Enum.Parse(dockField.FieldType, "None"));
+            viewModel.IsExpanded = true;
+            InvokeWindowMethod(window, "ApplyExpansionState", false);
+            window.Left = System.Windows.SystemParameters.WorkArea.Left + 35;
+            window.Top = System.Windows.SystemParameters.WorkArea.Top + 15;
+            window.Activate();
+            Console.WriteLine("UI_PREVIEW_READY synthetic=true");
+            System.Windows.Application.Current.Run();
+            return 0;
+        }
         window.Hide();
         Console.WriteLine($"UI_CAPTURE collapsed={Path.Combine(outputDirectory, "hud-collapsed.png")}");
         Console.WriteLine($"UI_CAPTURE top={Path.Combine(outputDirectory, "hud-top.png")}");
@@ -789,6 +858,41 @@ internal static class Program
             CycleTotal = UiUsage(900_000_000, 140_000_000, 250_000_000, 80_000_000),
             RunningCycleTotal = UiUsage(21_000_000, 3_000_000, 6_000_000, 2_000_000),
         };
+    }
+
+    private static HudSnapshot CreatePolishCaptureSnapshot()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var root = UiSession("019fcac6-82e", "产品开发主任务", "Lead", "", "small-projects",
+            "gpt-6-astra", "Standard", SessionStatus.Running, now.AddMinutes(-1),
+            UiUsage(312_000_000, 300_000_000, 8_000_000, 2_000_000),
+            UiUsage(3_620_000, 3_200_000, 80_000, 20_000), true,
+            new SessionContextMetrics(108_000, 258_400, 5, 0.5, -8, -12, true));
+        var child = UiSession("polish-child-001", "实现与验证", "worker", "", "small-projects",
+            "gpt-6-astra", "Standard", SessionStatus.Running, now.AddMinutes(-2),
+            UiUsage(37_000_000, 35_000_000, 1_200_000, 200_000),
+            UiUsage(100_000, 90_000, 2_000, 1_000));
+        child = child with { Metadata = child.Metadata with
+        {
+            Kind = SessionKind.InternalTask, Surface = SessionSurface.InternalTask,
+            ParentThreadId = root.Metadata.ThreadId, AgentDepth = 1,
+        } };
+        var sessions = new[]
+        {
+            root, child,
+            UiSession("polish-cli-002", "界面精修", "worker", "", "small-projects", "gpt-6-astra",
+                "Standard", SessionStatus.Running, now.AddMinutes(-3), UiUsage(44_000_000, 40_000_000, 2_300_000, 300_000), Usage(3200), surface: SessionSurface.Cli),
+            UiSession("polish-app-003", "月亮故事屋", "lead", "", "story-house", "gpt-6-astra",
+                "Standard", SessionStatus.Idle, now.AddMinutes(-15), UiUsage(120_000_000, 110_000_000, 7_600_000, 400_000), Usage(4100)),
+            UiSession("polish-app-004", "数据复盘", "analyst", "", "reports", "gpt-6-astra",
+                "Standard", SessionStatus.Idle, now.AddMinutes(-30), UiUsage(90_000_000, 85_000_000, 2_800_000, 300_000), Usage(5000)),
+        };
+        return new HudSnapshot(new QuotaObservation(new QuotaBucket("codex", "Codex", 15, 10080,
+                now.AddDays(6).AddHours(12).AddMinutes(25)), Array.Empty<QuotaBucket>(),
+                QuotaSource.OfficialAppServer, now, false), sessions,
+            UiUsage(1_100_000_000, 1_000_000_000, 50_000_000, 10_000_000), now,
+            false, "示例数据 · 非实时额度", Array.Empty<string>(), Array.Empty<HudEvent>(),
+            RunningCycleTotal: UiUsage(370_000_000, 350_000_000, 6_000_000, 1_000_000));
     }
 
     private static SessionAggregate UiSession(string id, string name, string role, string nickname,
@@ -3085,25 +3189,25 @@ internal static class Program
         foreach (var required in new[]
                  {
                      "CompactVerticalShell", "CompactTopShell", "ExpandedShell", "运行中", "最近会话", "全部",
-                     "未归属历史", "SettingsPanel", "DiagnosticsPanel", "会话累计",
+                     "未归属", "SettingsPanel", "DiagnosticsPanel", "会话累计",
                      "CompactSettingsButton", "CompactTopmostButton", "CompactTopTopmostButton",
                      "CompactTopExpandButton", "CompactTopCountdownText", "CompactQuotaStateText",
                      "CompactTopRemainingText", "QuotaStateDetailText",
-                     "CompactTopRunningText", "本周期摘要", "置顶优先 · 按活动",
-                     "RunningCycleCompactText", "IsPinned", "窗口始终置顶", "FullscreenButton",
-                     "续接风险参考", "压缩后底座", "底座趋势", "续航参考",
-                     "间隔 token 续航", "长会话风险", "实际漂移（人工确认）", "StructuralGradeText",
+                     "CompactTopRunningText", "本周期摘要", "置顶会话始终优先",
+                     "RunningCycleTotalText", "IsPinned", "窗口始终置顶", "FullscreenButton",
+                     "续接参考", "压缩后底座", "底座趋势", "间隔续航",
+                     "EffectiveRunwayText", "长会话风险", "实际漂移（人工确认）", "StructuralGradeText",
                      "DriftUnassessedButton", "DriftOccasionalButton", "DriftRepeatedButton",
                      "ContinuationGradeText",
                      "ContinuationAdviceText", "ContinuationEvidenceText", "SourceLabel",
-                     "OnToggleSessionChildren", "工作合计 (raw)", "子任务只保存父 thread ID",
+                     "OnToggleSessionChildren", "工作合计 · raw", "父子关系和用量元数据",
                      "EnableRowVirtualization=\"True\"", "VirtualizationMode=\"Recycling\"",
                      "raw token 与平台额度不是同一单位，不能直接换算",
                  })
             Assert.True(xaml.Contains(required, StringComparison.Ordinal));
         foreach (var required in new[]
                  {
-                     "CompactWidth = 112", "CompactTopWidth = 520", "ExpandedWidth = 1180", "EdgeHandle = 9",
+                     "CompactWidth = 224", "CompactTopWidth = 660", "ExpandedWidth = 1180", "EdgeHandle = 9",
                      "DockSnapDistance = 30", "PointerDockSnapDistance = 64", "ResolveDockSide",
                       "ApplyExpansionState(true)", "ApplyFullscreenBounds", "ExitFullscreen",
                       "_restoreHiddenOnNextCompact", "Keyboard.ClearFocus", "WaitAsync(0)",
@@ -3125,10 +3229,10 @@ internal static class Program
         Assert.True(appXaml.Contains("TextOptions.TextHintingMode\" Value=\"Fixed\"", StringComparison.Ordinal));
         Assert.True(!xaml.Contains("DropShadowEffect", StringComparison.Ordinal));
         Assert.True(!window.Contains("new ScaleTransform(1.08", StringComparison.Ordinal));
-        var conversationColumn = xaml[xaml.IndexOf("Header=\"对话 / ID\"", StringComparison.Ordinal)..];
+        var conversationColumn = xaml[xaml.IndexOf("Header=\"会话\"", StringComparison.Ordinal)..];
         conversationColumn = conversationColumn[..conversationColumn.IndexOf("</DataGridTemplateColumn>", StringComparison.Ordinal)];
         Assert.True(conversationColumn.IndexOf("Text=\"{Binding Name}\"", StringComparison.Ordinal) <
-                    conversationColumn.IndexOf("Text=\"{Binding ShortId}\"", StringComparison.Ordinal));
+                    conversationColumn.IndexOf("Binding Path=\"SourceLabel\"", StringComparison.Ordinal));
         Assert.True(xaml.Contains("Topmost=\"False\"", StringComparison.Ordinal));
         foreach (var required in new[]
                  {
@@ -3171,8 +3275,8 @@ internal static class Program
         try
         {
             using var window = new MainWindow(engine, () => Task.CompletedTask);
-            Assert.Equal(112d, window.Width);
-            Assert.Equal(330d, window.Height);
+            Assert.Equal(224d, window.Width);
+            Assert.Equal(324d, window.Height);
         }
         catch (Exception exception)
         {
@@ -3193,7 +3297,7 @@ internal static class Program
 
         var virtualLeft = System.Windows.SystemParameters.VirtualScreenLeft;
         var virtualTop = System.Windows.SystemParameters.VirtualScreenTop;
-        Assert.True(!IsSafe(virtualLeft - 500, virtualTop));
+        Assert.True(!IsSafe(virtualLeft - 800, virtualTop));
         Assert.True(IsSafe(virtualLeft - 100, virtualTop));
         Assert.True(IsSafe(virtualLeft, virtualTop - 100));
         Assert.True(!IsSafe(virtualLeft, virtualTop - 300));
@@ -3286,8 +3390,8 @@ internal static class Program
 
         Assert.True(!window.Topmost);
         Assert.True(!window.ShowInTaskbar);
-        Assert.Near(112d, window.Width, 0.5d);
-        Assert.Near(330d, window.Height, 0.5d);
+        Assert.Near(224d, window.Width, 0.5d);
+        Assert.Near(324d, window.Height, 0.5d);
 
         InvokeWindowMethod(window, "OnToggleTopmost", window, new System.Windows.RoutedEventArgs());
         Assert.True(window.Topmost);
@@ -3384,10 +3488,10 @@ internal static class Program
         Assert.True(viewModel.IsExpanded);
         Assert.Near(1180d, window.Width, 0.5d);
         InvokeWindowMethod(window, "OnToggleExpand", window, new System.Windows.RoutedEventArgs());
-        Assert.Near(112d, window.Width, 0.5d);
+        Assert.Near(224d, window.Width, 0.5d);
         InvokeWindowMethod(window, "OnToggleExpand", window, new System.Windows.RoutedEventArgs());
         Assert.Near(1180d, window.Width, 0.5d);
-        Assert.Near(720d, window.Height, 0.5d);
+        Assert.Near(820d, window.Height, 0.5d);
         var workMethod = typeof(MainWindow).GetMethod("GetWorkAreaLogical",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("work_area_method_missing");
@@ -3400,12 +3504,12 @@ internal static class Program
         InvokeWindowMethod(window, "OnToggleFullscreen", window, new System.Windows.RoutedEventArgs());
         Assert.Near(work.Width, window.Width, 1.5d);
         Assert.Near(work.Height, window.Height, 1.5d);
-        Assert.True(detailColumn.Width.Value > 330d);
+        Assert.True(detailColumn.Width.Value > 404d);
         Assert.True(detailContent.LayoutTransform.Value.IsIdentity);
         InvokeWindowMethod(window, "OnToggleFullscreen", window, new System.Windows.RoutedEventArgs());
         Assert.Near(1180d, window.Width, 0.5d);
-        Assert.Near(720d, window.Height, 0.5d);
-        Assert.Near(330d, detailColumn.Width.Value, 0.1d);
+        Assert.Near(820d, window.Height, 0.5d);
+        Assert.Near(404d, detailColumn.Width.Value, 0.1d);
 
         var trayField = typeof(MainWindow).GetField("_tray",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
@@ -3416,20 +3520,20 @@ internal static class Program
         InvokeWindowMethod(window, "OnMinimizeToTray", window, new System.Windows.RoutedEventArgs());
         Assert.True(!window.IsVisible);
         Assert.True(!viewModel.IsExpanded);
-        Assert.Near(112d, window.Width, 0.5d);
-        Assert.Near(330d, window.Height, 0.5d);
+        Assert.Near(224d, window.Width, 0.5d);
+        Assert.Near(324d, window.Height, 0.5d);
         InvokeWindowMethod(window, "RestoreFromExternalActivation");
         Assert.True(window.IsVisible);
         Assert.True(!viewModel.IsExpanded);
-        Assert.Near(112d, window.Width, 0.5d);
-        Assert.Near(330d, window.Height, 0.5d);
+        Assert.Near(224d, window.Width, 0.5d);
+        Assert.Near(324d, window.Height, 0.5d);
         InvokeWindowMethod(window, "OnMinimizeToTray", window, new System.Windows.RoutedEventArgs());
         Assert.True(!window.IsVisible);
         tray.ContextMenuStrip?.Items[0].PerformClick();
         window.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
         Assert.True(window.IsVisible);
-        Assert.Near(112d, window.Width, 0.5d);
-        Assert.Near(330d, window.Height, 0.5d);
+        Assert.Near(224d, window.Width, 0.5d);
+        Assert.Near(324d, window.Height, 0.5d);
 
         engine.SaveSettingsAsync(new Dictionary<string, string>
         {
@@ -3448,8 +3552,8 @@ internal static class Program
         InvokeWindowMethod(window, "ApplyExpansionState", false);
         Assert.True(!viewModel.IsExpanded);
         Assert.True(window.Topmost);
-        Assert.Near(112d, window.Width, 0.5d);
-        Assert.Near(330d, window.Height, 0.5d);
+        Assert.Near(224d, window.Width, 0.5d);
+        Assert.Near(324d, window.Height, 0.5d);
         window.Topmost = false;
         InvokeWindowMethod(window, "UpdateTopmostState");
 
@@ -3664,13 +3768,13 @@ internal static class Program
         string Resolve(System.Windows.Rect windowBounds, System.Windows.Point pointer) =>
             resolveDock.Invoke(null, new object[] { work, windowBounds, pointer })?.ToString()
             ?? throw new InvalidOperationException("resolve_dock_result_missing");
-        Assert.Equal("Right", Resolve(new System.Windows.Rect(work.Right - 300, work.Top + 100, 112, 330),
+        Assert.Equal("Right", Resolve(new System.Windows.Rect(work.Right - 300, work.Top + 100, 224, 324),
             new System.Windows.Point(work.Right - 8, work.Top + 220)));
-        Assert.Equal("Left", Resolve(new System.Windows.Rect(work.Left + 180, work.Top + 100, 112, 330),
+        Assert.Equal("Left", Resolve(new System.Windows.Rect(work.Left + 180, work.Top + 100, 224, 324),
             new System.Windows.Point(work.Left + 8, work.Top + 220)));
-        Assert.Equal("Top", Resolve(new System.Windows.Rect(work.Left + 300, work.Top + 160, 520, 96),
+        Assert.Equal("Top", Resolve(new System.Windows.Rect(work.Left + 300, work.Top + 160, 660, 80),
             new System.Windows.Point(work.Left + 500, work.Top + 8)));
-        Assert.Equal("None", Resolve(new System.Windows.Rect(work.Left + 300, work.Top + 160, 112, 330),
+        Assert.Equal("None", Resolve(new System.Windows.Rect(work.Left + 300, work.Top + 160, 224, 324),
             new System.Windows.Point(work.Left + 500, work.Top + 500)));
 
         void Dock(string name)
@@ -3682,7 +3786,7 @@ internal static class Program
         }
 
         Dock("Right");
-        Assert.Near(work.Right - 112, window.Left, 1.5);
+        Assert.Near(work.Right - window.Width, window.Left, 1.5);
         scheduleHide.Invoke(window, null);
         AwaitWithDispatcher(Task.Delay(700), window.Dispatcher, TimeSpan.FromSeconds(2));
         Assert.True((bool)(hiddenField.GetValue(window) ?? false));
@@ -3708,8 +3812,8 @@ internal static class Program
         Assert.Near(work.Left - window.Width + 9, window.Left, 1.5);
 
         Dock("Top");
-        Assert.Near(520, window.Width, 0.5);
-        Assert.Near(96, window.Height, 0.5);
+        Assert.Near(660, window.Width, 0.5);
+        Assert.Near(80, window.Height, 0.5);
         var topCountdown = (System.Windows.Controls.TextBlock)(window.FindName("CompactTopCountdownText")
             ?? throw new InvalidOperationException("top_countdown_missing"));
         var topRunning = (System.Windows.Controls.TextBlock)(window.FindName("CompactTopRunningText")

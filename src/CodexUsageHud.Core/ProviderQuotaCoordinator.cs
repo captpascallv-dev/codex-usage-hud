@@ -85,6 +85,16 @@ public sealed class ProviderQuotaCoordinator
     public IsolatedQuotaCache Cache => _cache;
     public TimeSpan PublishBudget { get; set; } = TimeSpan.FromMilliseconds(500);
 
+    public Func<string>? GrokLoginStampOverride { get; set; }
+
+    public static string FormatLoginStamp(LoginPresence presence)
+    {
+        if (!presence.Present) return "0";
+        var ticks = presence.LastWriteUtc?.UtcTicks.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "0";
+        var length = presence.Length?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "0";
+        return ticks + ":" + length;
+    }
+
     public ProviderQuotaBoard CurrentBoard(DateTimeOffset nowUtc, ProviderAccessSettings settings)
     {
         var slots = settings.Slots.Select(slot => PresentSlot(slot, nowUtc)).ToArray();
@@ -357,7 +367,7 @@ public sealed class ProviderQuotaCoordinator
             ProviderSlotIds.Cursor or ProviderSlotIds.GrokBot =>
                 WindowsLoginPresence.Cursor().LastWriteUtc?.UtcTicks.ToString() ?? "0",
             ProviderSlotIds.Grok =>
-                WindowsLoginPresence.Grok().LastWriteUtc?.UtcTicks.ToString() ?? "0",
+                GrokLoginStampOverride?.Invoke() ?? FormatLoginStamp(WindowsLoginPresence.GrokAuthFile()),
             ProviderSlotIds.CodexSecondary =>
                 _piTokens.ConfigurationFingerprint() + "|" + (slot.CodexHome ?? string.Empty),
             _ => slot.CodexHome ?? string.Empty,

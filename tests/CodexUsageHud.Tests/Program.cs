@@ -197,6 +197,8 @@ internal static class Program
             ("grok_renewal_timeout_and_failure", () => GrokRenewalTimeoutAndFailure().GetAwaiter().GetResult()),
             ("grok_renewal_revoked_distinct", () => GrokRenewalRevokedDistinct().GetAwaiter().GetResult()),
             ("grok_401_retries_after_refresh", () => Grok401RetriesAfterRefresh().GetAwaiter().GetResult()),
+            ("grok_login_stamp_uses_auth_file_not_directory", GrokLoginStampUsesAuthFileMetadata),
+            ("grok_stable_login_keeps_quota_across_reset", () => GrokStableLoginKeepsQuotaAcrossReset().GetAwaiter().GetResult()),
         };
 
         if (args.Length == 2 && args[0] == "--filter")
@@ -4852,6 +4854,73 @@ internal static class Program
         Assert.Equal(QuotaSlotStatus.Live, live.Status);
         Assert.Equal("Bearer new-key", lastBearer);
         Directory.Delete(directory, true);
+    }
+
+    private static void GrokLoginStampUsesAuthFileMetadata()
+    {
+        Assert.Equal("0", ProviderQuotaCoordinator.FormatLoginStamp(
+            new LoginPresence(ProviderIds.Grok, false, "%USERPROFILE%\\.grok\\auth-file", null, null)));
+        var stamp = ProviderQuotaCoordinator.FormatLoginStamp(
+            new LoginPresence(ProviderIds.Grok, true, "%USERPROFILE%\\.grok\\auth-file",
+                DateTimeOffset.Parse("2026-09-01T00:00:00Z", CultureInfo.InvariantCulture), 100));
+        Assert.True(stamp.Contains(":", StringComparison.Ordinal));
+        Assert.True(stamp.EndsWith(":100", StringComparison.Ordinal));
+        var rewritten = ProviderQuotaCoordinator.FormatLoginStamp(
+            new LoginPresence(ProviderIds.Grok, true, "%USERPROFILE%\\.grok\\auth-file",
+                DateTimeOffset.Parse("2026-09-01T00:00:00Z", CultureInfo.InvariantCulture), 120));
+        Assert.True(!string.Equals(stamp, rewritten, StringComparison.Ordinal));
+    }
+
+    private static async Task GrokStableLoginKeepsQuotaAcrossReset()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var phase = "elapsed";
+        var http = new ScriptedHttpSender((request, _) =>
+        {
+            if (!request.Url.AbsolutePath.Contains("billing", StringComparison.Ordinal))
+                return Task.FromResult(new AllowlistedHttpResponse(200, "{}", request.Url));
+            var start = now.AddDays(-7).ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
+            var end = phase == "elapsed"
+                ? now.AddMinutes(-5).ToUniversalTime().ToString("o", CultureInfo.InvariantCulture)
+                : now.AddDays(6).ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
+            var used = phase == "elapsed" ? "100" : "3";
+            var body = "{\"usagePercent\":" + used + ",\"currentPeriod\":{\"start\":\"" + start +
+                       "\",\"end\":\"" + end + "\"}}";
+            return Task.FromResult(new AllowlistedHttpResponse(200, body, request.Url));
+        });
+        var coordinator = new ProviderQuotaCoordinator(http: http, grokTokens: new InjectedTokenSource("grok-token"))
+        {
+            GrokLoginStampOverride = () => "login-stable",
+        };
+        var settings = FiveSlotSettings(grokEnabled: true);
+        var elapsed = await coordinator.RefreshAsync(settings, PrimaryObservation(now), CancellationToken.None, true);
+        var elapsedSlot = elapsed.Find(ProviderSlotIds.Grok)!;
+        Assert.Equal("grok_period_elapsed", elapsedSlot.ErrorCode);
+        Assert.True(elapsedSlot.GlanceRemainingPercent is null);
+        Assert.Equal("—", elapsedSlot.GlancePercentText);
+
+        phase = "current";
+        var held = coordinator.CurrentBoard(now.AddSeconds(10), settings).Find(ProviderSlotIds.Grok)!;
+        Assert.True(held.GlanceRemainingPercent is null);
+        Assert.Equal("login-stable", held.ConfigFingerprint?.Split('|').Last());
+
+        var refreshed = await coordinator.RefreshAsync(settings, PrimaryObservation(now), CancellationToken.None, true);
+        var live = refreshed.Find(ProviderSlotIds.Grok)!;
+        Assert.Equal(QuotaSlotStatus.Live, live.Status);
+        Assert.Equal(97d, live.GlanceRemainingPercent);
+        Assert.Equal("97%", live.GlancePercentText);
+        var still = coordinator.CurrentBoard(now.AddSeconds(20), settings).Find(ProviderSlotIds.Grok)!;
+        Assert.Equal(97d, still.GlanceRemainingPercent);
+
+        coordinator.GrokLoginStampOverride = () => "login-rotated";
+        var blanked = coordinator.CurrentBoard(now.AddSeconds(21), settings).Find(ProviderSlotIds.Grok)!;
+        Assert.Equal("config_changed", blanked.ErrorCode);
+        Assert.True(blanked.GlanceRemainingPercent is null);
+        Assert.Equal(0, blanked.Windows.Count);
+
+        coordinator.GrokLoginStampOverride = () => "login-stable";
+        var restored = coordinator.CurrentBoard(now.AddSeconds(22), settings).Find(ProviderSlotIds.Grok)!;
+        Assert.Equal(97d, restored.GlanceRemainingPercent);
     }
 
     private static string SyntheticGrokIssuer(string key, DateTimeOffset expires, string? refresh)

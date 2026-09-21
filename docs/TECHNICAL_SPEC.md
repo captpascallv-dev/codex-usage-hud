@@ -21,10 +21,16 @@ usable and must not disappear merely because the pet is hidden.
 
 ## 2. Explicit non-goals
 
-No cloud sync, team/multi-account management, billing estimates, currency,
-complex charts, cross-platform shell, direct ChatGPT HTTP scraping, browser
-cookies, login automation, credential extraction, prompt/response indexing,
+No cloud sync, billing estimates, currency, complex charts, cross-platform
+shell, browser-cookie sweep, login automation, prompt/response indexing,
 message search, auto-update service, or deliberate service-tier changes.
+No 19-provider catalogue. Direct Codex HTTP usage clients remain forbidden.
+
+Pascal 2026-09-20 authority amends the previous "single Codex account only"
+non-goal: five quota slots are in scope (two Codex homes, Cursor, Grok, Grok
+Bot). Runtime may use existing local logins for those opted-in slots against
+each provider's own quota endpoint. Agents still must not open credential
+files or receive secret values. Direct Codex HTTP remains disabled.
 
 ## 3. Solution shape
 
@@ -62,17 +68,42 @@ Resolve `CODEX_HOME` from that environment variable when present, otherwise
 - `.codex-global-state.json` only for the optional pet anchor fields
 - the local Codex executable and its App Server stdin/stdout protocol
 
-Never open `auth.json`, `.env`, cookies, credential/key/token files, shell
-history, browser storage, or unrelated Codex logs. Never enumerate or read any
-Concerto path.
+Never open prompt/response bodies, browser storage, shell history, or unrelated
+Codex logs. Never enumerate or read any Concerto path. Agents must never open
+`auth.json`, cookies, or token files even when runtime adapters may.
+
+Pascal 2026-09-20: opted-in Cursor/Grok/Grok Bot adapters may read only the
+exact necessary existing-login field at runtime (`cursorAuth/accessToken` in
+Cursor `state.vscdb`, or the Grok CLI issuer `key` / root `access_token` in
+`%USERPROFILE%\.grok\auth.json`) and keep it in memory for that request. Do
+not log, persist, or display the value. A local `expires_at` on that Grok
+access key is not logout. When the same issuer entry still has a refresh
+grant, the HUD runs the official non-interactive `grok models` CLI so Grok's
+own lock can rotate the file, then re-reads the access key. The HUD does not
+POST `auth.x.ai`, write `auth.json`, or treat file expiry as a fake 0%/100%. Primary Codex quota still uses App Server, not extracted Codex tokens.
+The second Codex slot may read only the `openai-codex` OAuth entry from the
+existing PI login store at runtime, keep access token and ChatGPT account id
+in memory, and GET `https://chatgpt.com/backend-api/wham/usage` on the HTTPS
+allowlist with redirects refused. Agents must not open that file. Do not copy
+PI credentials into Codex `auth.json`, refresh the PI store, or scan unrelated
+PI providers.
 
 For `state_5.sqlite`, inspect `PRAGMA table_info(threads)` and select only the
 intersection of these columns: `id`, `rollout_path`, `created_at`,
 `updated_at`, `cwd`, `model`, `reasoning_effort`, `source`, `agent_nickname`,
-`agent_role`, and `name`. Never select `title`, `first_user_message`,
-`preview`, or any unlisted column. Prefer `name`, then `session_index`'s
-`thread_name`, then a shortened thread id for display. Derive the project tag
-from the final directory name of `cwd`; do not expose full paths in the UI.
+`agent_role`, `name`, `account_id`, `chatgpt_account_id`, and `user_id`.
+Never select `title`, `first_user_message`, `preview`, or any unlisted column.
+Account identity columns are metadata-only. Owner-confirmed primary-directory
+binding is a distinct provenance from machine-verified per-row `account_id`.
+Default session/continuation analysis shows that primary home minus classifiable
+foreign rows. Do not empty the list when identity columns are absent, and do
+not report owner-confirmed directory sessions as machine-verified. If the live
+App identity later changes, do not silently rebind historical rows to the new
+identity. Do not invent attribution from filenames, titles, token counts, parent
+threads, or prompt/response content. Prefer
+`name`, then `session_index`'s `thread_name`, then a shortened thread id for
+display. Derive the project tag from the final directory name of `cwd`; do
+not expose full paths in the UI.
 
 ## 5. Privacy-preserving JSONL reader
 
@@ -288,21 +319,42 @@ Service tier resolution:
 
 ## 9. Official quota adapter
 
-The application itself must not implement an authenticated HTTP client.
-Discover a local `codex.exe` from configured override, the npm package's native
-binary, PATH, or the installed Codex Desktop package. Prefer a native binary;
-use `codex.cmd`/`codex.bat` only as compatibility fallbacks. Launch a short-lived
-child process:
+Codex quota remains app-server only. The application must not implement a
+direct Codex HTTP usage client. Discover a local `codex.exe` from configured
+override, the npm package's native binary, PATH, or the installed Codex Desktop
+package. Prefer a native binary; use `codex.cmd`/`codex.bat` only as
+compatibility fallbacks. Launch a short-lived child process:
 
 ```text
 codex -s read-only -a never app-server
 ```
 
+Both Codex slots set `CODEX_HOME` only on that child process environment so
+quota and `account/read` identity share the same authenticated profile. Missing
+identity invalidates any previous association; do not combine one account's
+quota with another's identity. Do not change the parent process environment or
+copy logins. HTTP provider bodies are bounded streaming reads with stable
+sanitized error codes. Rail and panel remaining percentages name the exact
+window or pool; they are never averaged.
+
+Pascal 2026-09-20 authority additionally allows opt-in, runtime-only quota
+adapters for Cursor, Grok and Grok Bot that use existing local logins against
+fixed HTTPS hosts/paths, with no redirects, bounded timeouts, in-memory
+credentials, and no credential logging. Missing login is `未连接`, never a fake
+percentage. Codex HTTP remains disabled. Grok weekly billing remains
+`GET https://cli-chat-proxy.grok.com/v1/billing?format=credits`. Access-token
+expiry with a remaining refresh grant is `grok_renewal_unavailable` until the
+official CLI refresh succeeds, `grok_login_revoked` when the grant is gone, and
+`grok_login_expired` only when no refresh grant exists. The Grok slot may wait
+up to 35s for that CLI refresh; the 500ms board publish budget is unchanged.
+
 Do not pass a service-tier override. Use JSON-RPC over stdin/stdout:
 
 1. `initialize` with the HUD name/version
 2. `account/rateLimits/read`
-3. model catalog read only when needed for default-tier evidence
+3. optional identity `account/read` if the helper supports it; unknown identity
+   is unlabeled rather than assumed
+4. model catalog read only when needed for default-tier evidence
 
 Use a bounded startup timeout (10 s), per-request timeout (5 s), cancellation,
 and process-tree termination. Do not retain stdout lines beyond the matching
@@ -338,7 +390,13 @@ or reset event.
 
 Default database: `%LOCALAPPDATA%\CodexUsageHUD\usage.db`. Tests and
 diagnostics must support an explicit data-directory override inside the
-project. Enable WAL, foreign keys, a bounded busy timeout, migrations, and
+project. The published ZIP does not contain `ISOLATED_PREVIEW.marker`. Ordinary
+startup without `--data-dir` uses the LocalAppData database and the default
+Codex home; `--data-dir` / `--codex-home` / `--isolated-preview` are QA or
+preview overrides and do not change published defaults. A markered preview
+directory must supply both overrides before it may start. Provider live
+diagnostics are a test helper (`--provider-live-diagnostic`), not a default
+application launch path, and must not print credentials or private bodies. Enable WAL, foreign keys, a bounded busy timeout, migrations, and
 short single-writer transactions.
 
 At minimum model these durable concepts:
@@ -407,10 +465,11 @@ Collapsed form shows one line equivalent to:
 ```
 
 The compact visual uses an opaque light card, deep-green normal state,
-readable Chinese typography and a horizontal remaining-quota bar. Vertical
-size is 224 by 324 logical pixels; top size is 660 by 80. Both retain quota,
-reset countdown, running count and local-cycle raw total, plus settings,
-window-topmost, tray and expand controls. Iconography uses Windows system assets.
+readable Chinese typography and a horizontal remaining-quota bar. The default
+collapsed rail is 156 by 508 logical pixels (top 980 by 96) with five labelled
+slots. The previous compact card (224 by 324; top 660 by 80) remains a settings
+option. Both retain quota, reset, settings, window-topmost, tray and expand
+controls. Iconography uses Windows system assets, not copied third-party icons.
 
 Expanded form contains:
 

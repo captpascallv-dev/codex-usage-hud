@@ -16,7 +16,9 @@ public sealed record ThreadMetadataRow(
     string? Source,
     string? AgentNickname,
     string? AgentRole,
-    string? Name);
+    string? Name,
+    string? AccountId = null,
+    string? UserId = null);
 
 public sealed record SessionSourceClassification(
     SessionKind Kind,
@@ -30,6 +32,7 @@ public static class MetadataQuery
     {
         "id", "rollout_path", "created_at", "updated_at", "cwd", "model",
         "reasoning_effort", "source", "agent_nickname", "agent_role", "name",
+        "account_id", "chatgpt_account_id", "user_id",
     };
 
     public static string Build(IReadOnlySet<string> availableColumns)
@@ -107,12 +110,54 @@ public static class RolloutPathNormalizer
 
 public sealed class StateMetadataReader
 {
+    public IdentityColumnPresence LastIdentityColumns { get; private set; } = IdentityColumnPresence.Missing;
+
+    public IdentityColumnPresence InspectIdentityColumns(string? sqlitePath)
+    {
+        if (string.IsNullOrWhiteSpace(sqlitePath) || !File.Exists(sqlitePath))
+        {
+            LastIdentityColumns = IdentityColumnPresence.Missing;
+            return LastIdentityColumns;
+        }
+
+        try
+        {
+            var builder = new SqliteConnectionStringBuilder
+            {
+                DataSource = sqlitePath,
+                Mode = SqliteOpenMode.ReadOnly,
+                Cache = SqliteCacheMode.Private,
+                DefaultTimeout = 2,
+            };
+            using var connection = new SqliteConnection(builder.ToString());
+            connection.Open();
+            LastIdentityColumns = IdentityColumnPresence.FromColumns(true, ReadColumns(connection));
+            return LastIdentityColumns;
+        }
+        catch (SqliteException)
+        {
+            LastIdentityColumns = IdentityColumnPresence.Missing;
+            return LastIdentityColumns;
+        }
+        catch (IOException)
+        {
+            LastIdentityColumns = IdentityColumnPresence.Missing;
+            return LastIdentityColumns;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            LastIdentityColumns = IdentityColumnPresence.Missing;
+            return LastIdentityColumns;
+        }
+    }
+
     public IReadOnlyList<ThreadMetadataRow> Read(string codexHome)
     {
         var resolvedHome = CodexHomeResolver.Resolve(codexHome);
         var path = Path.Combine(resolvedHome, "state_5.sqlite");
         if (!File.Exists(path))
         {
+            LastIdentityColumns = IdentityColumnPresence.Missing;
             return Array.Empty<ThreadMetadataRow>();
         }
 
@@ -128,6 +173,7 @@ public sealed class StateMetadataReader
             using var connection = new SqliteConnection(builder.ToString());
             connection.Open();
             var available = ReadColumns(connection);
+            LastIdentityColumns = IdentityColumnPresence.FromColumns(true, available);
             var selected = MetadataQuery.Selected(available);
             var sql = MetadataQuery.Build(available);
             if (string.IsNullOrEmpty(sql))
@@ -162,7 +208,9 @@ public sealed class StateMetadataReader
                     rows.Add(new ThreadMetadataRow(threadId, rollout,
                         AsDate(values, "created_at"), AsDate(values, "updated_at"), AsString(values, "cwd"),
                         AsString(values, "model"), AsString(values, "reasoning_effort"), AsString(values, "source"),
-                        AsString(values, "agent_nickname"), AsString(values, "agent_role"), AsString(values, "name")));
+                        AsString(values, "agent_nickname"), AsString(values, "agent_role"), AsString(values, "name"),
+                        AsString(values, "account_id") ?? AsString(values, "chatgpt_account_id"),
+                        AsString(values, "user_id")));
                 }
                 catch (InvalidCastException)
                 {
@@ -182,14 +230,17 @@ public sealed class StateMetadataReader
         }
         catch (SqliteException)
         {
+            LastIdentityColumns = IdentityColumnPresence.Missing;
             return Array.Empty<ThreadMetadataRow>();
         }
         catch (IOException)
         {
+            LastIdentityColumns = IdentityColumnPresence.Missing;
             return Array.Empty<ThreadMetadataRow>();
         }
         catch (UnauthorizedAccessException)
         {
+            LastIdentityColumns = IdentityColumnPresence.Missing;
             return Array.Empty<ThreadMetadataRow>();
         }
     }

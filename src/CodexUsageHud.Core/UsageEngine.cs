@@ -19,6 +19,7 @@ public sealed class UsageEngine : IDisposable
     private readonly SessionIndexReader _indexReader = new();
     private readonly CodexExecutableDiscovery _executableDiscovery = new();
     private readonly AppServerClient _appServerClient = new(HudProduct.Version);
+    private readonly ProviderQuotaCoordinator _providers;
     private readonly QuotaStateMachine _quotaState;
     private readonly RefreshCadence _cadence = new();
     private readonly object _gate = new();
@@ -29,7 +30,16 @@ public sealed class UsageEngine : IDisposable
     private readonly AppIoQueue _appIo;
     private IReadOnlyList<RolloutFile> _files = Array.Empty<RolloutFile>();
     private Dictionary<string, ThreadMetadataRow> _metadataByPath = new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<ThreadMetadataRow> _metadataRows = Array.Empty<ThreadMetadataRow>();
+    private IdentityColumnPresence _identityColumns = IdentityColumnPresence.Missing;
     private QuotaObservation _quota;
+    private ProviderQuotaBoard _providersBoard;
+    private ProviderAccessSettings _providerSettings = ProviderAccessSettings.Default();
+    private string? _primaryIdentityHash;
+    private string? _primaryIdentityNamespace;
+    private string? _ownerConfirmedIdentityStamp;
+    private int _unverifiedHistoryCount;
+    private int _foreignHistoryCount;
     private DateTimeOffset? _lastRolloutPassUtc;
     private int _fileCursor;
     private int _forceDiscovery;
@@ -38,7 +48,7 @@ public sealed class UsageEngine : IDisposable
     private bool _disposed;
 
     public UsageEngine(string codexHome, string databasePath, string? logPath = null,
-        Action<string>? appIoBeforeOperation = null)
+        Action<string>? appIoBeforeOperation = null, ProviderQuotaCoordinator? providers = null)
     {
         _codexHome = CodexHomeResolver.Resolve(codexHome);
         _database = new UsageDatabase(databasePath);
@@ -48,11 +58,17 @@ public sealed class UsageEngine : IDisposable
             beforeOperation: appIoBeforeOperation);
         _quotaState = new QuotaStateMachine(_database);
         _quota = _quotaState.RestoreForDisplay();
+        _providers = providers ?? new ProviderQuotaCoordinator();
+        _providers.SlotPublished += OnProviderSlotPublished;
+        _providersBoard = _providers.CurrentBoard(DateTimeOffset.UtcNow, _providerSettings);
         InitializeWatchers();
     }
 
+    public event Action? ProvidersUpdated;
+
     public UsageDatabase Database => _database;
     public RefreshCadence Cadence => _cadence;
+    public IsolatedQuotaCache ProviderCache => _providers.Cache;
 
     public bool IsIndexing
     {
@@ -83,7 +99,7 @@ public sealed class UsageEngine : IDisposable
                 if (_cadence.IsQuotaDue(now, manualQuota))
                 {
                     _cadence.MarkQuotaAttempt(now);
-                    await RefreshQuotaAsync(errors, cancellationToken).ConfigureAwait(false);
+                    await RefreshQuotaAsync(errors, cancellationToken, manualQuota).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException)
@@ -134,6 +150,8 @@ public sealed class UsageEngine : IDisposable
             }
 
             _metadataByPath = metadataByPath;
+            _metadataRows = rows;
+            _identityColumns = _stateReader.LastIdentityColumns;
             _files = new RolloutDiscovery().Discover(_codexHome);
             _fileCursor = _files.Count == 0 ? 0 : _fileCursor % _files.Count;
             var discoveredPaths = _files.Select(item => item.RelativePath)
@@ -268,22 +286,37 @@ public sealed class UsageEngine : IDisposable
     private string KnownThread(RolloutFile file) =>
         _metadataByPath.TryGetValue(file.RelativePath, out var row) ? row.ThreadId : "unknown-thread";
 
-    private async Task RefreshQuotaAsync(List<string> errors, CancellationToken cancellationToken)
+    private async Task RefreshQuotaAsync(List<string> errors, CancellationToken cancellationToken,
+        bool manualQuota)
     {
         var executable = _executableDiscovery.Find();
         if (string.IsNullOrWhiteSpace(executable))
         {
             errors.Add("codex_executable_missing");
+            _quotaState.InvalidateAssociation();
             _quota = _quotaState.Observe(new QuotaObservation(null, Array.Empty<QuotaBucket>(),
-                QuotaSource.Unavailable, DateTimeOffset.UtcNow, false, "codex_executable_missing"));
+                QuotaSource.Unavailable, DateTimeOffset.UtcNow, false, "codex_executable_missing"), null);
+            _primaryIdentityHash = null;
+            _primaryIdentityNamespace = null;
+            await RememberOwnerConfirmedStampAsync(null).ConfigureAwait(false);
+            await RefreshProviderBoardAsync(manualQuota, cancellationToken).ConfigureAwait(false);
             return;
         }
 
-        var result = await _appServerClient.ReadRateLimitsAsync(executable, cancellationToken);
-        _quota = _quotaState.Observe(result.Observation);
-        if (result.Observation.Primary is not null)
+        var isolatedHome = IsolatedCodexHome();
+        var combined = await _appServerClient.ReadQuotaAndIdentityAsync(executable, cancellationToken, isolatedHome)
+            .ConfigureAwait(false);
+        var primaryIdentity = combined.Identity?.Hash;
+        if (!string.Equals(primaryIdentity, _primaryIdentityHash, StringComparison.Ordinal))
+            _quotaState.InvalidateAssociation();
+        _quota = _quotaState.Observe(combined.Quota.Observation, primaryIdentity);
+        _primaryIdentityHash = string.IsNullOrWhiteSpace(primaryIdentity) ? null : primaryIdentity;
+        _primaryIdentityNamespace = combined.Identity?.Namespace;
+        await RememberOwnerConfirmedStampAsync(_primaryIdentityHash).ConfigureAwait(false);
+        if (combined.Quota.Observation.Primary is not null)
         {
-            var catalog = await _appServerClient.ReadModelCatalogAsync(executable, cancellationToken);
+            var catalog = await _appServerClient.ReadModelCatalogAsync(executable, cancellationToken, isolatedHome)
+                .ConfigureAwait(false);
             if (catalog is not null)
             {
                 foreach (var session in _database.LoadSessions())
@@ -294,26 +327,83 @@ public sealed class UsageEngine : IDisposable
             }
         }
 
-        if (result.ErrorCode is not null)
+        if (combined.Quota.ErrorCode is not null)
         {
-            errors.Add(result.ErrorCode);
+            errors.Add(combined.Quota.ErrorCode);
         }
+
+        await RefreshProviderBoardAsync(manualQuota, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<ProviderQuotaBoard> RefreshProviderBoardAsync(bool manual,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var keys = new List<string>
+            {
+                ProviderSettingKeys.CompactLayout, ProviderSettingKeys.AccessNotice,
+            };
+            foreach (var slotId in ProviderSlotIds.All)
+            {
+                keys.Add(ProviderSettingKeys.Label(slotId));
+                keys.Add(ProviderSettingKeys.Enabled(slotId));
+                keys.Add(ProviderSettingKeys.CodexHome(slotId));
+            }
+
+            var stored = await LoadSettingsAsync(keys.ToArray()).ConfigureAwait(false);
+            _providerSettings = ProviderSettingKeys.FromStored(stored);
+            await _providers.RefreshAsync(_providerSettings, _quota, cancellationToken, manual,
+                _primaryIdentityHash, _codexHome)
+                .ConfigureAwait(false);
+            _providersBoard = _providers.CurrentBoard(DateTimeOffset.UtcNow, _providerSettings);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            _providersBoard = _providers.CurrentBoard(DateTimeOffset.UtcNow, _providerSettings);
+        }
+
+        return _providersBoard;
+    }
+
+    public ProviderAccessSettings ProviderSettings => _providerSettings;
+
+    public ProviderQuotaBoard GetProviderBoard()
+    {
+        var board = _providers.CurrentBoard(DateTimeOffset.UtcNow, _providerSettings);
+        _providersBoard = board;
+        return AnnotatePrimaryHistory(board, _unverifiedHistoryCount, _foreignHistoryCount);
+    }
+
+    private void OnProviderSlotPublished(ProviderSlotSnapshot _)
+    {
+        _providersBoard = _providers.CurrentBoard(DateTimeOffset.UtcNow, _providerSettings);
+        ProvidersUpdated?.Invoke();
     }
 
     private HudSnapshot BuildSnapshot(IReadOnlyList<string> refreshErrors)
     {
         var now = DateTimeOffset.UtcNow;
         var aggregateMigrationPending = !_database.IsAggregateRebuildComplete;
-        var sessions = aggregateMigrationPending
+        var localSessions = aggregateMigrationPending
             ? Array.Empty<SessionAggregate>()
             : _indexer.LoadAggregates(now);
+        var partition = PrimaryAccountAttribution.Partition(localSessions, _metadataRows, _primaryIdentityHash,
+            _identityColumns, _primaryIdentityNamespace, _ownerConfirmedIdentityStamp);
+        _unverifiedHistoryCount = partition.Unverified.Count;
+        _foreignHistoryCount = partition.Foreign.Count;
+        var sessions = partition.Analysis;
         var primaryQuota = _quota.Primary is { HasValidWindow: true } bucket ? bucket : null;
         var hasCurrentWindow = primaryQuota is not null && primaryQuota.CycleStartUtc <= now &&
                                primaryQuota.ResetsAtUtc > now && !aggregateMigrationPending;
         CanonicalTokenUsage? cycle = !hasCurrentWindow
             ? null
             : _database.GetCycleTotal(primaryQuota!.CycleStartUtc, primaryQuota.ResetsAtUtc);
-        var runningThreadIds = sessions.Where(item => item.Status == SessionStatus.Running)
+        var runningThreadIds = localSessions.Where(item => item.Status == SessionStatus.Running)
             .Select(item => item.Metadata.ThreadId).ToArray();
         CanonicalTokenUsage? runningCycle = !hasCurrentWindow
             ? null
@@ -328,9 +418,49 @@ public sealed class UsageEngine : IDisposable
             ? "额度不可用；本周期不可用"
             : _quota.IsStale ? "本机最后观测/陈旧"
                 : sourceAge.HasValue ? $"官方额度 · 本地索引 {Math.Max(0, sourceAge.Value.TotalSeconds):0} 秒前" : "官方 App Server 观测";
+        var providers = AnnotatePrimaryHistory(
+            _providers.CurrentBoard(now, _providerSettings), partition.Unverified.Count, partition.Foreign.Count);
         return new HudSnapshot(_quota, sessions, cycle, now, IsIndexing, freshness, errors,
-            _database.LoadRecentEvents(), aggregateMigrationPending, runningCycle);
+            _database.LoadRecentEvents(), aggregateMigrationPending, runningCycle, providers, partition.Note,
+            localSessions.Count, runningThreadIds.Length, partition.MachineBound.Count, partition.Unverified.Count,
+            partition.Foreign.Count, partition.State, partition.Unverified);
     }
+
+    private static ProviderQuotaBoard AnnotatePrimaryHistory(ProviderQuotaBoard board, int unverified, int foreign)
+    {
+        if (unverified == 0 && foreign == 0) return board;
+        var slots = board.Slots.Select(slot =>
+            slot.SlotId == ProviderSlotIds.CodexPrimary
+                ? slot with { UnverifiedHistoryCount = unverified, ForeignHistoryCount = foreign }
+                : slot).ToArray();
+        return board with { Slots = slots };
+    }
+
+    private async Task RememberOwnerConfirmedStampAsync(string? currentHash)
+    {
+        if (_ownerConfirmedIdentityStamp is null)
+        {
+            var stored = await LoadSettingsAsync(ProviderSettingKeys.OwnerConfirmedPrimaryStamp)
+                .ConfigureAwait(false);
+            _ownerConfirmedIdentityStamp = stored.GetValueOrDefault(ProviderSettingKeys.OwnerConfirmedPrimaryStamp) ??
+                                           string.Empty;
+        }
+
+        if (string.IsNullOrWhiteSpace(_ownerConfirmedIdentityStamp) && !string.IsNullOrWhiteSpace(currentHash))
+        {
+            _ownerConfirmedIdentityStamp = currentHash;
+            await SaveSettingsAsync(new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [ProviderSettingKeys.OwnerConfirmedPrimaryStamp] = currentHash,
+            }).ConfigureAwait(false);
+        }
+    }
+
+    private IReadOnlyDictionary<string, string> IsolatedCodexHome() =>
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["CODEX_HOME"] = Path.GetFullPath(_codexHome),
+        };
 
     private void InitializeWatchers()
     {
@@ -385,6 +515,7 @@ public sealed class UsageEngine : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _providers.SlotPublished -= OnProviderSlotPublished;
         _appIo.DisposeAsync().AsTask().GetAwaiter().GetResult();
         foreach (var watcher in _watchers)
         {

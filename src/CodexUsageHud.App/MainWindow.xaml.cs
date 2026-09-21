@@ -55,13 +55,23 @@ public partial class MainWindow : Window, IDisposable
     private bool _topmostPointerInvocation;
     private bool _isExpandedFullscreen;
     private EdgeDock _dockSide = EdgeDock.Right;
+    private string _compactLayout = CompactLayoutModes.Rail;
+    private readonly Dictionary<string, string?> _restoredSettings = new(StringComparer.Ordinal);
+    private bool _slotDetailOpen;
     private double _compactAxis = double.NaN;
     private Rect _expandedRestoreBounds = Rect.Empty;
+    private Rect? _workAreaOverride;
 
     private const double CompactWidth = 224;
     private const double CompactHeight = 324;
     private const double CompactTopWidth = 660;
     private const double CompactTopHeight = 80;
+    private const double RailWidth = 252;
+    private const double RailHeightFallback = 520;
+    private const double RailTopWidth = 1100;
+    private const double RailTopHeight = 78;
+    private const double RailTopNarrowHeight = 96;
+    private const double RailTopNarrowBreakpoint = 900;
     private const double ExpandedWidth = 1180;
     private const double ExpandedHeight = 820;
     private const double EdgeHandle = 9;
@@ -76,6 +86,7 @@ public partial class MainWindow : Window, IDisposable
         InitializeComponent();
         SourceInitialized += (_, _) => ApplyNativeWindowClarity();
         _engine = engine;
+        _engine.ProvidersUpdated += OnEngineProvidersUpdated;
         _disposeRuntimeAsync = disposeRuntimeAsync;
         DataContext = _viewModel;
         var tray = CreateTrayIcon();
@@ -86,7 +97,11 @@ public partial class MainWindow : Window, IDisposable
         {
             Interval = RefreshCadence.UiCountdown,
         };
-        _countdownTimer.Tick += (_, _) => _viewModel.Tick(DateTimeOffset.UtcNow);
+        _countdownTimer.Tick += (_, _) =>
+        {
+            _viewModel.Tick(DateTimeOffset.UtcNow);
+            _viewModel.ApplyProviders(_engine.GetProviderBoard());
+        };
         _hideTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(520),
@@ -124,6 +139,8 @@ public partial class MainWindow : Window, IDisposable
         Closing += OnClosing;
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
     }
+
+    public void OverrideWorkAreaForTests(Rect? workArea) => _workAreaOverride = workArea;
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
@@ -203,6 +220,7 @@ public partial class MainWindow : Window, IDisposable
                     if (selected is not null) SessionGrid.SelectedItem = selected;
                 }
                 UpdateTextBlocks();
+                RemeasureCompactRail();
             }, DispatcherPriority.DataBind);
         }
         catch (OperationCanceledException)
@@ -242,6 +260,7 @@ public partial class MainWindow : Window, IDisposable
         {
             _viewModel.Apply(frame);
             UpdateTextBlocks();
+            RemeasureCompactRail();
         });
     }
 
@@ -270,6 +289,8 @@ public partial class MainWindow : Window, IDisposable
         CompactProgress.Foreground = accentBrush;
         CompactVerticalShell.BorderBrush = borderBrush;
         CompactTopShell.BorderBrush = borderBrush;
+        RailVerticalShell.BorderBrush = borderBrush;
+        RailTopShell.BorderBrush = borderBrush;
         ExpandedShell.BorderBrush = borderBrush;
         if (SessionGrid.SelectedItem is null && SessionGrid.Items.Count > 0)
             SessionGrid.SelectedIndex = 0;
@@ -319,6 +340,8 @@ public partial class MainWindow : Window, IDisposable
         ApplyTopmostButtonState(PanelTopmostButton);
         ApplyTopmostButtonState(CompactTopmostButton);
         ApplyTopmostButtonState(CompactTopTopmostButton);
+        ApplyTopmostButtonState(RailTopmostButton);
+        ApplyTopmostButtonState(RailTopTopmostButton);
         if (TopmostCheckBox is not null) TopmostCheckBox.IsChecked = Topmost;
     }
 
@@ -456,23 +479,38 @@ public partial class MainWindow : Window, IDisposable
     {
         if (!IsLoaded && PresentationSource.FromVisual(this) is null)
         {
-            Width = _viewModel.IsExpanded ? ExpandedWidth : CompactWidth;
-            Height = _viewModel.IsExpanded ? ExpandedHeight : CompactHeight;
             ExpandedShell.Visibility = _viewModel.IsExpanded ? Visibility.Visible : Visibility.Collapsed;
-            CompactVerticalShell.Visibility = _viewModel.IsExpanded ? Visibility.Collapsed : Visibility.Visible;
+            CompactVerticalShell.Visibility = Visibility.Collapsed;
             CompactTopShell.Visibility = Visibility.Collapsed;
+            RailVerticalShell.Visibility = !_viewModel.IsExpanded && !UsesCardLayout && _dockSide != EdgeDock.Top
+                ? Visibility.Visible : Visibility.Collapsed;
+            RailTopShell.Visibility = !_viewModel.IsExpanded && !UsesCardLayout && _dockSide == EdgeDock.Top
+                ? Visibility.Visible : Visibility.Collapsed;
+            if (UsesCardLayout && !_viewModel.IsExpanded)
+            {
+                CompactVerticalShell.Visibility = _dockSide == EdgeDock.Top ? Visibility.Collapsed : Visibility.Visible;
+                CompactTopShell.Visibility = _dockSide == EdgeDock.Top ? Visibility.Visible : Visibility.Collapsed;
+            }
+            InvalidateRailMeasure();
+            var compact = CompactSize();
+            Width = _viewModel.IsExpanded ? ExpandedWidth : compact.Width;
+            Height = _viewModel.IsExpanded ? ExpandedHeight : compact.Height;
+            _viewModel.TopBarNarrowLayout = compact.Width < RailTopNarrowBreakpoint;
             return;
         }
 
         var work = GetWorkAreaLogical();
         if (_viewModel.IsExpanded)
         {
+            CloseSlotDetail();
             if (!preserveCompactPosition || !double.IsFinite(_compactAxis))
                 _compactAxis = _dockSide == EdgeDock.Top ? Left : Top;
             _isEdgeHidden = false;
             ExpandedShell.Visibility = Visibility.Visible;
             CompactVerticalShell.Visibility = Visibility.Collapsed;
             CompactTopShell.Visibility = Visibility.Collapsed;
+            RailVerticalShell.Visibility = Visibility.Collapsed;
+            RailTopShell.Visibility = Visibility.Collapsed;
             Width = Math.Min(ExpandedWidth, Math.Max(720, work.Width - WorkAreaMargin * 2));
             Height = Math.Min(ExpandedHeight, Math.Max(520, work.Height - WorkAreaMargin * 2));
             ApplyExpandedResponsiveLayout(fullscreen: false, work.Width);
@@ -505,17 +543,127 @@ public partial class MainWindow : Window, IDisposable
             DiagnosticsPanel.Visibility = Visibility.Collapsed;
             ExpandedShell.Visibility = Visibility.Collapsed;
             var topDock = _dockSide == EdgeDock.Top;
-            CompactTopShell.Visibility = topDock ? Visibility.Visible : Visibility.Collapsed;
-            CompactVerticalShell.Visibility = topDock ? Visibility.Collapsed : Visibility.Visible;
-            Width = topDock ? CompactTopWidth : CompactWidth;
-            Height = topDock ? CompactTopHeight : CompactHeight;
+            var card = UsesCardLayout;
+            CompactTopShell.Visibility = card && topDock ? Visibility.Visible : Visibility.Collapsed;
+            CompactVerticalShell.Visibility = card && !topDock ? Visibility.Visible : Visibility.Collapsed;
+            RailTopShell.Visibility = !card && topDock ? Visibility.Visible : Visibility.Collapsed;
+            RailVerticalShell.Visibility = !card && !topDock ? Visibility.Visible : Visibility.Collapsed;
+            InvalidateRailMeasure();
+            UpdateLayout();
+            var size = CompactSize();
+            Width = size.Width;
+            Height = size.Height;
+            _viewModel.TopBarNarrowLayout = size.Width < RailTopNarrowBreakpoint;
+            ConstrainRailScroller(size.Height);
+            UpdateLayout();
+            var measured = CompactSize();
+            Width = measured.Width;
+            Height = measured.Height;
+            _viewModel.TopBarNarrowLayout = measured.Width < RailTopNarrowBreakpoint;
+            ConstrainRailScroller(measured.Height);
             var restoreHidden = _restoreHiddenOnNextCompact && _autoHide && _dockSide != EdgeDock.None;
             _restoreHiddenOnNextCompact = false;
             _isEdgeHidden = restoreHidden;
             PlaceCompact(work, hidden: restoreHidden);
             if (!restoreHidden)
-                BeginShellFade(topDock ? CompactTopShell : CompactVerticalShell);
+            {
+                UIElement shell = card
+                    ? (topDock ? CompactTopShell : CompactVerticalShell)
+                    : (topDock ? RailTopShell : RailVerticalShell);
+                BeginShellFade(shell);
+            }
+            PlaceSlotDetailPopup();
         }
+    }
+
+    private bool UsesCardLayout =>
+        string.Equals(_compactLayout, CompactLayoutModes.Card, StringComparison.OrdinalIgnoreCase);
+
+    private System.Windows.Size CompactSize()
+    {
+        var work = GetWorkAreaLogical();
+        if (UsesCardLayout)
+        {
+            return _dockSide == EdgeDock.Top
+                ? new System.Windows.Size(CompactTopWidth, CompactTopHeight)
+                : new System.Windows.Size(CompactWidth, CompactHeight);
+        }
+
+        if (_dockSide == EdgeDock.Top)
+        {
+            var available = Math.Max(8, work.Width - 24);
+            var width = Math.Min(RailTopWidth, available);
+            var height = width < RailTopNarrowBreakpoint ? RailTopNarrowHeight : RailTopHeight;
+            return new System.Windows.Size(width, height);
+        }
+
+        var maxHeight = Math.Max(120, work.Height - 24);
+        var desired = MeasureRailDesiredHeight();
+        return new System.Windows.Size(RailWidth, Math.Min(desired, maxHeight));
+    }
+
+    private double MeasureRailDesiredHeight()
+    {
+        if (RailVerticalShell is null || RailSlotList is null)
+            return EstimatedRailHeight();
+        InvalidateRailMeasure();
+        var contentWidth = Math.Max(1, RailWidth - 22);
+        RailSlotList.Measure(new System.Windows.Size(contentWidth, double.PositiveInfinity));
+        var slotsHeight = RailSlotList.DesiredSize.Height;
+        if (slotsHeight < 8)
+        {
+            RailVerticalShell.Measure(new System.Windows.Size(RailWidth, double.PositiveInfinity));
+            var shell = RailVerticalShell.DesiredSize.Height;
+            if (shell > 120) return shell;
+            return EstimatedRailHeight();
+        }
+
+        var header = RailHeaderBar is null ? 28 : Math.Max(RailHeaderBar.ActualHeight, RailHeaderBar.DesiredSize.Height);
+        if (header < 1) header = 28;
+        var footer = RailExpandHint is null ? 32 : Math.Max(RailExpandHint.Height, RailExpandHint.DesiredSize.Height);
+        if (footer < 1) footer = 32;
+        var padding = RailVerticalShell.Padding.Top + RailVerticalShell.Padding.Bottom + 8;
+        return header + slotsHeight + footer + padding + 8;
+    }
+
+    private double EstimatedRailHeight()
+    {
+        var rows = Math.Max(_viewModel.Slots.Count, 5);
+        return Math.Max(RailHeightFallback, 36 + rows * 72 + 50);
+    }
+
+    private void InvalidateRailMeasure()
+    {
+        RailSlotList?.InvalidateMeasure();
+        RailSlotScroller?.InvalidateMeasure();
+        RailVerticalShell?.InvalidateMeasure();
+    }
+
+    private void ConstrainRailScroller(double windowHeight)
+    {
+        if (RailSlotScroller is null || RailSlotList is null || RailVerticalShell.Visibility != Visibility.Visible)
+            return;
+        var header = RailHeaderBar is null ? 28 : Math.Max(RailHeaderBar.ActualHeight, 28);
+        var footer = RailExpandHint is null ? 32 : Math.Max(RailExpandHint.Height, 32);
+        var chrome = RailVerticalShell.Padding.Top + RailVerticalShell.Padding.Bottom + 8 + header + footer;
+        var budget = windowHeight - chrome;
+        RailSlotList.Measure(new System.Windows.Size(Math.Max(1, RailWidth - 22), double.PositiveInfinity));
+        if (budget > 40 && RailSlotList.DesiredSize.Height > budget + 8)
+            RailSlotScroller.MaxHeight = budget;
+        else
+            RailSlotScroller.ClearValue(MaxHeightProperty);
+    }
+
+    private void RemeasureCompactRail()
+    {
+        if (_viewModel.IsExpanded || UsesCardLayout) return;
+        InvalidateRailMeasure();
+        UpdateLayout();
+        var size = CompactSize();
+        Width = size.Width;
+        Height = size.Height;
+        _viewModel.TopBarNarrowLayout = size.Width < RailTopNarrowBreakpoint;
+        ConstrainRailScroller(size.Height);
     }
 
     private static void BeginShellFade(UIElement shell)
@@ -585,13 +733,166 @@ public partial class MainWindow : Window, IDisposable
             EdgeDock.Top => 2,
             _ => 3,
         };
+        CompactLayoutComboBox.SelectedIndex = UsesCardLayout ? 1 : 0;
+        var stored = ProviderSettingKeys.FromStored(_restoredSettings);
+        ApplySlotEditor(stored.Slot(ProviderSlotIds.CodexPrimary), SlotCodexPrimaryEnabled, SlotCodexPrimaryLabel);
+        ApplySlotEditor(stored.Slot(ProviderSlotIds.CodexSecondary), SlotCodexSecondaryEnabled, SlotCodexSecondaryLabel);
+        ApplySlotEditor(stored.Slot(ProviderSlotIds.Cursor), SlotCursorEnabled, SlotCursorLabel);
+        ApplySlotEditor(stored.Slot(ProviderSlotIds.Grok), SlotGrokEnabled, SlotGrokLabel);
+        ApplySlotEditor(stored.Slot(ProviderSlotIds.GrokBot), SlotGrokBotEnabled, SlotGrokBotLabel);
         SettingsStatusText.Text = string.Empty;
+        if (IsolatedPreviewLaunch.CurrentProcessIsolated)
+        {
+            StartupCheckBox.IsChecked = false;
+            StartupCheckBox.IsEnabled = false;
+            _startupMenuItem.Enabled = false;
+            SettingsStatusText.Text = "隔离预览：不会改写已安装 HUD 的开机启动或桌面快捷方式。";
+        }
+        var cursor = WindowsLoginPresence.Cursor();
+        var grok = WindowsLoginPresence.Grok();
+        var grokBot = WindowsLoginPresence.GrokBot();
+        var piCodex = WindowsLoginPresence.PiCodexAuthFile();
+        PiCodexPresenceText.Text = $"PI ChatGPT/Codex 订阅登录文件：{(piCodex.Present ? "存在" : "未找到")}（{piCodex.RelativeHint}）";
+        var presence =
+            $"Cursor 登录文件：{(cursor.Present ? "存在" : "未找到")}（{cursor.RelativeHint}）\n" +
+            $"Grok 登录目录：{(grok.Present ? "存在" : "未找到")}（{grok.RelativeHint}）\n" +
+            $"Grok Bot：{(grokBot.Present ? "Cursor 登录文件存在" : "未找到 Cursor 登录文件")}（{grokBot.RelativeHint}）";
+        SettingsStatusText.Text = IsolatedPreviewLaunch.CurrentProcessIsolated
+            ? "隔离预览：不会改写已安装 HUD 的开机启动或桌面快捷方式。\n" + presence
+            : presence;
         _settingsReady = true;
+    }
+
+    private static void ApplySlotEditor(ProviderSlotSettings slot, System.Windows.Controls.CheckBox enabled,
+        System.Windows.Controls.TextBox label)
+    {
+        enabled.IsChecked = slot.Enabled;
+        label.Text = slot.Label;
+    }
+
+    private ProviderAccessSettings CaptureProviderSettings()
+    {
+        if (!_settingsReady)
+            return ProviderSettingKeys.FromStored(_restoredSettings);
+        return new ProviderAccessSettings(new[]
+        {
+            new ProviderSlotSettings(ProviderSlotIds.CodexPrimary, TextOrDefault(SlotCodexPrimaryLabel, "Codex 当前"),
+                SlotCodexPrimaryEnabled.IsChecked == true),
+            new ProviderSlotSettings(ProviderSlotIds.CodexSecondary, TextOrDefault(SlotCodexSecondaryLabel, "Codex 第二账户"),
+                SlotCodexSecondaryEnabled.IsChecked == true),
+            new ProviderSlotSettings(ProviderSlotIds.Cursor, TextOrDefault(SlotCursorLabel, "Cursor"),
+                SlotCursorEnabled.IsChecked == true),
+            new ProviderSlotSettings(ProviderSlotIds.Grok, TextOrDefault(SlotGrokLabel, "Grok"),
+                SlotGrokEnabled.IsChecked == true),
+            new ProviderSlotSettings(ProviderSlotIds.GrokBot, TextOrDefault(SlotGrokBotLabel, "Grok Bot"),
+                SlotGrokBotEnabled.IsChecked == true),
+        }, _compactLayout, true);
+    }
+
+    private static string TextOrDefault(System.Windows.Controls.TextBox box, string fallback) =>
+        string.IsNullOrWhiteSpace(box.Text) ? fallback : box.Text.Trim();
+
+    private async void OnCompactLayoutChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (!_settingsReady || CompactLayoutComboBox.SelectedItem is not ComboBoxItem { Tag: string tag }) return;
+        _compactLayout = tag;
+        _viewModel.CompactLayout = tag;
+        ApplyExpansionState(true);
+        await SaveSettingsSafelyAsync(CaptureWindowSettings());
+    }
+
+    private async void OnProviderSettingsChanged(object sender, RoutedEventArgs e)
+    {
+        if (!_settingsReady) return;
+        await SaveSettingsSafelyAsync(CaptureWindowSettings());
+    }
+
+    private void OnEngineProvidersUpdated()
+    {
+        if (_disposed || _exiting) return;
+        _ = Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(() =>
+        {
+            if (_disposed || _exiting) return;
+            _viewModel.ApplyProviders(_engine.GetProviderBoard());
+            RemeasureCompactRail();
+            PlaceSlotDetailPopup();
+        }));
+    }
+
+    private void OnRailSlotClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not System.Windows.FrameworkElement element || element.Tag is not string slotId) return;
+        _viewModel.SelectSlot(slotId, true);
+        _slotDetailOpen = true;
+        PlaceSlotDetailPopup();
+        if (_viewModel.SelectedSlotSuppliesAnalysis)
+            OnOpenPrimaryAnalysis(sender, e);
+    }
+
+    private void OnRailSlotMouseEnter(object sender, System.Windows.Input.MouseEventArgs e)
+    {
+        if (sender is not System.Windows.FrameworkElement element || element.Tag is not string slotId) return;
+        if (!_viewModel.SlotDetailPinned)
+            _viewModel.SelectSlot(slotId, false);
+        _slotDetailOpen = true;
+        PlaceSlotDetailPopup();
+    }
+
+    private void OnRailSlotFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        OnRailSlotMouseEnter(sender, new System.Windows.Input.MouseEventArgs(Mouse.PrimaryDevice, 0));
+    }
+
+    private void OnCloseSlotDetail(object sender, RoutedEventArgs e) => CloseSlotDetail();
+
+    private void OnOpenPrimaryAnalysis(object sender, RoutedEventArgs e)
+    {
+        _viewModel.SelectSlot(ProviderSlotIds.CodexPrimary, false);
+        CloseSlotDetail();
+        if (!_viewModel.IsExpanded)
+            OnToggleExpand(sender, e);
+    }
+
+    private void CloseSlotDetail()
+    {
+        _slotDetailOpen = false;
+        _viewModel.SlotDetailPinned = false;
+        if (SlotDetailPopup is not null) SlotDetailPopup.IsOpen = false;
+    }
+
+    private void PlaceSlotDetailPopup()
+    {
+        if (SlotDetailPopup is null || OpenPrimaryAnalysisButton is null) return;
+        if (_viewModel.IsExpanded || _isEdgeHidden || !_slotDetailOpen || _viewModel.SelectedSlot is null)
+        {
+            SlotDetailPopup.IsOpen = false;
+            return;
+        }
+
+        var target = _dockSide == EdgeDock.Top ? (System.Windows.UIElement)RailTopShell : RailVerticalShell;
+        if (target.Visibility != Visibility.Visible)
+            target = CompactVerticalShell.Visibility == Visibility.Visible ? CompactVerticalShell : CompactTopShell;
+        SlotDetailPopup.PlacementTarget = target;
+        SlotDetailPopup.Placement = _dockSide switch
+        {
+            EdgeDock.Left => PlacementMode.Right,
+            EdgeDock.Top => PlacementMode.Bottom,
+            _ => PlacementMode.Left,
+        };
+        OpenPrimaryAnalysisButton.Visibility = _viewModel.SelectedSlotSuppliesAnalysis
+            ? Visibility.Visible : Visibility.Collapsed;
+        SlotDetailPopup.IsOpen = true;
     }
 
     private async void OnStartupSettingClick(object sender, RoutedEventArgs e)
     {
         if (!_settingsReady) return;
+        if (IsolatedPreviewLaunch.CurrentProcessIsolated)
+        {
+            StartupCheckBox.IsChecked = false;
+            SettingsStatusText.Text = "隔离预览不会改写已安装 HUD 的开机启动。";
+            return;
+        }
         var enable = StartupCheckBox.IsChecked == true;
         StartupCheckBox.IsEnabled = false;
         try
@@ -639,6 +940,12 @@ public partial class MainWindow : Window, IDisposable
 
     private async void OnCreateShortcut(object sender, RoutedEventArgs e)
     {
+        if (IsolatedPreviewLaunch.CurrentProcessIsolated)
+        {
+            SettingsStatusText.Text = "隔离预览不会创建指向本包的桌面快捷方式。";
+            return;
+        }
+
         SettingsStatusText.Text = "正在创建桌面快捷方式…";
         try
         {
@@ -863,6 +1170,8 @@ public partial class MainWindow : Window, IDisposable
     private void OnWindowMouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
     {
         _revealTimer.Stop();
+        if (!_viewModel.SlotDetailPinned && SlotDetailPopup is { IsMouseOver: false })
+            CloseSlotDetail();
         ScheduleEdgeHide();
     }
 
@@ -879,6 +1188,7 @@ public partial class MainWindow : Window, IDisposable
             hidden = false;
         if (_isEdgeHidden == hidden) return;
         _isEdgeHidden = hidden;
+        if (hidden) CloseSlotDetail();
         PlaceCompact(GetWorkAreaLogical(), hidden);
     }
 
@@ -906,6 +1216,11 @@ public partial class MainWindow : Window, IDisposable
         });
         menu.Items.Add("创建 / 修复桌面快捷方式", null, (_, _) =>
         {
+            if (IsolatedPreviewLaunch.CurrentProcessIsolated)
+            {
+                _tray.ShowBalloonTip(1500, "Codex Usage HUD", "隔离预览不会创建桌面快捷方式", Forms.ToolTipIcon.Info);
+                return;
+            }
             try
             {
                 DesktopShortcutRegistration.CreateOrRepair();
@@ -938,6 +1253,11 @@ public partial class MainWindow : Window, IDisposable
 
     private async void OnToggleStartup(object? sender, EventArgs e)
     {
+        if (IsolatedPreviewLaunch.CurrentProcessIsolated)
+        {
+            _startupMenuItem.Checked = false;
+            return;
+        }
         var enable = !_startupMenuItem.Checked;
         try
         {
@@ -1054,7 +1374,18 @@ public partial class MainWindow : Window, IDisposable
         try
         {
             settings = await _engine.LoadSettingsAsync("always_on_top", "window_left", "window_top",
-                "dock_side", "auto_hide");
+                "dock_side", "auto_hide", ProviderSettingKeys.CompactLayout, ProviderSettingKeys.AccessNotice,
+                ProviderSettingKeys.Label(ProviderSlotIds.CodexPrimary),
+                ProviderSettingKeys.Enabled(ProviderSlotIds.CodexPrimary),
+                ProviderSettingKeys.Label(ProviderSlotIds.CodexSecondary),
+                ProviderSettingKeys.Enabled(ProviderSlotIds.CodexSecondary),
+                ProviderSettingKeys.CodexHome(ProviderSlotIds.CodexSecondary),
+                ProviderSettingKeys.Label(ProviderSlotIds.Cursor),
+                ProviderSettingKeys.Enabled(ProviderSlotIds.Cursor),
+                ProviderSettingKeys.Label(ProviderSlotIds.Grok),
+                ProviderSettingKeys.Enabled(ProviderSlotIds.Grok),
+                ProviderSettingKeys.Label(ProviderSlotIds.GrokBot),
+                ProviderSettingKeys.Enabled(ProviderSlotIds.GrokBot));
         }
         catch (Exception)
         {
@@ -1064,10 +1395,17 @@ public partial class MainWindow : Window, IDisposable
         _viewModel.IsExpanded = false;
         _isExpandedFullscreen = false;
         _expandedRestoreBounds = Rect.Empty;
+        _restoredSettings.Clear();
+        foreach (var pair in settings) _restoredSettings[pair.Key] = pair.Value;
         Topmost = settings.GetValueOrDefault("always_on_top") == "1";
         _dockSide = ParseDock(settings.GetValueOrDefault("dock_side"));
         if (!settings.ContainsKey("dock_side")) _dockSide = EdgeDock.Right;
         _autoHide = settings.GetValueOrDefault("auto_hide") != "0";
+        var layout = settings.GetValueOrDefault(ProviderSettingKeys.CompactLayout);
+        _compactLayout = string.Equals(layout, CompactLayoutModes.Card, StringComparison.OrdinalIgnoreCase)
+            ? CompactLayoutModes.Card
+            : CompactLayoutModes.Rail;
+        _viewModel.CompactLayout = _compactLayout;
         UpdateTopmostState();
         if (double.TryParse(settings.GetValueOrDefault("window_left"), NumberStyles.Float,
                 CultureInfo.InvariantCulture, out var left) &&
@@ -1156,6 +1494,10 @@ public partial class MainWindow : Window, IDisposable
 
     private Rect GetWorkAreaLogical()
     {
+        if (_workAreaOverride is { } overrideRect)
+            return overrideRect;
+        if (!IsLoaded && PresentationSource.FromVisual(this) is null)
+            return SystemParameters.WorkArea;
         var screen = new WindowInteropHelper(this).Handle is { } handle && handle != IntPtr.Zero
             ? Forms.Screen.FromHandle(handle)
             : Forms.Screen.PrimaryScreen ?? Forms.Screen.AllScreens.First();
@@ -1175,7 +1517,13 @@ public partial class MainWindow : Window, IDisposable
             ["always_on_top"] = Topmost ? "1" : "0",
             ["dock_side"] = DockText(_dockSide),
             ["auto_hide"] = _autoHide ? "1" : "0",
+            [ProviderSettingKeys.CompactLayout] = _compactLayout,
         };
+        foreach (var pair in ProviderSettingKeys.ToStored(CaptureProviderSettings()))
+        {
+            values[pair.Key] = pair.Value;
+            _restoredSettings[pair.Key] = pair.Value;
+        }
         var left = _dockSide == EdgeDock.Top && double.IsFinite(_compactAxis) ? _compactAxis : Left;
         var top = _dockSide is EdgeDock.Left or EdgeDock.Right && double.IsFinite(_compactAxis) ? _compactAxis : Top;
         if (IsSafePosition(left, top))
@@ -1209,6 +1557,7 @@ public partial class MainWindow : Window, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _engine.ProvidersUpdated -= OnEngineProvidersUpdated;
         Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
         _countdownTimer.Stop();
         _hideTimer.Stop();

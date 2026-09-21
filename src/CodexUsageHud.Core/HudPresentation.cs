@@ -322,10 +322,10 @@ public static class HudPresentation
         var quota = GetUsablePrimaryQuota(snapshot.Quota);
         var quotaText = quota is null
             ? "额度：不可用 · 官方重置时间：不可用 · 倒计时：不可用"
-            : $"额度：已用 {quota.UsedPercent:0}% · 剩余 {quota.RemainingPercent:0}% · " +
+            : $"额度：已用 {quota.UsedPercent:0}% · 剩余 {quota.RemainingPercent:0}%（{quota.Name}） · " +
               $"官方重置 {quota.ResetsAtUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss} · " +
               $"倒计时 {FormatCountdown(quota.ResetsAtUtc - snapshot.GeneratedAtUtc)}";
-        var running = snapshot.Sessions.Count(IsRunning);
+        var running = snapshot.MachineLocalRunningCount ?? snapshot.Sessions.Count(IsRunning);
         var runningCycleText = snapshot.RunningCycleTotal.HasValue
             ? $"{TokenFormat.Compact(snapshot.RunningCycleTotal.Value.Total)} raw tokens"
             : "不可用";
@@ -351,13 +351,38 @@ public static class HudPresentation
             thresholdText, rows, Environment.CurrentManagedThreadId, stopwatch.ElapsedMilliseconds);
     }
 
+    public static ProviderQuotaBoard BoardForSnapshot(HudSnapshot snapshot)
+    {
+        if (snapshot.Providers is { Slots.Count: > 0 } board) return board;
+        var defaults = ProviderAccessSettings.Default();
+        var now = snapshot.GeneratedAtUtc;
+        var windows = ProviderQuotaPresentation.FromCodex(snapshot.Quota);
+        var status = windows.Count == 0
+            ? QuotaSlotStatus.Unavailable
+            : ProviderQuotaPresentation.CodexStatus(snapshot.Quota, now);
+        var slots = defaults.Slots.Select(settings =>
+        {
+            if (settings.SlotId == ProviderSlotIds.CodexPrimary)
+            {
+                return new ProviderSlotSnapshot(settings.SlotId, ProviderIds.Codex, settings.Label, true, true,
+                    status, ProviderQuotaPresentation.StatusCaption(status), snapshot.Quota.ObservedAtUtc,
+                    "当前绑定的 Codex App 主目录", windows, ErrorCode: snapshot.Quota.ErrorCode);
+            }
+
+            return ProviderQuotaPresentation.Placeholder(settings, false,
+                settings.Enabled ? QuotaSlotStatus.Unavailable : QuotaSlotStatus.Disabled,
+                settings.Enabled ? "尚未刷新" : "未启用", "等待独立刷新");
+        }).ToArray();
+        return new ProviderQuotaBoard(slots, now);
+    }
+
     public static string BuildCollapsedText(HudSnapshot snapshot)
     {
         if (snapshot.AggregateMigrationPending) return "? 索引中（统计迁移） · raw token 统计暂不可用";
         var quota = GetUsablePrimaryQuota(snapshot.Quota);
-        var remaining = quota is null ? "不可用" : $"{quota.RemainingPercent:0}%";
+        var remaining = quota is null ? "不可用" : $"{quota.RemainingPercent:0}%（{quota.Name}）";
         var countdown = quota is null ? "额度不可用" : FormatCountdown(quota.ResetsAtUtc - snapshot.GeneratedAtUtc);
-        var running = snapshot.Sessions.Count(IsRunning);
+        var running = snapshot.MachineLocalRunningCount ?? snapshot.Sessions.Count(IsRunning);
         var cycle = snapshot.CycleTotal.HasValue
             ? $"本周期 {TokenFormat.Compact(snapshot.CycleTotal.Value.Total)} raw tokens"
             : "本周期不可用";

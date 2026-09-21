@@ -516,6 +516,11 @@ public sealed record AppServerReadResult(
     bool TierOverrideRequested,
     string? ErrorCode = null);
 
+public sealed record AppServerQuotaIdentityResult(
+    AppServerReadResult Quota,
+    BoundAccountIdentity? Identity,
+    AccountIdentityShape? IdentityShape = null);
+
 public sealed record HudSnapshot(
     QuotaObservation Quota,
     IReadOnlyList<SessionAggregate> Sessions,
@@ -526,7 +531,16 @@ public sealed record HudSnapshot(
     IReadOnlyList<string> RecentErrorCodes,
     IReadOnlyList<HudEvent>? RecentEvents = null,
     bool AggregateMigrationPending = false,
-    CanonicalTokenUsage? RunningCycleTotal = null);
+    CanonicalTokenUsage? RunningCycleTotal = null,
+    ProviderQuotaBoard? Providers = null,
+    string? PrimaryBindingNote = null,
+    int? MachineLocalSessionCount = null,
+    int? MachineLocalRunningCount = null,
+    int VerifiedAnalysisCount = 0,
+    int UnverifiedHistoryCount = 0,
+    int ForeignHistoryCount = 0,
+    AccountAnalysisState AccountAnalysisState = AccountAnalysisState.SchemaUnavailable,
+    IReadOnlyList<SessionAggregate>? UnverifiedSessions = null);
 
 public sealed record HudFrame(
     HudSnapshot Snapshot,

@@ -13,7 +13,10 @@ public static class AppServerProtocol
     public const string ApprovalPolicy = "never";
     public const string ReadOnlyFlag = "-s read-only -a never app-server";
 
-    public static ProcessStartInfo CreateStartInfo(string executable)
+    public const string AccountReadMethod = "account/read";
+
+    public static ProcessStartInfo CreateStartInfo(string executable,
+        IReadOnlyDictionary<string, string>? isolatedEnvironment = null)
     {
         var startInfo = new ProcessStartInfo
         {
@@ -23,6 +26,14 @@ public static class AppServerProtocol
             RedirectStandardError = true,
             CreateNoWindow = true,
         };
+        if (isolatedEnvironment is not null)
+        {
+            foreach (var pair in isolatedEnvironment)
+            {
+                if (string.IsNullOrWhiteSpace(pair.Key)) continue;
+                startInfo.Environment[pair.Key] = pair.Value;
+            }
+        }
         if (Path.GetExtension(executable).Equals(".cmd", StringComparison.OrdinalIgnoreCase) ||
             Path.GetExtension(executable).Equals(".bat", StringComparison.OrdinalIgnoreCase))
         {
@@ -254,10 +265,16 @@ public sealed class AppServerClient
         _cleanupTimeout = PositiveOrDefault(cleanupTimeout, TimeSpan.FromSeconds(2));
     }
 
-    public async Task<AppServerReadResult> ReadRateLimitsAsync(string executable, CancellationToken cancellationToken = default)
+    public async Task<AppServerReadResult> ReadRateLimitsAsync(string executable,
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, string>? isolatedEnvironment = null)
     {
         var observedAt = DateTimeOffset.UtcNow;
-        using var process = new Process { StartInfo = AppServerProtocol.CreateStartInfo(executable), EnableRaisingEvents = true };
+        using var process = new Process
+        {
+            StartInfo = AppServerProtocol.CreateStartInfo(executable, isolatedEnvironment),
+            EnableRaisingEvents = true,
+        };
         BoundedLineReader? stdout = null;
         BoundedLineReader? stderr = null;
         CancellationTokenSource? drainCancellation = null;
@@ -319,10 +336,149 @@ public sealed class AppServerClient
         catch (InvalidOperationException) { return false; }
     }
 
-    public async Task<IReadOnlyDictionary<string, string?>?> ReadModelCatalogAsync(
-        string executable, CancellationToken cancellationToken = default)
+    public async Task<AppServerQuotaIdentityResult> ReadQuotaAndIdentityAsync(string executable,
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, string>? isolatedEnvironment = null)
     {
-        using var process = new Process { StartInfo = AppServerProtocol.CreateStartInfo(executable) };
+        var observedAt = DateTimeOffset.UtcNow;
+        using var process = new Process
+        {
+            StartInfo = AppServerProtocol.CreateStartInfo(executable, isolatedEnvironment),
+            EnableRaisingEvents = true,
+        };
+        BoundedLineReader? stdout = null;
+        BoundedLineReader? stderr = null;
+        CancellationTokenSource? drainCancellation = null;
+        Task? stderrDrain = null;
+        try
+        {
+            if (!process.Start())
+                return new AppServerQuotaIdentityResult(Unavailable("app_server_start"), null);
+
+            stdout = new BoundedLineReader(process.StandardOutput);
+            stderr = new BoundedLineReader(process.StandardError);
+            drainCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            stderrDrain = DrainAsync(stderr, drainCancellation.Token);
+            using var startupTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            startupTimeout.CancelAfter(_startupTimeout);
+            await WriteRequestAsync(process, 1, AppServerProtocol.InitializeMethod,
+                new { clientInfo = new { name = "codex-usage-hud", version = _hudVersion } }, startupTimeout.Token);
+            var initialize = await ReadResponseAsync(stdout, 1, startupTimeout.Token);
+            if (initialize is null)
+            {
+                return new AppServerQuotaIdentityResult(
+                    Unavailable(HasExited(process) ? "app_server_initialize_exit" : "app_server_initialize_eof"),
+                    null);
+            }
+
+            using var quotaTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            quotaTimeout.CancelAfter(_requestTimeout);
+            await WriteRequestAsync(process, 2, AppServerProtocol.RateLimitsMethod, new { }, quotaTimeout.Token);
+            var quotaResponse = await ReadResponseAsync(stdout, 2, quotaTimeout.Token);
+            if (quotaResponse is null)
+            {
+                return new AppServerQuotaIdentityResult(
+                    Unavailable(HasExited(process) ? "app_server_rate_limits_exit" : "app_server_rate_limits_eof"),
+                    null);
+            }
+
+            var observation = QuotaJsonParser.Parse(quotaResponse, observedAt);
+            var quota = new AppServerReadResult(observation, AppServerProtocol.ReadOnlyFlag, false,
+                observation.ErrorCode);
+
+            BoundAccountIdentity? identity = null;
+            try
+            {
+                using var identityTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                identityTimeout.CancelAfter(_requestTimeout);
+                await WriteRequestAsync(process, 3, AppServerProtocol.AccountReadMethod, new { },
+                    identityTimeout.Token);
+                var identityResponse = await ReadResponseAsync(stdout, 3, identityTimeout.Token);
+                identity = AccountIdentityParser.Parse(identityResponse, out var identityShape);
+                return new AppServerQuotaIdentityResult(quota, identity, identityShape);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                identity = null;
+            }
+
+            return new AppServerQuotaIdentityResult(quota, identity);
+        }
+        catch (OperationCanceledException)
+        {
+            return new AppServerQuotaIdentityResult(
+                Unavailable(cancellationToken.IsCancellationRequested ? "app_server_cancelled" : "app_server_timeout"),
+                null);
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return new AppServerQuotaIdentityResult(Unavailable("app_server_launch"), null);
+        }
+        catch (IOException)
+        {
+            return new AppServerQuotaIdentityResult(
+                Unavailable(HasExited(process) ? "app_server_process_exit" : "app_server_io"), null);
+        }
+        finally
+        {
+            await CleanupProcessAsync(process, drainCancellation, stderrDrain, stdout, stderr, _cleanupTimeout);
+        }
+    }
+
+    public async Task<string?> ReadAccountIdentityAsync(string executable,
+        CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, string>? isolatedEnvironment = null)
+    {
+        using var process = new Process
+        {
+            StartInfo = AppServerProtocol.CreateStartInfo(executable, isolatedEnvironment),
+        };
+        BoundedLineReader? stdout = null;
+        BoundedLineReader? stderr = null;
+        CancellationTokenSource? drainCancellation = null;
+        Task? stderrDrain = null;
+        try
+        {
+            if (!process.Start()) return null;
+            stdout = new BoundedLineReader(process.StandardOutput);
+            stderr = new BoundedLineReader(process.StandardError);
+            drainCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            stderrDrain = DrainAsync(stderr, drainCancellation.Token);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(_requestTimeout);
+            await WriteRequestAsync(process, 1, AppServerProtocol.InitializeMethod,
+                new { clientInfo = new { name = "codex-usage-hud", version = _hudVersion } }, timeout.Token);
+            if (await ReadResponseAsync(stdout, 1, timeout.Token) is null) return null;
+            await WriteRequestAsync(process, 2, AppServerProtocol.AccountReadMethod, new { }, timeout.Token);
+            var response = await ReadResponseAsync(stdout, 2, timeout.Token);
+            return AccountIdentityParser.Parse(response)?.Hash;
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            return null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        finally
+        {
+            await CleanupProcessAsync(process, drainCancellation, stderrDrain, stdout, stderr, _cleanupTimeout);
+        }
+    }
+
+    public async Task<IReadOnlyDictionary<string, string?>?> ReadModelCatalogAsync(
+        string executable, CancellationToken cancellationToken = default,
+        IReadOnlyDictionary<string, string>? isolatedEnvironment = null)
+    {
+        using var process = new Process
+        {
+            StartInfo = AppServerProtocol.CreateStartInfo(executable, isolatedEnvironment),
+        };
         BoundedLineReader? stdout = null;
         BoundedLineReader? stderr = null;
         CancellationTokenSource? drainCancellation = null;
@@ -734,6 +890,7 @@ public static class QuotaJsonParser
 public sealed class QuotaStateMachine
 {
     private QuotaObservation? _last;
+    private string? _identityHash;
     private readonly UsageDatabase? _database;
 
     public QuotaStateMachine(UsageDatabase? database = null)
@@ -742,8 +899,19 @@ public sealed class QuotaStateMachine
         _last = database?.LoadLatestQuota(markStale: false);
     }
 
-    public QuotaObservation Observe(QuotaObservation current)
+    public void InvalidateAssociation()
     {
+        _last = null;
+        _identityHash = null;
+    }
+
+    public QuotaObservation Observe(QuotaObservation current, string? identityHash = null)
+    {
+        if (!string.Equals(_identityHash, identityHash, StringComparison.Ordinal))
+        {
+            _last = null;
+            _identityHash = identityHash;
+        }
         if (current.Primary is null)
         {
             if (string.Equals(current.ErrorCode, "quota_window_invalid", StringComparison.Ordinal)) return current;

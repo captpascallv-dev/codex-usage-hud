@@ -26,6 +26,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _quotaSourceText = "官方额度不可用";
     private string _quotaStateText = "不可用";
     private string _quotaStateDetailText = "官方额度不可用";
+    private string _remainingWindowText = "剩余额度";
     private string _visibleSessionCountText = "0 个会话";
     private string _primarySessionCountText = "0";
     private string _internalTaskCountText = "0";
@@ -40,8 +41,26 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private IReadOnlyList<SessionDisplayRow> _rows = Array.Empty<SessionDisplayRow>();
     private readonly Dictionary<(string Filter, string Sort), IReadOnlyList<SessionDisplayRow>> _rowViews = new();
     private readonly HashSet<string> _expandedParents = new(StringComparer.Ordinal);
+    private IReadOnlyList<ProviderSlotSnapshot> _slots = Array.Empty<ProviderSlotSnapshot>();
+    private ProviderSlotSnapshot? _selectedSlot;
+    private string _slotDetailTitle = "额度详情";
+    private string _slotDetailPercent = "—";
+    private string _slotDetailBody = "尚未选择账户";
+    private string _slotDetailStatus = "";
+    private string _slotDetailSource = "";
+    private string _slotDetailObserved = "";
+    private string _slotDetailAccountHint = "";
+    private IReadOnlyList<SlotWindowRow> _slotDetailWindows = Array.Empty<SlotWindowRow>();
+    private string _bindingNote = "仅当前绑定的 Codex App 槽提供会话分析。主目录已由所有者确认。";
+    private bool _slotDetailPinned;
+    private bool _topBarNarrowLayout;
+    private string _compactLayout = CompactLayoutModes.Rail;
     private string _filter = "recent";
     private string _sort = "activity";
+    private string _analysisEmptyTitle = "这里暂时没有会话";
+    private string _analysisEmptyDetail = "可切换筛选，或等待本地记录更新";
+    private bool _analysisEmptyVisible;
+    private string _analysisRunningCountText = "0";
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -64,12 +83,17 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string QuotaSourceText { get => _quotaSourceText; private set => SetField(ref _quotaSourceText, value); }
     public string QuotaStateText { get => _quotaStateText; private set => SetField(ref _quotaStateText, value); }
     public string QuotaStateDetailText { get => _quotaStateDetailText; private set => SetField(ref _quotaStateDetailText, value); }
+    public string RemainingWindowText { get => _remainingWindowText; private set => SetField(ref _remainingWindowText, value); }
     public string VisibleSessionCountText { get => _visibleSessionCountText; private set => SetField(ref _visibleSessionCountText, value); }
     public string PrimarySessionCountText { get => _primarySessionCountText; private set => SetField(ref _primarySessionCountText, value); }
     public string InternalTaskCountText { get => _internalTaskCountText; private set => SetField(ref _internalTaskCountText, value); }
     public string AppSessionCountText { get => _appSessionCountText; private set => SetField(ref _appSessionCountText, value); }
     public string CliSessionCountText { get => _cliSessionCountText; private set => SetField(ref _cliSessionCountText, value); }
     public string OrphanTaskCountText { get => _orphanTaskCountText; private set => SetField(ref _orphanTaskCountText, value); }
+    public string AnalysisEmptyTitle { get => _analysisEmptyTitle; private set => SetField(ref _analysisEmptyTitle, value); }
+    public string AnalysisEmptyDetail { get => _analysisEmptyDetail; private set => SetField(ref _analysisEmptyDetail, value); }
+    public bool AnalysisEmptyVisible { get => _analysisEmptyVisible; private set => SetField(ref _analysisEmptyVisible, value); }
+    public string AnalysisRunningCountText { get => _analysisRunningCountText; private set => SetField(ref _analysisRunningCountText, value); }
     public double QuotaRingValue { get => _quotaRingValue; private set => SetField(ref _quotaRingValue, value); }
     public bool IsRefreshing { get => _isRefreshing; set => SetField(ref _isRefreshing, value); }
 
@@ -84,24 +108,64 @@ public sealed class MainViewModel : INotifyPropertyChanged
         get => _rows;
         private set => SetField(ref _rows, value);
     }
+    public IReadOnlyList<ProviderSlotSnapshot> Slots
+    {
+        get => _slots;
+        private set => SetField(ref _slots, value);
+    }
+    public ProviderSlotSnapshot? SelectedSlot => _selectedSlot;
+    public string? SelectedSlotId => _selectedSlot?.SlotId;
+    public string SlotDetailTitle { get => _slotDetailTitle; private set => SetField(ref _slotDetailTitle, value); }
+    public string SlotDetailPercent { get => _slotDetailPercent; private set => SetField(ref _slotDetailPercent, value); }
+    public string SlotDetailBody { get => _slotDetailBody; private set => SetField(ref _slotDetailBody, value); }
+    public string SlotDetailStatus { get => _slotDetailStatus; private set => SetField(ref _slotDetailStatus, value); }
+    public string SlotDetailSource { get => _slotDetailSource; private set => SetField(ref _slotDetailSource, value); }
+    public string SlotDetailObserved { get => _slotDetailObserved; private set => SetField(ref _slotDetailObserved, value); }
+    public string SlotDetailAccountHint { get => _slotDetailAccountHint; private set => SetField(ref _slotDetailAccountHint, value); }
+    public bool SlotDetailAccountHintVisible => !string.IsNullOrWhiteSpace(SlotDetailAccountHint);
+    public IReadOnlyList<SlotWindowRow> SlotDetailWindows
+    {
+        get => _slotDetailWindows;
+        private set => SetField(ref _slotDetailWindows, value);
+    }
+    public string BindingNote { get => _bindingNote; private set => SetField(ref _bindingNote, value); }
+    public bool SlotDetailPinned { get => _slotDetailPinned; set => SetField(ref _slotDetailPinned, value); }
+    public bool TopBarNarrowLayout
+    {
+        get => _topBarNarrowLayout;
+        set => SetField(ref _topBarNarrowLayout, value);
+    }
+    public string CompactLayout
+    {
+        get => _compactLayout;
+        set => SetField(ref _compactLayout, value);
+    }
+    public bool SelectedSlotSuppliesAnalysis => _selectedSlot?.SuppliesLocalAnalysis == true;
     public HudSnapshot? Snapshot => _snapshot;
 
     public void Apply(HudFrame frame)
     {
         _snapshot = frame.Snapshot;
-        _frameRows = frame.Rows;
-        _expandedParents.IntersectWith(_frameRows.Where(row => row.HasChildren).Select(row => row.ThreadId));
-        _rowViews.Clear();
         CollapsedText = frame.CollapsedText;
         OverviewText = frame.OverviewText;
         FreshnessText = frame.FreshnessText;
         EventsText = frame.EventsText;
         ThresholdText = frame.ThresholdText;
         UpdateSummary(frame.Snapshot, frame.Snapshot.GeneratedAtUtc);
-        RefreshRows();
+        UpdateSlots(frame.Snapshot);
+        RebuildAnalysisRows();
     }
 
     public void Apply(HudSnapshot snapshot) => Apply(HudPresentation.BuildFrame(snapshot));
+
+    public void ApplyProviders(ProviderQuotaBoard board)
+    {
+        if (_snapshot is null) return;
+        var now = DateTimeOffset.UtcNow;
+        _snapshot = _snapshot with { Providers = board, GeneratedAtUtc = now };
+        UpdateSlots(_snapshot);
+        UpdateSummary(_snapshot, now);
+    }
 
     public void Tick(DateTimeOffset nowUtc)
     {
@@ -111,7 +175,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var quota = HudPresentation.GetUsablePrimaryQuota(timed.Quota);
         var firstLine = quota is null
             ? "额度：不可用 · 官方重置时间：不可用 · 倒计时：不可用"
-            : $"额度：已用 {quota.UsedPercent:0}% · 剩余 {quota.RemainingPercent:0}% · " +
+            : $"额度：已用 {quota.UsedPercent:0}% · 剩余 {quota.RemainingPercent:0}%（{quota.Name}） · " +
               $"官方重置 {quota.ResetsAtUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss} · " +
               $"倒计时 {HudPresentation.FormatCountdown(quota.ResetsAtUtc - nowUtc)}";
         var separator = OverviewText.IndexOf('\n');
@@ -153,10 +217,26 @@ public sealed class MainViewModel : INotifyPropertyChanged
             CollapsedText, OverviewText, FreshnessText, EventsText, ThresholdText, RemainingText,
             UsedText, CountdownText, CountdownCompactText, ResetTimeText, RunningCountText,
             RunningCycleTotalText, RunningCycleCompactText, CycleTotalText, CycleCompactText, LastUpdatedText, QuotaSourceText,
-            QuotaStateText, QuotaStateDetailText, VisibleSessionCountText,
+            QuotaStateText, QuotaStateDetailText, RemainingWindowText, VisibleSessionCountText,
             PrimarySessionCountText, InternalTaskCountText, AppSessionCountText,
-            CliSessionCountText, OrphanTaskCountText,
+            CliSessionCountText, OrphanTaskCountText, SlotDetailTitle, SlotDetailPercent, SlotDetailBody, BindingNote,
+            SlotDetailStatus, SlotDetailSource, SlotDetailObserved, SlotDetailAccountHint,
+            AnalysisEmptyTitle, AnalysisEmptyDetail,
+            AnalysisRunningCountText,
         };
+        foreach (var windowRow in SlotDetailWindows)
+        {
+            values.Add(windowRow.Name);
+            values.Add(windowRow.RemainingText);
+            values.Add(windowRow.ResetText);
+        }
+        foreach (var slot in Slots)
+        {
+            values.Add(slot.Label);
+            values.Add(slot.GlanceText);
+            values.Add(slot.StatusText);
+            values.Add(slot.SourceDescription);
+        }
         foreach (var row in Rows)
         {
             values.AddRange(new[] { row.Name, row.ShortId, row.RoleNickname, row.Project, row.Model,
@@ -174,12 +254,31 @@ public sealed class MainViewModel : INotifyPropertyChanged
         return values;
     }
 
+    private void RebuildAnalysisRows()
+    {
+        if (_snapshot is null)
+        {
+            _frameRows = Array.Empty<SessionDisplayRow>();
+            _rowViews.Clear();
+            RefreshRows();
+            return;
+        }
+
+        var sessions = _snapshot.Sessions;
+        _frameRows = HudPresentation.BuildRows(_snapshot with { Sessions = sessions });
+        _expandedParents.IntersectWith(_frameRows.Where(row => row.HasChildren).Select(row => row.ThreadId));
+        _rowViews.Clear();
+        RefreshRows();
+    }
+
     private void RefreshRows()
     {
         if (_snapshot is null)
         {
             Rows = Array.Empty<SessionDisplayRow>();
             VisibleSessionCountText = "0 个会话";
+            AnalysisRunningCountText = "0";
+            UpdateAnalysisEmptyState();
             return;
         }
         var viewKey = (_filter, _sort);
@@ -214,6 +313,53 @@ public sealed class MainViewModel : INotifyPropertyChanged
         AppSessionCountText = _frameRows.Count(row => row.Surface == SessionSurface.App).ToString(CultureInfo.InvariantCulture);
         CliSessionCountText = _frameRows.Count(row => row.Surface == SessionSurface.Cli).ToString(CultureInfo.InvariantCulture);
         OrphanTaskCountText = _frameRows.Count(row => row.IsOrphanInternalTask).ToString(CultureInfo.InvariantCulture);
+        AnalysisRunningCountText = _frameRows.Count(row =>
+                (!row.IsInternalTask || row.IsOrphanInternalTask) && row.EffectiveIsRunning)
+            .ToString(CultureInfo.InvariantCulture);
+        UpdateAnalysisEmptyState();
+    }
+
+    private void UpdateAnalysisEmptyState()
+    {
+        var snapshot = _snapshot;
+        if (snapshot is null)
+        {
+            AnalysisEmptyVisible = true;
+            AnalysisEmptyTitle = "这里暂时没有会话";
+            AnalysisEmptyDetail = "可切换筛选，或等待本地记录更新";
+            return;
+        }
+
+        var rowsEmpty = Rows.Count == 0;
+        AnalysisEmptyVisible = rowsEmpty;
+        if (!rowsEmpty) return;
+
+        var localCount = snapshot.MachineLocalSessionCount ?? 0;
+        var foreignCount = snapshot.ForeignHistoryCount;
+        if (snapshot.AccountAnalysisState == AccountAnalysisState.IdentityMismatch)
+        {
+            AnalysisEmptyTitle = "当前账户分析未改绑";
+            AnalysisEmptyDetail = snapshot.PrimaryBindingNote ??
+                                  "当前 App 身份已变化，未把旧主目录历史改绑到新身份。本机记录仍保留。";
+            return;
+        }
+
+        if (localCount == 0)
+        {
+            AnalysisEmptyTitle = "这里暂时没有会话";
+            AnalysisEmptyDetail = "本机索引里没有会话记录。";
+            return;
+        }
+
+        if (snapshot.Sessions.Count == 0 && foreignCount > 0)
+        {
+            AnalysisEmptyTitle = "已排除确认他户记录";
+            AnalysisEmptyDetail = $"本机另有 {foreignCount} 条确认他户会话未列入当前主目录分析。第二账户与其他服务不进入此列表。";
+            return;
+        }
+
+        AnalysisEmptyTitle = "这里暂时没有会话";
+        AnalysisEmptyDetail = "可切换筛选，或等待本地记录更新";
     }
 
     private IEnumerable<SessionDisplayRow> SortRows(IEnumerable<SessionDisplayRow> rows) => _sort == "activity"
@@ -243,6 +389,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         if (quota is null)
         {
             RemainingText = "—";
+            RemainingWindowText = "剩余额度";
             UsedText = "不可用";
             CountdownText = "不可用";
             CountdownCompactText = "不可用";
@@ -253,6 +400,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             var remaining = quota.ResetsAtUtc - nowUtc;
             RemainingText = $"{quota.RemainingPercent:0}%";
+            RemainingWindowText = string.IsNullOrWhiteSpace(quota.Name) ? "剩余额度" : quota.Name;
             UsedText = $"{quota.UsedPercent:0}%";
             CountdownText = HudPresentation.FormatCountdown(remaining);
             CountdownCompactText = FormatCompactCountdown(remaining);
@@ -260,7 +408,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
             QuotaRingValue = quota.RemainingPercent;
         }
 
-        RunningCountText = snapshot.Sessions.Count(HudPresentation.IsRunning).ToString();
+        RunningCountText = (snapshot.MachineLocalRunningCount ?? snapshot.Sessions.Count(HudPresentation.IsRunning))
+            .ToString();
         RunningCycleTotalText = snapshot.RunningCycleTotal.HasValue
             ? $"本周期 {TokenFormat.Compact(snapshot.RunningCycleTotal.Value.Total)} raw tokens"
             : "本周期不可用";
@@ -291,6 +440,136 @@ public sealed class MainViewModel : INotifyPropertyChanged
             _ => "不可用",
         };
         QuotaStateDetailText = threshold.Text;
+        BindingNote = snapshot.PrimaryBindingNote ?? "仅当前绑定的 Codex App 槽提供会话分析。主目录已由所有者确认。";
+    }
+
+    public void SelectSlot(string? slotId, bool pin)
+    {
+        if (string.IsNullOrWhiteSpace(slotId) || _snapshot is null)
+        {
+            _selectedSlot = null;
+            ClearSlotDetail("尚未选择账户");
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedSlot)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedSlotId)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedSlotSuppliesAnalysis)));
+            return;
+        }
+
+        var board = HudPresentation.BoardForSnapshot(_snapshot);
+        var slot = board.Find(slotId);
+        _selectedSlot = slot;
+        if (pin) SlotDetailPinned = true;
+        if (slot is null)
+        {
+            ClearSlotDetail("未找到该槽");
+        }
+        else
+        {
+            SlotDetailTitle = slot.ShortAlias;
+            SlotDetailPercent = slot.GlancePercentText;
+            SlotDetailStatus = ProviderQuotaPresentation.StatusCaption(slot.Status);
+            SlotDetailSource = "来源：" + slot.SourceDescription;
+            SlotDetailObserved = "观测：" + ProviderQuotaPresentation.FormatAge(slot.ObservationAge(_snapshot.GeneratedAtUtc));
+            SlotDetailAccountHint = SlotAccountHint(slot);
+            SlotDetailWindows = BuildWindowRows(slot, _snapshot.GeneratedAtUtc);
+            SlotDetailBody = BuildSlotDetail(slot, _snapshot.GeneratedAtUtc);
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SlotDetailAccountHintVisible)));
+        }
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedSlot)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedSlotId)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedSlotSuppliesAnalysis)));
+    }
+
+    private void ClearSlotDetail(string body)
+    {
+        SlotDetailTitle = "额度详情";
+        SlotDetailPercent = "—";
+        SlotDetailStatus = "";
+        SlotDetailSource = "";
+        SlotDetailObserved = "";
+        SlotDetailAccountHint = "";
+        SlotDetailWindows = Array.Empty<SlotWindowRow>();
+        SlotDetailBody = body;
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SlotDetailAccountHintVisible)));
+    }
+
+    public bool ClearSlotSelectionIfUnpinned()
+    {
+        if (SlotDetailPinned) return false;
+        SelectSlot(null, false);
+        return true;
+    }
+
+    private void UpdateSlots(HudSnapshot snapshot)
+    {
+        var board = HudPresentation.BoardForSnapshot(snapshot);
+        Slots = board.Slots;
+        if (_selectedSlot is not null)
+            SelectSlot(_selectedSlot.SlotId, SlotDetailPinned);
+    }
+
+    private static string BuildSlotDetail(ProviderSlotSnapshot slot, DateTimeOffset nowUtc)
+    {
+        var lines = new List<string>
+        {
+            slot.StatusText,
+            "来源：" + slot.SourceDescription,
+            "观测：" + ProviderQuotaPresentation.FormatAge(slot.ObservationAge(nowUtc)),
+        };
+        var hint = SlotAccountHint(slot);
+        if (!string.IsNullOrWhiteSpace(hint))
+            lines.Add(hint);
+        if (!slot.SuppliesLocalAnalysis)
+            lines.Add("此槽不提供会话或续接分析。");
+        if (slot.Windows.Count == 0)
+            lines.Add(slot.Status == QuotaSlotStatus.NoAllowance
+                ? "没有计入计划的额度，不显示 100% 可用。"
+                : "没有可展示的额度窗口。");
+        else
+            lines.AddRange(slot.Windows.Select(window => ProviderQuotaPresentation.FormatWindowLine(window, nowUtc)));
+        if (slot.ForeignHistoryCount > 0 || slot.UnverifiedHistoryCount > 0)
+        {
+            lines.Add($"确认他户 {slot.ForeignHistoryCount} 已排除；行级 account_id 未匹配 {slot.UnverifiedHistoryCount}（目录绑定不是机器核验）");
+        }
+
+        return string.Join('\n', lines);
+    }
+
+    private static string SlotAccountHint(ProviderSlotSnapshot slot)
+    {
+        if (slot.Status == QuotaSlotStatus.IdentityCollision)
+            return "与另一槽为同一账户";
+        var hasIdentity = !string.IsNullOrWhiteSpace(slot.OpaqueIdentityHash);
+        if (slot.SuppliesLocalAnalysis)
+            return hasIdentity ? "当前绑定账户" : "主目录已确认绑定";
+        return "";
+    }
+
+    private static IReadOnlyList<SlotWindowRow> BuildWindowRows(ProviderSlotSnapshot slot, DateTimeOffset nowUtc)
+    {
+        if (slot.Windows.Count == 0)
+        {
+            var empty = slot.Status == QuotaSlotStatus.NoAllowance
+                ? "没有计入计划的额度"
+                : "没有可展示的额度窗口";
+            return new[] { new SlotWindowRow(empty, "—", slot.StatusText, 0, false, true) };
+        }
+
+        var live = slot.Status == QuotaSlotStatus.Live;
+        return slot.Windows.Select(window =>
+        {
+            var reset = ProviderQuotaPresentation.FormatReset(window, nowUtc);
+            if (window.ResetsAtUtc is { } resetAt && resetAt <= nowUtc)
+                return new SlotWindowRow(window.DisplayName, "已到期", reset, 0, false, true);
+            if (!window.HasUsablePercent)
+                return new SlotWindowRow(window.DisplayName, "—", reset, 0, false, true);
+
+            var remaining = window.RemainingPercent!.Value;
+            var remainingText = remaining.ToString("0", CultureInfo.InvariantCulture) + "%";
+            if (!live)
+                remainingText += " · 陈旧";
+            return new SlotWindowRow(window.DisplayName + " · 剩余", remainingText, reset, remaining, live, !live);
+        }).ToArray();
     }
 
     private static string FormatCompactCountdown(TimeSpan remaining)
@@ -320,6 +599,27 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
 // Display formatting only: precise counts remain available in the inspector
 // and tooltips. All arithmetic continues to use the original token values.
+public sealed record SlotWindowRow(
+    string Name,
+    string RemainingText,
+    string ResetText,
+    double ProgressValue,
+    bool HasLiveProgress,
+    bool HasDashedTrack);
+
+public sealed class SlotSelectedConverter : System.Windows.Data.IMultiValueConverter
+{
+    public object Convert(object[] values, Type targetType, object parameter, CultureInfo culture)
+    {
+        if (values.Length < 2 || values[0] is not string slotId || values[1] is not string selected)
+            return false;
+        return string.Equals(slotId, selected, StringComparison.Ordinal);
+    }
+
+    public object[] ConvertBack(object value, Type[] targetTypes, object parameter, CultureInfo culture) =>
+        throw new NotSupportedException();
+}
+
 public sealed class CompactTokenConverter : System.Windows.Data.IValueConverter
 {
     public object Convert(object value, Type targetType, object parameter, CultureInfo culture) =>

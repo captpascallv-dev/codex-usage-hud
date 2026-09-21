@@ -6,14 +6,14 @@
              Exit="OnExit"
              ShutdownMode="OnExplicitShutdown">
     <Application.Resources>
-        <Color x:Key="HudCanvasColor">#FFFBFCFA</Color>
+        <Color x:Key="HudCanvasColor">#FFF6F8F2</Color>
         <Color x:Key="HudPanelColor">#FFFFFFFF</Color>
-        <Color x:Key="HudPanelRaisedColor">#FFF2F5F2</Color>
-        <Color x:Key="HudLineColor">#FFDCE4DE</Color>
-        <Color x:Key="HudTextColor">#FF202824</Color>
-        <Color x:Key="HudMutedColor">#FF53625A</Color>
-        <Color x:Key="HudSubtleColor">#FF65746B</Color>
-        <Color x:Key="HudMintColor">#FF146C4B</Color>
+        <Color x:Key="HudPanelRaisedColor">#FFF6F8F2</Color>
+        <Color x:Key="HudLineColor">#FFE4E8DC</Color>
+        <Color x:Key="HudTextColor">#FF1F2D22</Color>
+        <Color x:Key="HudMutedColor">#FF4C5A49</Color>
+        <Color x:Key="HudSubtleColor">#FF64705B</Color>
+        <Color x:Key="HudMintColor">#FF2E6B46</Color>
 
         <SolidColorBrush x:Key="HudBackground" Color="{StaticResource HudCanvasColor}" />
         <SolidColorBrush x:Key="HudPanel" Color="{StaticResource HudPanelColor}" />
@@ -23,11 +23,15 @@
         <SolidColorBrush x:Key="HudMuted" Color="{StaticResource HudMutedColor}" />
         <SolidColorBrush x:Key="HudSubtle" Color="{StaticResource HudSubtleColor}" />
         <SolidColorBrush x:Key="HudMint" Color="{StaticResource HudMintColor}" />
-        <SolidColorBrush x:Key="HudHover" Color="#FFF0F4F0" />
-        <SolidColorBrush x:Key="HudSelected" Color="#FFEAF3ED" />
-        <SolidColorBrush x:Key="HudSelectedStrong" Color="#FFD6E8DC" />
-        <SolidColorBrush x:Key="HudOverview" Color="#FFF0F6F1" />
-        <SolidColorBrush x:Key="HudProgressTrack" Color="#FFDCE7DF" />
+        <SolidColorBrush x:Key="HudHover" Color="#FFF0F3EA" />
+        <SolidColorBrush x:Key="HudSelected" Color="#FFE7EEDF" />
+        <SolidColorBrush x:Key="HudSelectedStrong" Color="#FFE2E9D8" />
+        <SolidColorBrush x:Key="HudOverview" Color="#FFEAF1E4" />
+        <SolidColorBrush x:Key="HudProgressTrack" Color="#FFE9EDE1" />
+        <SolidColorBrush x:Key="HudMarkCodexPrimary" Color="#FF2E6B46" />
+        <SolidColorBrush x:Key="HudMarkCodexSecondary" Color="#FF4C7A5A" />
+        <SolidColorBrush x:Key="HudMarkCursor" Color="#FF46536A" />
+        <SolidColorBrush x:Key="HudMarkGrok" Color="#FF26282D" />
         <FontFamily x:Key="HudFont">Microsoft YaHei UI</FontFamily>
         <FontFamily x:Key="HudIconFont">Segoe MDL2 Assets</FontFamily>
         <system:Double x:Key="HudBodyFontSize">14</system:Double>

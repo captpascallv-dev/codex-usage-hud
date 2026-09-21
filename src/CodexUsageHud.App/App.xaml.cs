@@ -16,9 +16,25 @@ public partial class App : System.Windows.Application
 
     private async void OnStartup(object sender, StartupEventArgs e)
     {
-        _ = SetCurrentProcessExplicitAppUserModelID("CodexUsageHud.App");
-        try { StartupRegistration.RepairIfEnabled(); }
-        catch { }
+        var isolated = IsolatedPreviewLaunch.IsIsolated(e.Args);
+        IsolatedPreviewLaunch.MarkCurrentProcess(isolated);
+        _ = SetCurrentProcessExplicitAppUserModelID(
+            isolated ? IsolatedPreviewLaunch.AppUserModelId : "CodexUsageHud.App");
+        if (!IsolatedPreviewLaunch.PreviewPackageAllowsStart(e.Args))
+        {
+            System.Windows.MessageBox.Show(
+                "隔离预览必须同时指定 --data-dir 与 --codex-home，避免写入已安装 HUD 的数据或启动项。",
+                "Codex Usage HUD 隔离预览", MessageBoxButton.OK, MessageBoxImage.Information);
+            Environment.ExitCode = 6;
+            Shutdown(6);
+            return;
+        }
+
+        if (!isolated)
+        {
+            try { StartupRegistration.RepairIfEnabled(); }
+            catch { }
+        }
         StartupRuntime runtime;
         try
         {
@@ -122,7 +138,7 @@ public partial class App : System.Windows.Application
         try
         {
             activationServer = new SingleInstanceActivationServer(localData, QueueActivationAsync);
-            var codexHome = CodexHomeResolver.Resolve();
+            var codexHome = IsolatedPreviewLaunch.ResolveCodexHome(arguments);
             var engine = new UsageEngine(codexHome, Path.Combine(localData, "usage.db"),
                 Path.Combine(localData, "hud.log"));
             return new StartupRuntime(outcome, gateCode, localData, gate, engine, activationServer);

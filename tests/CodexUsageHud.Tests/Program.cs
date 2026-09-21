@@ -38,6 +38,8 @@ internal static class Program
             return RunAppServerHelper(args.Skip(1).ToArray());
         if (args.Length > 0 && args[0].Equals("--ui-capture", StringComparison.Ordinal))
             return RunUiCapture(args.Skip(1).ToArray());
+        if (args.Length > 0 && args[0].Equals("--ui-capture-07", StringComparison.Ordinal))
+            return RunUiCapture07(args.Skip(1).ToArray());
         if (args.Length > 0 && args[0].Equals("--database-restart-check", StringComparison.Ordinal))
             return RunDatabaseRestartCheck(args.Skip(1).ToArray());
         if (args.Length > 0 && args[0].Equals("--database-readonly-status", StringComparison.Ordinal))
@@ -50,6 +52,20 @@ internal static class Program
             return RunSetDriftAssessment(args.Skip(1).ToArray());
         if (args.Length > 0 && args[0].Equals("--source-hierarchy-check", StringComparison.Ordinal))
             return RunSourceHierarchyCheck(args.Skip(1).ToArray());
+        if (args.Length > 0 && args[0].Equals("--provider-live-diagnostic", StringComparison.Ordinal))
+        {
+            string? slot = null;
+            var rest = args.Skip(1).ToArray();
+            for (var index = 0; index < rest.Length - 1; index++)
+            {
+                if (rest[index].Equals("--slot", StringComparison.OrdinalIgnoreCase))
+                    slot = rest[index + 1];
+            }
+
+            return RunProviderLiveDiagnostic(slot);
+        }
+        if (args.Length > 0 && args[0].Equals("--grok-renewal-proof", StringComparison.Ordinal))
+            return RunGrokRenewalProof();
 
         var runRoot = NewRunRoot("test-run");
         var tests = new (string Name, Action Run)[]
@@ -138,6 +154,49 @@ internal static class Program
             ("lineage_incremental_consumers_restart_privacy", () => LineageConsumersRestartPrivacy(runRoot)),
             ("lineage_tuple_presence_reelection_and_render", () => LineageTuplePresenceReelectionAndRender(runRoot)),
             ("lineage_independent_oracle_defect_injection", () => LineageIndependentOracleDefectInjection(runRoot)),
+            ("provider_quota_cache_isolation", ProviderQuotaCacheIsolation),
+            ("provider_identity_does_not_masquerade", ProviderIdentityCollision),
+            ("primary_binding_unknown_history", PrimaryBindingUnknownHistory),
+            ("provider_missing_fields_no_allowance_stale_reset", ProviderParserTruthfulness),
+            ("failed_provider_does_not_block_ui", () => FailedProviderDoesNotBlock(runRoot).GetAwaiter().GetResult()),
+            ("codex_home_child_environment_isolation", CodexHomeChildEnvironmentIsolation),
+            ("hud_rail_dock_rapid_click", () => HudRailDockRapidClick(runRoot)),
+            ("hud_rail_layout_bounds", () => HudRailLayoutBounds(runRoot)),
+            ("hud_topbar_constrained_workarea", () => HudTopbarConstrainedWorkarea(runRoot)),
+            ("primary_verified_attribution_filters_analysis", PrimaryVerifiedAttributionFiltersAnalysis),
+            ("identity_columns_pragma_only", () => IdentityColumnsPragmaOnly(runRoot)),
+            ("primary_codex_home_bound_on_child", PrimaryCodexHomeBoundOnChild),
+            ("identity_missing_invalidates_prior_binding", () => IdentityMissingInvalidatesPriorBinding().GetAwaiter().GetResult()),
+            ("provider_config_switch_drops_cached_quota", () => ProviderConfigSwitchDropsCachedQuota().GetAwaiter().GetResult()),
+            ("provider_disable_drops_live_snapshot", () => ProviderDisableDropsLiveSnapshot().GetAwaiter().GetResult()),
+            ("provider_currentboard_ages_live", () => ProviderCurrentBoardAgesLive().GetAwaiter().GetResult()),
+            ("provider_slow_slot_does_not_block_board", () => ProviderSlowSlotDoesNotBlockBoard().GetAwaiter().GetResult()),
+            ("provider_switch_during_refresh_discards_stale", () => ProviderSwitchDuringRefreshDiscardsStale().GetAwaiter().GetResult()),
+            ("provider_http_body_bounded_and_sanitized", () => ProviderHttpBodyBoundedAndSanitized().GetAwaiter().GetResult()),
+            ("grok_identity_uses_subject_not_token", () => GrokIdentityUsesSubjectNotToken().GetAwaiter().GetResult()),
+            ("rail_glance_names_window", RailGlanceNamesWindow),
+            ("provider_live_diagnostic_sanitized", ProviderLiveDiagnosticSanitized),
+            ("cursor_nested_individual_plan_parser", CursorNestedIndividualPlanParser),
+            ("provider_same_config_refresh_coalesces", () => ProviderSameConfigRefreshCoalesces().GetAwaiter().GetResult()),
+            ("engine_late_slot_reaches_snapshot", () => EngineLateSlotReachesSnapshot(runRoot).GetAwaiter().GetResult()),
+            ("provider_reset_crossing_ages_before_freshness", ProviderResetCrossingAgesBeforeFreshness),
+            ("quota_identity_change_discards_pair", () => QuotaIdentityChangeDiscardsPair(runRoot)),
+            ("bound_identity_namespaces_not_mixed", BoundIdentityNamespacesNotMixed),
+            ("account_identity_nested_chatgpt_envelope", AccountIdentityNestedChatgptEnvelope),
+            ("slot_detail_hint_requires_actual_identity", SlotDetailHintRequiresActualIdentity),
+            ("owner_confirmed_primary_restores_analysis", OwnerConfirmedPrimaryRestoresAnalysis),
+            ("identity_mismatch_does_not_rebind", IdentityMismatchDoesNotRebind),
+            ("pi_codex_parser_and_auth_shape", PiCodexParserAndAuthShape),
+            ("pi_codex_adapter_statuses_and_cache", () => PiCodexAdapterStatusesAndCache().GetAwaiter().GetResult()),
+            ("isolated_preview_requires_data_and_home", IsolatedPreviewRequiresDataAndHome),
+            ("grok_auth_shape_issuer_entries", GrokAuthShapeIssuerEntries),
+            ("grok_login_unsupported_not_sign_in", () => GrokLoginUnsupportedNotSignIn().GetAwaiter().GetResult()),
+            ("grok_expired_renews_then_quota", () => GrokExpiredRenewsThenQuota().GetAwaiter().GetResult()),
+            ("grok_renewal_rereads_changed_credential", () => GrokRenewalRereadsChangedCredential().GetAwaiter().GetResult()),
+            ("grok_renewal_single_flight", () => GrokRenewalSingleFlight().GetAwaiter().GetResult()),
+            ("grok_renewal_timeout_and_failure", () => GrokRenewalTimeoutAndFailure().GetAwaiter().GetResult()),
+            ("grok_renewal_revoked_distinct", () => GrokRenewalRevokedDistinct().GetAwaiter().GetResult()),
+            ("grok_401_retries_after_refresh", () => Grok401RetriesAfterRefresh().GetAwaiter().GetResult()),
         };
 
         if (args.Length == 2 && args[0] == "--filter")
@@ -247,6 +306,11 @@ internal static class Program
             ? Path.GetFullPath(args[0])
             : Path.Combine(ProjectRoot(), ".artifacts", "ui-capture");
         Directory.CreateDirectory(outputDirectory);
+        File.WriteAllText(Path.Combine(outputDirectory, "CAPTURE_NOTES.txt"),
+            "SYNTHETIC capture. Fixture GeneratedAtUtc=2026-08-05T02:38:24Z from CreateDesignCaptureSnapshot; " +
+            "percentages and reset dates are not live quota.\r\n" +
+            "RenderTargetBitmap dpi=120 is a 125% software render scale (120/96), not a physical monitor DPI transition.\r\n" +
+            "hud-top-640 uses OverrideWorkAreaForTests(664x900) so CompactSize width=min(1100,664-24)=640 before render.\r\n");
         EnsureWpfTestApplication();
 
         var dataDirectory = Path.Combine(outputDirectory, "data");
@@ -271,6 +335,7 @@ internal static class Program
         viewModel.Apply(captureSnapshot);
         viewModel.ToggleChildren("019fcac6-82e");
         viewModel.IsExpanded = true;
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 1920, 1080));
         InvokeWindowMethod(window, "ApplyExpansionState", false);
         window.Show();
         InvokeWindowMethod(window, "UpdateTextBlocks");
@@ -294,13 +359,59 @@ internal static class Program
         RenderWindow(window, Path.Combine(outputDirectory, "hud-collapsed.png"));
         RenderWindow(window, Path.Combine(outputDirectory, "hud-collapsed-125.png"), 120);
         RenderWindow(window, Path.Combine(outputDirectory, "hud-collapsed-150.png"), 144);
+        RenderWindow(window, Path.Combine(outputDirectory, "hud-rail.png"));
+        RenderWindow(window, Path.Combine(outputDirectory, "hud-rail-125.png"), 120);
+        viewModel.SelectSlot(ProviderSlotIds.CodexPrimary, true);
+        InvokeWindowMethod(window, "PlaceSlotDetailPopup");
+        window.UpdateLayout();
+        RenderWindow(window, Path.Combine(outputDirectory, "hud-rail-detail.png"));
+        var popupHost = window.FindName("SlotDetailHost") as System.Windows.FrameworkElement;
+        if (popupHost is not null)
+        {
+            File.WriteAllText(Path.Combine(outputDirectory, "SYNTHETIC-popup-host.txt"),
+                "SYNTHETIC: SlotDetailHost rendered from popup child visual; parent RenderTargetBitmap does not include the separate popup HWND.");
+            RenderElement(popupHost, Path.Combine(outputDirectory, "hud-rail-popup-host-synthetic.png"));
+        }
+        InvokeWindowMethod(window, "OnCloseSlotDetail", window, new System.Windows.RoutedEventArgs());
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 1920, 380));
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+        window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
+        window.UpdateLayout();
+        RenderWindow(window, Path.Combine(outputDirectory, "hud-rail-constrained.png"));
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 1920, 1080));
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+        window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
         var dockField = typeof(MainWindow).GetField("_dockSide",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
             ?? throw new InvalidOperationException("dock_field_missing");
         dockField.SetValue(window, Enum.Parse(dockField.FieldType, "Top"));
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 1920, 1080));
         InvokeWindowMethod(window, "ApplyExpansionState", false);
         InvokeWindowMethod(window, "UpdateTextBlocks");
+        window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+        window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
+        window.UpdateLayout();
+        if (Math.Abs(window.Width - 1100d) > 1.5d)
+            throw new InvalidOperationException($"top_1100_logical_width_mismatch:{window.Width}");
         RenderWindow(window, Path.Combine(outputDirectory, "hud-top.png"));
+        RenderWindow(window, Path.Combine(outputDirectory, "hud-top-1100.png"));
+        RenderWindow(window, Path.Combine(outputDirectory, "hud-top-1100-125.png"), 120);
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 664, 900));
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+        window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
+        window.UpdateLayout();
+        if (Math.Abs(window.Width - 640d) > 1.5d)
+            throw new InvalidOperationException($"top_640_logical_width_mismatch:{window.Width}");
+        RenderWindow(window, Path.Combine(outputDirectory, "hud-top-640.png"));
+        var scaled640 = RenderWindow(window, Path.Combine(outputDirectory, "hud-top-640-125.png"), 120);
+        if (Math.Abs(scaled640.PixelWidth - Math.Ceiling(640d * 120d / 96d)) > 2d)
+            throw new InvalidOperationException($"top_640_pixel_width_mismatch:{scaled640.PixelWidth}");
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 1920, 1080));
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        window.UpdateLayout();
         if (args.Contains("--states", StringComparer.Ordinal))
         {
             dockField.SetValue(window, Enum.Parse(dockField.FieldType, "Right"));
@@ -359,6 +470,10 @@ internal static class Program
         }
         window.Hide();
         Console.WriteLine($"UI_CAPTURE collapsed={Path.Combine(outputDirectory, "hud-collapsed.png")}");
+        Console.WriteLine($"UI_CAPTURE rail={Path.Combine(outputDirectory, "hud-rail.png")}");
+        Console.WriteLine($"UI_CAPTURE rail125={Path.Combine(outputDirectory, "hud-rail-125.png")}");
+        Console.WriteLine($"UI_CAPTURE raildetail={Path.Combine(outputDirectory, "hud-rail-detail.png")}");
+        Console.WriteLine($"UI_CAPTURE constrained={Path.Combine(outputDirectory, "hud-rail-constrained.png")}");
         Console.WriteLine($"UI_CAPTURE top={Path.Combine(outputDirectory, "hud-top.png")}");
         Console.WriteLine($"UI_CAPTURE expanded={Path.Combine(outputDirectory, "hud-expanded.png")}");
         Console.WriteLine($"UI_CAPTURE fullscreen={Path.Combine(outputDirectory, "hud-fullscreen.png")}");
@@ -683,6 +798,136 @@ internal static class Program
         _ = method.Invoke(window, arguments);
     }
 
+    private static System.Windows.Controls.Button FindRailSlotButton(
+        System.Windows.Controls.ItemsControl list, int index)
+    {
+        list.UpdateLayout();
+        var container = list.ItemContainerGenerator.ContainerFromIndex(index)
+            ?? throw new InvalidOperationException($"rail_container_missing:{index}");
+        return FindVisualChild<System.Windows.Controls.Button>(container)
+            ?? throw new InvalidOperationException($"rail_button_missing:{index}");
+    }
+
+    private static void AssertFifthRailSlotReachable(MainWindow window, bool expectScroll)
+    {
+        var list = (System.Windows.Controls.ItemsControl)(window.FindName("RailSlotList")
+            ?? throw new InvalidOperationException("rail_slot_list_missing"));
+        list.UpdateLayout();
+        Assert.Equal(5, list.Items.Count);
+        var scroller = (System.Windows.Controls.ScrollViewer)(window.FindName("RailSlotScroller")
+            ?? throw new InvalidOperationException("rail_scroller_missing"));
+        if (expectScroll)
+        {
+            Assert.True(scroller.ScrollableHeight > 8, $"expected_scroll:{scroller.ScrollableHeight}");
+            scroller.ScrollToEnd();
+            window.UpdateLayout();
+        }
+        else
+        {
+            Assert.True(scroller.ScrollableHeight < 8, $"unexpected_scroll:{scroller.ScrollableHeight}");
+        }
+
+        var button = FindRailSlotButton(list, 4);
+        var topLeft = button.TranslatePoint(new System.Windows.Point(0, 0), window);
+        var bottom = topLeft.Y + button.ActualHeight;
+        Assert.True(topLeft.Y >= -1, $"fifth_slot_above_window:{topLeft.Y}");
+        Assert.True(bottom <= window.Height + 1.5, $"fifth_slot_clipped:{bottom}>{window.Height}");
+        var alias = FindVisualChildren<System.Windows.Controls.TextBlock>(button)
+            .FirstOrDefault(block => block.Text == "Bot");
+        Assert.True(alias is not null, "fifth_slot_alias_missing");
+        Assert.True(alias!.ActualHeight > 8, "fifth_slot_alias_not_rendered");
+    }
+
+    private static void AssertRailKeyTextNotEllipsized(MainWindow window)
+    {
+        var list = (System.Windows.Controls.ItemsControl)(window.FindName("RailSlotList")
+            ?? throw new InvalidOperationException("rail_slot_list_missing"));
+        for (var index = 0; index < 5; index++)
+        {
+            var button = FindRailSlotButton(list, index);
+            foreach (var block in FindVisualChildren<System.Windows.Controls.TextBlock>(button))
+            {
+                if (block.Text is "Codex主" or "Codex备" or "Cursor" or "Grok" or "Bot" ||
+                    (block.Text.EndsWith('%') && block.FontSize >= 20))
+                {
+                    Assert.Equal(System.Windows.TextTrimming.None, block.TextTrimming);
+                    Assert.True(block.ActualWidth > 8, $"key_text_width:{block.Text}");
+                }
+            }
+        }
+    }
+
+    private static void AssertProviderMarksHaveGlyphs(MainWindow window)
+    {
+        var list = (System.Windows.Controls.ItemsControl)(window.FindName("RailSlotList")
+            ?? throw new InvalidOperationException("rail_slot_list_missing"));
+        var expected = new[] { "C", "C", null, "X", "BOT" };
+        for (var index = 0; index < 5; index++)
+        {
+            var button = FindRailSlotButton(list, index);
+            var mark = FindVisualChildren<System.Windows.Controls.ContentControl>(button)
+                .FirstOrDefault(control => Math.Abs(control.Width - 34d) < 0.5);
+            Assert.True(mark is not null, $"mark_missing:{index}");
+            Assert.True(mark!.ActualWidth >= 33 && mark.ActualHeight >= 33, $"mark_clipped:{index}:{mark.ActualWidth}x{mark.ActualHeight}");
+            var texts = FindVisualChildren<System.Windows.Controls.TextBlock>(mark)
+                .Where(block => block.ActualHeight > 1 && block.IsVisible)
+                .Select(block => block.Text)
+                .ToArray();
+            if (index == 2)
+            {
+                Assert.True(FindVisualChildren<System.Windows.FrameworkElement>(mark)
+                    .Any(element => element.GetType().Name == "Path"), "cursor_path_missing");
+            }
+            else if (index == 4)
+            {
+                Assert.True(texts.Contains("X"), "bot_x_missing");
+                Assert.True(texts.Contains("BOT"), "bot_label_missing");
+            }
+            else
+            {
+                Assert.True(texts.Contains(expected[index]!), $"mark_glyph_missing:{index}");
+            }
+        }
+    }
+
+    private static void AssertTopAliasesVisible(MainWindow window)
+    {
+        var list = (System.Windows.Controls.ItemsControl)(window.FindName("RailTopSlotList")
+            ?? throw new InvalidOperationException("top_slot_list_missing"));
+        list.UpdateLayout();
+        var expected = new[] { "Codex主", "Codex备", "Cursor", "Grok", "Bot" };
+        for (var index = 0; index < 5; index++)
+        {
+            var container = list.ItemContainerGenerator.ContainerFromIndex(index)
+                ?? throw new InvalidOperationException($"top_container_missing:{index}");
+            var button = FindVisualChild<System.Windows.Controls.Button>(container)
+                ?? throw new InvalidOperationException($"top_button_missing:{index}");
+            var alias = FindVisualChildren<System.Windows.Controls.TextBlock>(button)
+                .FirstOrDefault(block => block.Text == expected[index]);
+            Assert.True(alias is not null, $"top_alias_missing:{expected[index]}");
+            Assert.True(alias!.ActualWidth > 8 && alias.ActualHeight > 8, $"top_alias_not_rendered:{expected[index]}");
+            Assert.Equal(System.Windows.TextTrimming.None, alias.TextTrimming);
+        }
+    }
+
+    private static T? FindVisualChild<T>(System.Windows.DependencyObject parent) where T : System.Windows.DependencyObject
+    {
+        return FindVisualChildren<T>(parent).FirstOrDefault();
+    }
+
+    private static IEnumerable<T> FindVisualChildren<T>(System.Windows.DependencyObject parent)
+        where T : System.Windows.DependencyObject
+    {
+        var count = System.Windows.Media.VisualTreeHelper.GetChildrenCount(parent);
+        for (var index = 0; index < count; index++)
+        {
+            var child = System.Windows.Media.VisualTreeHelper.GetChild(parent, index);
+            if (child is T match) yield return match;
+            foreach (var nested in FindVisualChildren<T>(child))
+                yield return nested;
+        }
+    }
+
     private static void AwaitWithDispatcher(Task task, Dispatcher dispatcher, TimeSpan timeout)
     {
         var frame = new DispatcherFrame();
@@ -707,7 +952,9 @@ internal static class Program
         task.GetAwaiter().GetResult();
     }
 
-    private static void RenderWindow(MainWindow window, string outputPath, double dpi = 96)
+    private readonly record struct CaptureSize(double LogicalWidth, double LogicalHeight, int PixelWidth, int PixelHeight, double Dpi);
+
+    private static CaptureSize RenderWindow(MainWindow window, string outputPath, double dpi = 96)
     {
         var width = (int)Math.Ceiling(window.Width);
         var height = (int)Math.Ceiling(window.Height);
@@ -720,6 +967,41 @@ internal static class Program
         window.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
         var bitmap = new RenderTargetBitmap(pixelWidth, pixelHeight, dpi, dpi, PixelFormats.Pbgra32);
         bitmap.Render(visual);
+        SavePng(bitmap, outputPath);
+        WriteCaptureSidecar(outputPath, window.Width, window.Height, pixelWidth, pixelHeight, dpi);
+        return new CaptureSize(window.Width, window.Height, pixelWidth, pixelHeight, dpi);
+    }
+
+    private static void WriteCaptureSidecar(string pngPath, double logicalWidth, double logicalHeight,
+        int pixelWidth, int pixelHeight, double dpi)
+    {
+        File.WriteAllText(pngPath + ".txt",
+            $"file={Path.GetFileName(pngPath)}\n" +
+            $"logical_width={logicalWidth.ToString("0.###", CultureInfo.InvariantCulture)}\n" +
+            $"logical_height={logicalHeight.ToString("0.###", CultureInfo.InvariantCulture)}\n" +
+            $"pixel_width={pixelWidth}\n" +
+            $"pixel_height={pixelHeight}\n" +
+            $"dpi={dpi.ToString("0.###", CultureInfo.InvariantCulture)}\n" +
+            $"render_scale={(dpi / 96d).ToString("0.###", CultureInfo.InvariantCulture)}\n" +
+            "render_note=RenderTargetBitmap dpi is a software render scale, not a physical monitor DPI transition.\n" +
+            "data_note=SYNTHETIC CreateDesignCaptureSnapshot; fixture 2026-08-05T02:38:24Z is not live quota.\n");
+    }
+
+    private static void RenderElement(System.Windows.FrameworkElement element, string outputPath, double dpi = 96)
+    {
+        element.Measure(new System.Windows.Size(double.PositiveInfinity, double.PositiveInfinity));
+        element.Arrange(new System.Windows.Rect(element.DesiredSize));
+        element.UpdateLayout();
+        var pixelWidth = Math.Max(1, (int)Math.Ceiling(element.ActualWidth * dpi / 96d));
+        var pixelHeight = Math.Max(1, (int)Math.Ceiling(element.ActualHeight * dpi / 96d));
+        var bitmap = new RenderTargetBitmap(pixelWidth, pixelHeight, dpi, dpi, PixelFormats.Pbgra32);
+        bitmap.Render(element);
+        SavePng(bitmap, outputPath);
+        WriteCaptureSidecar(outputPath, element.ActualWidth, element.ActualHeight, pixelWidth, pixelHeight, dpi);
+    }
+
+    private static void SavePng(RenderTargetBitmap bitmap, string outputPath)
+    {
         var encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using var stream = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None);
@@ -777,12 +1059,16 @@ internal static class Program
                 UiUsage(5_260_000, 620_000, 1_740_000, 540_000), UiUsage(1_101_618, 110_000, 351_000, 99_000)),
         };
         var quota = new QuotaObservation(
-            new QuotaBucket("codex", "Codex", 15, 10080, now.AddDays(6).AddHours(12).AddMinutes(25)),
-            Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false);
+            new QuotaBucket("primary", "Codex 5h", 15, 300, now.AddHours(4).AddMinutes(12)),
+            new[] { new QuotaBucket("secondary", "Codex 周额度", 42, 10080, now.AddDays(4).AddHours(6)) },
+            QuotaSource.OfficialAppServer, now, false);
+        var board = SyntheticBoard(now, quota);
         return new HudSnapshot(quota, sessions, UiUsage(420_000_000, 62_400_000, 122_400_000, 41_000_000),
             now, false, "官方额度 · 本地索引 0 秒前", Array.Empty<string>(),
             new[] { new HudEvent(now.AddMinutes(-1), "quota", "quota_observed", "官方额度观测正常") },
-            RunningCycleTotal: UiUsage(82_000_000, 12_000_000, 24_000_000, 8_000_000));
+            RunningCycleTotal: UiUsage(82_000_000, 12_000_000, 24_000_000, 8_000_000),
+            Providers: board,
+            PrimaryBindingNote: "仅当前绑定的 Codex App 槽提供会话与续接分析；其他槽只显示额度。");
     }
 
     private static HudSnapshot CreateStressSnapshot(int count)
@@ -811,6 +1097,103 @@ internal static class Program
             UiUsage(900_000_000, 140_000_000, 250_000_000, 80_000_000), now, false,
             "官方额度 · 本地索引 0 秒前", Array.Empty<string>(), Array.Empty<HudEvent>(),
             RunningCycleTotal: UiUsage(55_000_000, 8_000_000, 16_000_000, 5_000_000));
+    }
+
+    private static int RunUiCapture07(string[] args)
+    {
+        var outputDirectory = args.Length > 0
+            ? Path.GetFullPath(args[0])
+            : Path.Combine(ProjectRoot(), ".artifacts", "candidate07", "preview");
+        Directory.CreateDirectory(outputDirectory);
+        File.WriteAllText(Path.Combine(outputDirectory, "CAPTURE_NOTES.txt"),
+            "SYNTHETIC candidate07 changed-view captures. Not live quota, not physical pointer/DPI.\r\n" +
+            "Routed WPF layout + RenderTargetBitmap. Fixture GeneratedAtUtc=2026-08-05T02:38:24Z.\r\n");
+        EnsureWpfTestApplication();
+        var dataDirectory = Path.Combine(outputDirectory, "data");
+        var codexHome = Path.Combine(dataDirectory, "codex-home");
+        Directory.CreateDirectory(Path.Combine(codexHome, "sessions"));
+        using var engine = new UsageEngine(codexHome, Path.Combine(dataDirectory, "usage.db"),
+            Path.Combine(dataDirectory, "hud.log"));
+        using var window = new MainWindow(engine, () => Task.CompletedTask, false);
+        System.Windows.Application.Current.MainWindow = window;
+        window.ShowActivated = false;
+        window.ShowInTaskbar = false;
+        window.Topmost = true;
+        window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+        window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
+        var viewModelField = typeof(MainWindow).GetField("_viewModel",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("view_model_field_missing");
+        var viewModel = (MainViewModel)(viewModelField.GetValue(window)
+            ?? throw new InvalidOperationException("view_model_missing"));
+        var snapshot = CreateCandidate07Snapshot();
+        viewModel.Apply(snapshot);
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 1920, 1080));
+        viewModel.IsExpanded = false;
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        window.Show();
+        InvokeWindowMethod(window, "UpdateTextBlocks");
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        window.UpdateLayout();
+        RenderWindow(window, Path.Combine(outputDirectory, "hud07-rail-secondary-pi-status.png"));
+        viewModel.SelectSlot(ProviderSlotIds.CodexSecondary, true);
+        InvokeWindowMethod(window, "PlaceSlotDetailPopup");
+        window.UpdateLayout();
+        var popupHost = window.FindName("SlotDetailHost") as System.Windows.FrameworkElement;
+        if (popupHost is not null)
+        {
+            File.WriteAllText(Path.Combine(outputDirectory, "SYNTHETIC-popup-host.txt"),
+                "SYNTHETIC: SlotDetailHost child visual. Parent RTB does not include the popup HWND.");
+            RenderElement(popupHost, Path.Combine(outputDirectory, "hud07-rail-popup-secondary-pi.png"));
+        }
+
+        viewModel.IsExpanded = true;
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        InvokeWindowMethod(window, "OnSettings", window, new System.Windows.RoutedEventArgs());
+        window.UpdateLayout();
+        if (window.FindName("PiCodexPresenceText") is System.Windows.FrameworkElement presence)
+            presence.BringIntoView();
+        window.UpdateLayout();
+        RenderWindow(window, Path.Combine(outputDirectory, "hud07-settings-pi-subscription.png"));
+        InvokeWindowMethod(window, "OnCloseSettings", window, new System.Windows.RoutedEventArgs());
+
+        viewModel.SelectSlot(ProviderSlotIds.CodexPrimary, true);
+        InvokeWindowMethod(window, "UpdateTextBlocks");
+        RenderWindow(window, Path.Combine(outputDirectory, "hud07-analysis-owner-confirmed.png"));
+        Console.WriteLine("UI_CAPTURE_07 synthetic=true dir=" + outputDirectory);
+        return 0;
+    }
+
+    private static HudSnapshot CreateCandidate07Snapshot()
+    {
+        var seed = CreateUiCaptureSnapshot();
+        var now = seed.GeneratedAtUtc;
+        var slots = seed.Providers!.Slots.Select(slot =>
+            slot.SlotId == ProviderSlotIds.CodexSecondary
+                ? slot with
+                {
+                    Status = QuotaSlotStatus.Live,
+                    StatusText = "PI ChatGPT/Codex 订阅",
+                    SourceDescription = PiCodexSubscription.SourceDescription,
+                    Windows = new[]
+                    {
+                        new QuotaWindowObservation("primary_window", "主用量窗口", 0.4, now.AddHours(5), null, true),
+                        new QuotaWindowObservation("secondary_window", "辅用量窗口", 1, now.AddHours(1), null, true),
+                    },
+                    OpaqueIdentityHash = BoundIdentity.HashAccount("acct-pi-secondary"),
+                    ErrorCode = null,
+                }
+                : slot).ToArray();
+        return seed with
+        {
+            Providers = new ProviderQuotaBoard(slots, now),
+            AccountAnalysisState = AccountAnalysisState.OwnerConfirmedDirectory,
+            PrimaryBindingNote = "所有者已确认当前 Codex 主目录就是这个 App 账户。",
+            MachineLocalSessionCount = seed.Sessions.Count,
+            VerifiedAnalysisCount = 0,
+            UnverifiedHistoryCount = seed.Sessions.Count,
+            ForeignHistoryCount = 0,
+        };
     }
 
     private static HudSnapshot CreateDesignCaptureSnapshot()
@@ -3180,6 +3563,1593 @@ internal static class Program
         Assert.True(pinnedViewModel.Rows[0].IsPinned);
     }
 
+    private static ProviderQuotaBoard SyntheticBoard(DateTimeOffset now, QuotaObservation quota)
+    {
+        var primaryWindows = ProviderQuotaPresentation.FromCodex(quota);
+        return new ProviderQuotaBoard(new[]
+        {
+            new ProviderSlotSnapshot(ProviderSlotIds.CodexPrimary, ProviderIds.Codex, "Codex 当前", true, true,
+                QuotaSlotStatus.Live, "官方 App Server", now, "当前绑定的 Codex App 主目录", primaryWindows,
+                OpaqueIdentityHash: OpaqueIdentity.Hash("codex|acct-primary")),
+            new ProviderSlotSnapshot(ProviderSlotIds.CodexSecondary, ProviderIds.Codex, "Codex 第二账户", true, false,
+                QuotaSlotStatus.Live, "官方 App Server", now, "隔离 CODEX_HOME 子进程",
+                new[] { new QuotaWindowObservation("primary", "Codex 周额度", 39, now.AddDays(3), 10080, true) },
+                OpaqueIdentityHash: OpaqueIdentity.Hash("codex|acct-secondary")),
+            new ProviderSlotSnapshot(ProviderSlotIds.Cursor, ProviderIds.Cursor, "Cursor", true, false,
+                QuotaSlotStatus.Live, "Cursor usage-summary", now, "https://cursor.com/api/usage-summary",
+                new[]
+                {
+                    new QuotaWindowObservation("autoPercentUsed", "Cursor 自有模型", 12, now.AddDays(18), 43200, true),
+                    new QuotaWindowObservation("apiPercentUsed", "其他模型", 4, now.AddDays(18), 43200, true),
+                }, OpaqueIdentityHash: OpaqueIdentity.Hash("cursor|user-one")),
+            new ProviderSlotSnapshot(ProviderSlotIds.Grok, ProviderIds.Grok, "Grok", true, false,
+                QuotaSlotStatus.Live, "Grok 个人周额度", now, "cli-chat-proxy.grok.com/v1/billing",
+                new[] { new QuotaWindowObservation("weekly", "每周额度", 24, now.AddDays(5), 10080, true) },
+                OpaqueIdentityHash: OpaqueIdentity.Hash("grok|acct")),
+            new ProviderSlotSnapshot(ProviderSlotIds.GrokBot, ProviderIds.GrokBot, "Grok Bot", true, false,
+                QuotaSlotStatus.Live, "Cursor dashboard Sand", now,
+                "https://cursor.com/api/dashboard/get-sand-usage-status",
+                new[] { new QuotaWindowObservation("sand", "Grok Bot 周额度", 8, null, null, true, "重置时间未提供，不按 7 天推算") },
+                OpaqueIdentityHash: OpaqueIdentity.Hash("cursor|user-one")),
+        }, now);
+    }
+
+    private static void ProviderQuotaCacheIsolation()
+    {
+        var cache = new IsolatedQuotaCache();
+        var now = DateTimeOffset.UtcNow;
+        var first = new QuotaObservation(new QuotaBucket("primary", "A", 10, 60, now.AddHours(1)),
+            Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false);
+        var second = new QuotaObservation(new QuotaBucket("primary", "B", 40, 60, now.AddHours(2)),
+            Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false);
+        cache.Store(ProviderSlotIds.CodexPrimary, first);
+        cache.Store(ProviderSlotIds.CodexSecondary, second);
+        Assert.True(!cache.SharesReference(ProviderSlotIds.CodexPrimary, ProviderSlotIds.CodexSecondary));
+        Assert.Equal(10d, cache.Load(ProviderSlotIds.CodexPrimary)!.Primary!.UsedPercent);
+        Assert.Equal(40d, cache.Load(ProviderSlotIds.CodexSecondary)!.Primary!.UsedPercent);
+    }
+
+    private static void ProviderIdentityCollision()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var hash = OpaqueIdentity.Hash("codex|same-account");
+        var windows = new[] { new QuotaWindowObservation("primary", "Codex", 10, now.AddHours(1), 60, true) };
+        var slots = new[]
+        {
+            new ProviderSlotSnapshot(ProviderSlotIds.CodexPrimary, ProviderIds.Codex, "当前", true, true,
+                QuotaSlotStatus.Live, "实时", now, "a", windows, hash),
+            new ProviderSlotSnapshot(ProviderSlotIds.CodexSecondary, ProviderIds.Codex, "第二", true, false,
+                QuotaSlotStatus.Live, "实时", now, "b", windows, hash),
+        };
+        var resolved = ProviderQuotaCoordinator.ApplyIdentityCollisions(slots);
+        Assert.Equal(QuotaSlotStatus.Live, resolved[0].Status);
+        Assert.Equal(QuotaSlotStatus.IdentityCollision, resolved[1].Status);
+        Assert.Equal(0, resolved[1].Windows.Count);
+        Assert.True(!resolved[1].GlanceRemainingPercent.HasValue);
+    }
+
+    private static void PrimaryBindingUnknownHistory()
+    {
+        var bound = OpaqueIdentity.Hash("codex|acct-1");
+        Assert.Equal(AttributionClassifier.Kind.Unverified, AttributionClassifier.Classify(null, bound));
+        Assert.Equal(AttributionClassifier.Kind.Unverified, AttributionClassifier.Classify("acct-1", null));
+        Assert.Equal(AttributionClassifier.Kind.Bound,
+            AttributionClassifier.Classify("acct-1", "acct-1"));
+        Assert.Equal(AttributionClassifier.Kind.Foreign,
+            AttributionClassifier.Classify("acct-2", "acct-1"));
+        var hashed = OpaqueIdentity.Hash("codex|acct-1");
+        Assert.Equal(bound, hashed);
+        Assert.True(bound != OpaqueIdentity.Hash("codex|acct-2"));
+    }
+
+    private static void ProviderParserTruthfulness()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var cursor = CursorQuotaParser.Parse("""{"plan":{"used":5,"limit":20,"remaining":15}}""", now, out var cursorError);
+        Assert.Equal(0, cursor.Count);
+        Assert.Equal("cursor_pools_missing", cursorError);
+        var cursorPools = CursorQuotaParser.Parse(
+            """{"autoPercentUsed":12.5,"apiPercentUsed":0.0267}""", now, out var cursorOk);
+        Assert.True(cursorOk is null);
+        Assert.Equal(2, cursorPools.Count);
+        Assert.Equal(12.5d, cursorPools[0].UsedPercent);
+        Assert.Equal(0.0267d, cursorPools[1].UsedPercent);
+        Assert.True(cursorPools[0].MissingResetText!.Contains("重置", StringComparison.Ordinal));
+        var nested = CursorQuotaParser.Parse(
+            """{"billingCycleEnd":"2026-10-15T00:00:00.000Z","individualUsage":{"plan":{"autoPercentUsed":12.5,"apiPercentUsed":0.0267}}}""",
+            now, out var nestedError, out var nestedShape);
+        Assert.True(nestedError is null);
+        Assert.Equal(2, nested.Count);
+        Assert.Equal(12.5d, nested[0].UsedPercent);
+        Assert.Equal(0.0267d, nested[1].UsedPercent);
+        Assert.True(nested[0].ResetsAtUtc.HasValue);
+        Assert.True(nestedShape.IndividualUsage && nestedShape.IndividualPlan && nestedShape.AutoPercentUsed);
+        var team = CursorQuotaParser.Parse(
+            """{"billingCycleEnd":"2026-10-15T00:00:00.000Z","teamUsage":{"pooled":{"autoPercentUsed":8,"apiPercentUsed":1}}}""",
+            now, out var teamError);
+        Assert.True(teamError is null);
+        Assert.Equal(2, team.Count);
+        Assert.Equal(8d, team[0].UsedPercent);
+        var spendOnly = CursorQuotaParser.Parse(
+            """{"onDemand":{"percentUsed":40}}""", now, out var spendError);
+        Assert.Equal(0, spendOnly.Count);
+        Assert.Equal("cursor_pools_missing", spendError);
+
+        var elapsed = now.AddDays(-1);
+        var grokStale = GrokQuotaParser.Parse(
+            "{\"currentPeriod\":{\"start\":\"2026-01-01T00:00:00Z\",\"end\":\"2026-01-08T00:00:00Z\"}}",
+            elapsed.AddDays(10), out var grokError);
+        Assert.Equal(0, grokStale.Count);
+        Assert.Equal("grok_period_elapsed", grokError);
+        var grokLiveMissing = GrokQuotaParser.Parse(
+            "{\"currentPeriod\":{\"start\":\"2026-09-01T00:00:00Z\",\"end\":\"2026-12-01T00:00:00Z\"}}",
+            DateTimeOffset.Parse("2026-09-20T00:00:00Z", CultureInfo.InvariantCulture), out var grokMissing);
+        Assert.True(grokMissing is null);
+        Assert.Equal(1, grokLiveMissing.Count);
+        Assert.Equal(0d, grokLiveMissing[0].UsedPercent);
+
+        var botNone = GrokBotQuotaParser.Parse("{}", now, out var botUnread);
+        Assert.Equal(0, botNone.Count);
+        Assert.Equal("grok_bot_unreadable", botUnread);
+        var botExcluded = GrokBotQuotaParser.Parse(
+            """{"usagePercent":0,"hasNonZeroIncludedLimit":false,"includedLimitZero":true}""", now, out var botCode);
+        Assert.Equal(0, botExcluded.Count);
+        Assert.Equal("grok_bot_not_included", botCode);
+        var botOk = GrokBotQuotaParser.Parse(
+            """{"usagePercent":18,"hasNonZeroIncludedLimit":true,"includedLimitZero":false,"usesPooledEnterpriseAllowance":false}""",
+            now, out var botLive);
+        Assert.True(botLive is null);
+        Assert.Equal(18d, botOk[0].UsedPercent);
+        Assert.True(!botOk[0].ResetsAtUtc.HasValue);
+        Assert.True(botOk[0].MissingResetText!.Contains("7 天", StringComparison.Ordinal));
+        var past = GrokBotQuotaParser.Parse(
+            """{"usagePercent":18,"hasNonZeroIncludedLimit":true,"nextResetTimestampUtc":100}""", now, out _);
+        var pastReset = past[0].ResetsAtUtc;
+        Assert.True(pastReset.HasValue && pastReset.Value < now);
+
+        var token = SyntheticJwt("auth0|user-one");
+        Assert.True(CursorSessionCookie.TryBuild(token, out _, out var identity));
+        Assert.Equal(OpaqueIdentity.Hash("cursor|user-one"), identity);
+        Assert.Equal("secret-token", GrokAuthTokenParser.Extract("""{"access_token":"secret-token","email":"x@y.z"}"""));
+        var missingCursor = WindowsLoginPresence.Cursor(Path.Combine(Path.GetTempPath(), "cuh-no-cursor-" + Guid.NewGuid().ToString("N")));
+        Assert.True(!missingCursor.Present);
+        Assert.True(missingCursor.RelativeHint.Contains("%APPDATA%", StringComparison.Ordinal));
+    }
+
+    private static string SyntheticJwt(string subject)
+    {
+        static string B64(string value)
+        {
+            var bytes = Encoding.UTF8.GetBytes(value);
+            return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        }
+
+        return B64("{\"alg\":\"none\"}") + "." + B64("{\"sub\":\"" + subject + "\"}") + ".x";
+    }
+
+    private static async Task FailedProviderDoesNotBlock(string runRoot)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var token = SyntheticJwt("auth0|user-one");
+        var http = new ScriptedHttpSender((request, _) =>
+        {
+            if (request.Url.AbsolutePath.Contains("usage-summary", StringComparison.Ordinal))
+                throw new System.Net.Http.HttpRequestException("cursor_down");
+            if (request.Url.AbsolutePath.Contains("billing", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new AllowlistedHttpResponse(200,
+                    """{"usagePercent":11,"currentPeriod":{"start":"2026-09-14T00:00:00Z","end":"2026-09-28T00:00:00Z"}}""",
+                    request.Url));
+            }
+
+            if (request.Url.AbsolutePath.Contains("settings", StringComparison.Ordinal))
+                return Task.FromResult(new AllowlistedHttpResponse(200, """{"subscription_tier_display":"SuperGrok"}""", request.Url));
+            if (request.Url.AbsolutePath.Contains("get-sand-usage-status", StringComparison.Ordinal))
+                return Task.FromResult(new AllowlistedHttpResponse(200,
+                    """{"usagePercent":9,"hasNonZeroIncludedLimit":true,"includedLimitZero":false,"usesPooledEnterpriseAllowance":false}""",
+                    request.Url));
+            return Task.FromResult(new AllowlistedHttpResponse(404, "{}", request.Url));
+        });
+        var coordinator = new ProviderQuotaCoordinator(http: http, cursorTokens: new InjectedTokenSource(token),
+            grokTokens: new InjectedTokenSource("grok-token"));
+        var settings = new ProviderAccessSettings(new[]
+        {
+            new ProviderSlotSettings(ProviderSlotIds.CodexPrimary, "Codex 当前", true),
+            new ProviderSlotSettings(ProviderSlotIds.CodexSecondary, "Codex 第二账户", false),
+            new ProviderSlotSettings(ProviderSlotIds.Cursor, "Cursor", true),
+            new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", true),
+            new ProviderSlotSettings(ProviderSlotIds.GrokBot, "Grok Bot", true),
+        }, CompactLayoutModes.Rail, true);
+        var primary = new QuotaObservation(new QuotaBucket("primary", "Codex", 20, 300, now.AddHours(3)),
+            Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false);
+        var board = await coordinator.RefreshAsync(settings, primary, CancellationToken.None, true);
+        Assert.Equal(5, board.Slots.Count);
+        Assert.Equal(QuotaSlotStatus.Live, board.PrimaryCodex!.Status);
+        Assert.Equal(80d, board.PrimaryCodex.GlanceRemainingPercent);
+        Assert.Equal(QuotaSlotStatus.Unavailable, board.Find(ProviderSlotIds.Cursor)!.Status);
+        Assert.Equal(QuotaSlotStatus.Live, board.Find(ProviderSlotIds.Grok)!.Status);
+        Assert.Equal(QuotaSlotStatus.Live, board.Find(ProviderSlotIds.GrokBot)!.Status);
+        var directory = Path.Combine(runRoot, "provider-fail-ui");
+        Directory.CreateDirectory(Path.Combine(directory, "codex-home", "sessions"));
+        using var engine = new UsageEngine(Path.Combine(directory, "codex-home"), Path.Combine(directory, "usage.db"),
+            Path.Combine(directory, "hud.log"), providers: coordinator);
+        var snapshot = engine.GetSnapshot() with { Quota = primary, Providers = board };
+        var viewModel = new MainViewModel();
+        viewModel.Apply(snapshot);
+        Assert.Equal(5, viewModel.Slots.Count);
+        Assert.Equal("80%", viewModel.RemainingText);
+        Assert.True(viewModel.Slots.Any(slot => slot.Status == QuotaSlotStatus.Unavailable));
+        Assert.True(viewModel.Slots.Any(slot => slot.Status == QuotaSlotStatus.Live && slot.SlotId == ProviderSlotIds.Grok));
+    }
+
+    private static void CodexHomeChildEnvironmentIsolation()
+    {
+        var home = Path.Combine(Path.GetTempPath(), "codex-home-isolated-test");
+        var info = AppServerProtocol.CreateStartInfo("codex", new Dictionary<string, string> { ["CODEX_HOME"] = home });
+        Assert.Equal(home, info.Environment["CODEX_HOME"]);
+        Assert.True(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CODEX_HOME")) ||
+                    !string.Equals(Environment.GetEnvironmentVariable("CODEX_HOME"), home, StringComparison.Ordinal));
+        var source = File.ReadAllText(Path.Combine(ProjectRoot(), "src", "CodexUsageHud.Core", "QuotaAdapters.cs"));
+        Assert.True(!source.Contains("Environment.SetEnvironmentVariable", StringComparison.Ordinal));
+        Assert.True(!source.Contains("HttpClient", StringComparison.Ordinal));
+        Assert.Equal("account/read", AppServerProtocol.AccountReadMethod);
+    }
+
+    private static int RunProviderLiveDiagnostic(string? slotFilter = null)
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(70));
+            var result = ProviderLiveDiagnostic.RunAsync(timeout.Token, slotFilter).GetAwaiter().GetResult();
+            Console.WriteLine(result.Output);
+            return ProviderLiveDiagnostic.SecretHits(result.Output).Count == 0 ? 0 : 3;
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine("provider_live_diagnostic status=TIMEOUT");
+            return 2;
+        }
+        catch (Exception)
+        {
+            Console.WriteLine("provider_live_diagnostic status=ERROR code=run_failed");
+            return 2;
+        }
+    }
+
+    private static int RunGrokRenewalProof()
+    {
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(70));
+            var output = ProviderLiveDiagnostic.RunGrokRenewalProofAsync(timeout.Token).GetAwaiter().GetResult();
+            Console.WriteLine(output);
+            return ProviderLiveDiagnostic.SecretHits(output).Count == 0 ? 0 : 3;
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine("grok_renewal_proof status=TIMEOUT");
+            return 2;
+        }
+        catch (Exception)
+        {
+            Console.WriteLine("grok_renewal_proof status=ERROR code=run_failed");
+            return 2;
+        }
+    }
+
+    private static ThreadMetadataRow MetaRow(string threadId, string? accountId) =>
+        new(threadId, null, null, null, null, null, null, null, null, null, null, accountId);
+
+    private static ProviderAccessSettings FiveSlotSettings(bool secondaryEnabled = false, string? secondaryHome = null,
+        bool cursorEnabled = false, bool grokEnabled = false, bool grokBotEnabled = false) =>
+        new(new[]
+        {
+            new ProviderSlotSettings(ProviderSlotIds.CodexPrimary, "Codex 当前", true),
+            new ProviderSlotSettings(ProviderSlotIds.CodexSecondary, "Codex 第二账户", secondaryEnabled, secondaryHome),
+            new ProviderSlotSettings(ProviderSlotIds.Cursor, "Cursor", cursorEnabled),
+            new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", grokEnabled),
+            new ProviderSlotSettings(ProviderSlotIds.GrokBot, "Grok Bot", grokBotEnabled),
+        }, CompactLayoutModes.Rail, true);
+
+    private static ProviderSlotSnapshot ScriptedCodexSnapshot(ProviderSlotSettings settings, double usedPercent,
+        string windowName, DateTimeOffset now) =>
+        new(settings.SlotId, ProviderIds.Codex, settings.Label, settings.Enabled, false, QuotaSlotStatus.Live,
+            "scripted", now, "scripted-codex",
+            new[] { new QuotaWindowObservation("primary", windowName, usedPercent, now.AddHours(2), 120, true) });
+
+    private static QuotaObservation PrimaryObservation(DateTimeOffset now, double used = 20) =>
+        new(new QuotaBucket("primary", "Codex", used, 300, now.AddHours(3)), Array.Empty<QuotaBucket>(),
+            QuotaSource.OfficialAppServer, now, false);
+
+    private static void PrimaryVerifiedAttributionFiltersAnalysis()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var sessions = SampleSessions(now).Concat(new[]
+        {
+            new SessionAggregate(new SessionMetadata("thread-child-0004", "Child", "worker", "Luna", "alpha",
+                    "model-a", null, "Standard（默认）", now, null, Kind: SessionKind.InternalTask,
+                    ParentThreadId: "thread-running-0001"),
+                SessionStatus.Idle, Usage(3), Usage(1), now, "turn-4"),
+        }).ToArray();
+        var rows = new[]
+        {
+            MetaRow("thread-running-0001", "acct-1"),
+            MetaRow("thread-recent-0002", "acct-2"),
+            MetaRow("thread-old-000003", null),
+        };
+        var columns = new IdentityColumnPresence(true, true, true, false, false);
+        var bound = BoundIdentity.HashAccount("acct-1");
+        var partition = PrimaryAccountAttribution.Partition(sessions, rows, bound, columns);
+        Assert.Equal(3, partition.Analysis.Count);
+        Assert.True(partition.Analysis.Any(item => item.Metadata.ThreadId == "thread-running-0001"));
+        Assert.True(partition.Analysis.Any(item => item.Metadata.ThreadId == "thread-old-000003"));
+        Assert.True(partition.Analysis.Any(item => item.Metadata.ThreadId == "thread-child-0004"));
+        Assert.True(!partition.Analysis.Any(item => item.Metadata.ThreadId == "thread-recent-0002"));
+        Assert.Equal(1, partition.Foreign.Count);
+        Assert.Equal("thread-recent-0002", partition.Foreign[0].Metadata.ThreadId);
+        Assert.Equal(2, partition.Unverified.Count);
+        Assert.Equal(1, partition.MachineBound.Count);
+        Assert.Equal(AccountAnalysisState.OwnerConfirmedDirectory, partition.State);
+
+        var schemaMissing = PrimaryAccountAttribution.Partition(sessions, rows, bound,
+            IdentityColumnPresence.Missing);
+        Assert.Equal(sessions.Length, schemaMissing.Analysis.Count);
+        Assert.Equal(0, schemaMissing.Foreign.Count);
+        Assert.Equal(AccountAnalysisState.OwnerConfirmedDirectory, schemaMissing.State);
+
+        var noIdentity = PrimaryAccountAttribution.Partition(sessions, rows, null, columns);
+        Assert.Equal(sessions.Length, noIdentity.Analysis.Count);
+        Assert.Equal(AccountAnalysisState.OwnerConfirmedDirectory, noIdentity.State);
+
+        var engine = File.ReadAllText(Path.Combine(ProjectRoot(), "src", "CodexUsageHud.Core", "UsageEngine.cs"));
+        Assert.True(engine.Contains("PrimaryAccountAttribution.Partition", StringComparison.Ordinal));
+        Assert.True(engine.Contains("partition.Analysis", StringComparison.Ordinal));
+        Assert.True(engine.Contains("localSessions.Count", StringComparison.Ordinal));
+    }
+
+    private static void IdentityColumnsPragmaOnly(string runRoot)
+    {
+        var directory = Path.Combine(runRoot, "identity-pragma");
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "state_5.sqlite");
+        using (var connection = new SqliteConnection("Data Source=" + path + ";Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "CREATE TABLE threads (id TEXT, cwd TEXT, name TEXT);";
+            command.ExecuteNonQuery();
+        }
+
+        var reader = new StateMetadataReader();
+        var missing = reader.InspectIdentityColumns(path);
+        Assert.True(missing.DatabasePresent);
+        Assert.True(missing.ThreadsTablePresent);
+        Assert.True(!missing.AnyIdentityColumn);
+        using (var connection = new SqliteConnection("Data Source=" + path + ";Pooling=False"))
+        {
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "ALTER TABLE threads ADD COLUMN account_id TEXT;";
+            command.ExecuteNonQuery();
+            command.CommandText = "ALTER TABLE threads ADD COLUMN user_id TEXT;";
+            command.ExecuteNonQuery();
+        }
+
+        var present = reader.InspectIdentityColumns(path);
+        Assert.True(present.HasAccountId);
+        Assert.True(present.HasUserId);
+        Assert.True(!present.HasChatgptAccountId);
+        var source = File.ReadAllText(Path.Combine(ProjectRoot(), "src", "CodexUsageHud.Core",
+            "PrimaryAccountAttribution.cs"));
+        Assert.True(!source.Contains("first_user_message", StringComparison.Ordinal));
+        Assert.True(!source.Contains("preview", StringComparison.Ordinal));
+        Assert.True(!source.Contains("RolloutRelativePath", StringComparison.Ordinal));
+    }
+
+    private static void PrimaryCodexHomeBoundOnChild()
+    {
+        var engine = File.ReadAllText(Path.Combine(ProjectRoot(), "src", "CodexUsageHud.Core", "UsageEngine.cs"));
+        Assert.True(engine.Contains("IsolatedCodexHome()", StringComparison.Ordinal));
+        Assert.True(engine.Contains("ReadQuotaAndIdentityAsync(executable, cancellationToken, isolatedHome)",
+            StringComparison.Ordinal));
+        Assert.True(engine.Contains("ReadModelCatalogAsync(executable, cancellationToken, isolatedHome)",
+            StringComparison.Ordinal));
+        Assert.True(engine.Contains("InvalidateAssociation", StringComparison.Ordinal));
+        Assert.True(!engine.Contains("ReadRateLimitsAsync(executable, cancellationToken, isolatedHome)",
+            StringComparison.Ordinal));
+        var adapters = File.ReadAllText(Path.Combine(ProjectRoot(), "src", "CodexUsageHud.Core", "QuotaAdapters.cs"));
+        Assert.True(adapters.Contains("CreateStartInfo(executable, isolatedEnvironment)", StringComparison.Ordinal));
+        Assert.True(adapters.Contains("IReadOnlyDictionary<string, string>? isolatedEnvironment = null",
+            StringComparison.Ordinal));
+    }
+
+    private static async Task IdentityMissingInvalidatesPriorBinding()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var coordinator = new ProviderQuotaCoordinator();
+        var settings = FiveSlotSettings();
+        var first = await coordinator.RefreshAsync(settings, PrimaryObservation(now), CancellationToken.None, true,
+            "hash-a");
+        Assert.Equal("hash-a", first.PrimaryCodex!.OpaqueIdentityHash);
+        var second = await coordinator.RefreshAsync(settings, PrimaryObservation(now, 40), CancellationToken.None, true,
+            null);
+        Assert.True(string.IsNullOrWhiteSpace(second.PrimaryCodex!.OpaqueIdentityHash));
+        Assert.Equal(60d, second.PrimaryCodex.GlanceRemainingPercent);
+    }
+
+    private static async Task ProviderConfigSwitchDropsCachedQuota()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var profile = new ScriptedPiCodexAdapter((settings, _) =>
+            Task.FromResult(ScriptedCodexSnapshot(settings,
+                settings.CodexHome is not null && settings.CodexHome.Contains("home-b", StringComparison.Ordinal)
+                    ? 90
+                    : 20,
+                settings.CodexHome is not null && settings.CodexHome.Contains("home-b", StringComparison.Ordinal)
+                    ? "Codex B"
+                    : "Codex A",
+                now)));
+        var coordinator = new ProviderQuotaCoordinator(piCodex: profile);
+        var settingsA = FiveSlotSettings(true, @"C:\codex-home-a");
+        var boardA = await coordinator.RefreshAsync(settingsA, PrimaryObservation(now), CancellationToken.None, true);
+        Assert.Equal(80d, boardA.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent);
+        var settingsB = FiveSlotSettings(true, @"C:\codex-home-b");
+        var staleView = coordinator.CurrentBoard(now, settingsB);
+        Assert.True(staleView.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent is null);
+        Assert.Equal(QuotaSlotStatus.Unavailable, staleView.Find(ProviderSlotIds.CodexSecondary)!.Status);
+        var boardB = await coordinator.RefreshAsync(settingsB, PrimaryObservation(now), CancellationToken.None, false);
+        Assert.Equal(10d, boardB.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent);
+        Assert.True(boardB.Find(ProviderSlotIds.CodexSecondary)!.GlanceText.Contains("Codex B", StringComparison.Ordinal));
+    }
+
+    private static async Task ProviderDisableDropsLiveSnapshot()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var token = SyntheticJwt("auth0|user-one");
+        var http = new ScriptedHttpSender((_, _) => Task.FromResult(new AllowlistedHttpResponse(200,
+            """{"autoPercentUsed":12.5,"apiPercentUsed":4}""", ProviderHttpAllowlist.CursorUsageSummary)));
+        var coordinator = new ProviderQuotaCoordinator(http: http, cursorTokens: new InjectedTokenSource(token));
+        var enabled = FiveSlotSettings(cursorEnabled: true);
+        var live = await coordinator.RefreshAsync(enabled, PrimaryObservation(now), CancellationToken.None, true);
+        Assert.Equal(QuotaSlotStatus.Live, live.Find(ProviderSlotIds.Cursor)!.Status);
+        var disabled = FiveSlotSettings();
+        var board = await coordinator.RefreshAsync(disabled, PrimaryObservation(now), CancellationToken.None, true);
+        Assert.Equal(QuotaSlotStatus.Disabled, board.Find(ProviderSlotIds.Cursor)!.Status);
+        Assert.True(board.Find(ProviderSlotIds.Cursor)!.GlanceRemainingPercent is null);
+        var aged = coordinator.CurrentBoard(now, disabled);
+        Assert.Equal(QuotaSlotStatus.Disabled, aged.Find(ProviderSlotIds.Cursor)!.Status);
+    }
+
+    private static async Task ProviderCurrentBoardAgesLive()
+    {
+        var coordinator = new ProviderQuotaCoordinator();
+        var settings = FiveSlotSettings();
+        var observed = DateTimeOffset.UtcNow;
+        var board = await coordinator.RefreshAsync(settings,
+            new QuotaObservation(new QuotaBucket("primary", "Codex", 20, 300, observed.AddHours(3)),
+                Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, observed, false),
+            CancellationToken.None, true, "hash-a");
+        Assert.Equal(QuotaSlotStatus.Live, board.PrimaryCodex!.Status);
+        var aged = coordinator.CurrentBoard(observed.AddSeconds(80), settings);
+        Assert.Equal(QuotaSlotStatus.Stale, aged.PrimaryCodex!.Status);
+        Assert.True(aged.PrimaryCodex.StatusText.Contains("新鲜窗口", StringComparison.Ordinal));
+    }
+
+    private static async Task ProviderSlowSlotDoesNotBlockBoard()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var token = SyntheticJwt("auth0|user-one");
+        var http = new ScriptedHttpSender(async (request, cancellationToken) =>
+        {
+            if (request.Url.AbsolutePath.Contains("usage-summary", StringComparison.Ordinal))
+            {
+                await Task.Delay(1500, cancellationToken).ConfigureAwait(false);
+                return new AllowlistedHttpResponse(200, """{"autoPercentUsed":12.5,"apiPercentUsed":4}""",
+                    request.Url);
+            }
+
+            if (request.Url.AbsolutePath.Contains("billing", StringComparison.Ordinal))
+            {
+                return new AllowlistedHttpResponse(200,
+                    """{"usagePercent":11,"currentPeriod":{"start":"2026-09-14T00:00:00Z","end":"2026-09-28T00:00:00Z"}}""",
+                    request.Url);
+            }
+
+            if (request.Url.AbsolutePath.Contains("settings", StringComparison.Ordinal))
+                return new AllowlistedHttpResponse(200, """{"subscription_tier_display":"SuperGrok"}""", request.Url);
+            if (request.Url.AbsolutePath.Contains("get-sand-usage-status", StringComparison.Ordinal))
+            {
+                return new AllowlistedHttpResponse(200,
+                    """{"usagePercent":9,"hasNonZeroIncludedLimit":true,"includedLimitZero":false,"usesPooledEnterpriseAllowance":false}""",
+                    request.Url);
+            }
+
+            return new AllowlistedHttpResponse(404, "{}", request.Url);
+        });
+        var coordinator = new ProviderQuotaCoordinator(http: http, cursorTokens: new InjectedTokenSource(token),
+            grokTokens: new InjectedTokenSource(SyntheticJwt("auth0|grok-user")))
+        {
+            PublishBudget = TimeSpan.FromMilliseconds(250),
+        };
+        var settings = FiveSlotSettings(cursorEnabled: true, grokEnabled: true, grokBotEnabled: true);
+        var board = await coordinator.RefreshAsync(settings, PrimaryObservation(now), CancellationToken.None, true);
+        Assert.Equal(QuotaSlotStatus.Live, board.PrimaryCodex!.Status);
+        Assert.Equal(QuotaSlotStatus.Live, board.Find(ProviderSlotIds.Grok)!.Status);
+        Assert.True(board.Find(ProviderSlotIds.Cursor)!.Status != QuotaSlotStatus.Live);
+        await Task.Delay(1800).ConfigureAwait(false);
+        var later = coordinator.CurrentBoard(DateTimeOffset.UtcNow, settings);
+        Assert.Equal(QuotaSlotStatus.Live, later.Find(ProviderSlotIds.Cursor)!.Status);
+    }
+
+    private static async Task ProviderSwitchDuringRefreshDiscardsStale()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var hold = new TaskCompletionSource<ProviderSlotSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var profile = new ScriptedPiCodexAdapter(async (settings, cancellationToken) =>
+        {
+            if (settings.CodexHome is not null && settings.CodexHome.Contains("home-a", StringComparison.Ordinal))
+                return await hold.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return ScriptedCodexSnapshot(settings, 90, "Codex B", now);
+        });
+        var coordinator = new ProviderQuotaCoordinator(piCodex: profile)
+        {
+            PublishBudget = TimeSpan.FromMilliseconds(200),
+        };
+        var settingsA = FiveSlotSettings(true, @"C:\codex-home-a");
+        var settingsB = FiveSlotSettings(true, @"C:\codex-home-b");
+        var refreshA = coordinator.RefreshAsync(settingsA, PrimaryObservation(now), CancellationToken.None, true);
+        await Task.Delay(50).ConfigureAwait(false);
+        var refreshB = coordinator.RefreshAsync(settingsB, PrimaryObservation(now), CancellationToken.None, true);
+        hold.TrySetResult(ScriptedCodexSnapshot(settingsA.Slot(ProviderSlotIds.CodexSecondary), 20, "Codex A", now));
+        await refreshA.ConfigureAwait(false);
+        await refreshB.ConfigureAwait(false);
+        await Task.Delay(300).ConfigureAwait(false);
+        var settled = coordinator.CurrentBoard(DateTimeOffset.UtcNow, settingsB);
+        Assert.True(!string.Equals(settled.Find(ProviderSlotIds.CodexSecondary)!.GlanceWindow?.DisplayName, "Codex A",
+            StringComparison.Ordinal));
+        Assert.Equal("Codex B", settled.Find(ProviderSlotIds.CodexSecondary)!.GlanceWindow!.DisplayName);
+        Assert.Equal(10d, settled.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent);
+    }
+
+    private static async Task ProviderHttpBodyBoundedAndSanitized()
+    {
+        using var stream = new MemoryStream(Encoding.UTF8.GetBytes(new string('a', 80_000)));
+        try
+        {
+            await ProviderHttpErrors.ReadBoundedUtf8Async(stream, 1024, CancellationToken.None);
+            Assert.True(false);
+        }
+        catch (InvalidOperationException exception)
+        {
+            Assert.Equal("http_body_too_large", exception.Message);
+        }
+
+        Assert.Equal("http_failed",
+            ProviderHttpErrors.Sanitize(new InvalidOperationException(@"C:\Users\x\.grok\auth.json secret")));
+        Assert.Equal("http_host_not_allowlisted",
+            ProviderHttpErrors.Sanitize(new InvalidOperationException("http_host_not_allowlisted")));
+        using var sender = new AllowlistedHttpsSender(TimeSpan.FromSeconds(3), new HugeBodyHandler());
+        try
+        {
+            await sender.SendAsync(new AllowlistedHttpRequest("GET", ProviderHttpAllowlist.CursorUsageSummary,
+                new Dictionary<string, string>()), CancellationToken.None);
+            Assert.True(false);
+        }
+        catch (InvalidOperationException exception)
+        {
+            Assert.Equal("http_body_too_large", exception.Message);
+        }
+
+        var transport = File.ReadAllText(Path.Combine(ProjectRoot(), "src", "CodexUsageHud.Core",
+            "ProviderHttpTransport.cs"));
+        Assert.True(transport.Contains("ResponseHeadersRead", StringComparison.Ordinal));
+        Assert.True(!transport.Contains("ReadAsStringAsync", StringComparison.Ordinal));
+        var adapters = File.ReadAllText(Path.Combine(ProjectRoot(), "src", "CodexUsageHud.Core",
+            "ProviderQuotaAdapters.cs"));
+        Assert.True(!adapters.Contains("exception.Message", StringComparison.Ordinal));
+    }
+
+    private static async Task GrokIdentityUsesSubjectNotToken()
+    {
+        var jwt = SyntheticJwt("auth0|grok-user");
+        var http = new ScriptedHttpSender((request, _) =>
+        {
+            if (request.Url.AbsolutePath.Contains("billing", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new AllowlistedHttpResponse(200,
+                    """{"usagePercent":11,"currentPeriod":{"start":"2026-09-14T00:00:00Z","end":"2026-09-28T00:00:00Z"}}""",
+                    request.Url));
+            }
+
+            return Task.FromResult(new AllowlistedHttpResponse(200, "{}", request.Url));
+        });
+        var live = await new GrokQuotaAdapter(http, new InjectedTokenSource(jwt)).ReadAsync(
+            new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", true), CancellationToken.None);
+        Assert.Equal(OpaqueIdentity.Hash("grok|grok-user"), live.OpaqueIdentityHash);
+        Assert.True(live.OpaqueIdentityHash != OpaqueIdentity.Hash("grok|" + OpaqueIdentity.Hash(jwt)));
+        var opaque = await new GrokQuotaAdapter(http, new InjectedTokenSource("not-a-jwt")).ReadAsync(
+            new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", true), CancellationToken.None);
+        Assert.True(string.IsNullOrWhiteSpace(opaque.OpaqueIdentityHash));
+    }
+
+    private static void RailGlanceNamesWindow()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var slot = new ProviderSlotSnapshot(ProviderSlotIds.CodexPrimary, ProviderIds.Codex, "Codex 当前", true, true,
+            QuotaSlotStatus.Live, "官方", now, "src",
+            new[]
+            {
+                new QuotaWindowObservation("primary", "Codex 5h", 15, now.AddHours(4), 300, true),
+                new QuotaWindowObservation("weekly", "Codex 周额度", 42, now.AddDays(3), 10080, true),
+            });
+        Assert.Equal(58d, slot.GlanceRemainingPercent);
+        Assert.Equal("Codex 周额度", slot.GlanceWindow!.DisplayName);
+        Assert.True(slot.GlanceText.Contains("周额度", StringComparison.Ordinal));
+        Assert.True(slot.GlanceText.Contains("58", StringComparison.Ordinal));
+        Assert.True(!slot.GlanceText.Contains("85", StringComparison.Ordinal));
+        var quota = new QuotaObservation(new QuotaBucket("primary", "Codex 5h", 15, 300, now.AddHours(4)),
+            new[] { new QuotaBucket("weekly", "Codex 周额度", 42, 10080, now.AddDays(3)) },
+            QuotaSource.OfficialAppServer, now, false);
+        var snapshot = new HudSnapshot(quota, Array.Empty<SessionAggregate>(), null, now, false, "ok",
+            Array.Empty<string>(), Providers: new ProviderQuotaBoard(new[] { slot }, now));
+        var viewModel = new MainViewModel();
+        viewModel.Apply(snapshot);
+        Assert.Equal("85%", viewModel.RemainingText);
+        Assert.Equal("Codex 5h", viewModel.RemainingWindowText);
+        Assert.True(viewModel.OverviewText.Contains("Codex 5h", StringComparison.Ordinal));
+        Assert.True(viewModel.Slots[0].GlanceText.Contains("周额度", StringComparison.Ordinal));
+    }
+
+    private static void CursorNestedIndividualPlanParser()
+    {
+        var now = DateTimeOffset.Parse("2026-09-20T12:00:00Z", CultureInfo.InvariantCulture);
+        var json = """
+            {"billingCycleEnd":"2026-10-15T00:00:00.000Z","membershipType":"pro",
+             "individualUsage":{"plan":{"autoPercentUsed":12.5,"apiPercentUsed":0.0267}},
+             "onDemand":{"usedCents":900}}
+            """;
+        var windows = CursorQuotaParser.Parse(json, now, out var error, out var shape);
+        Assert.True(error is null);
+        Assert.Equal(2, windows.Count);
+        Assert.Equal("Cursor 自有模型", windows[0].DisplayName);
+        Assert.Equal(12.5d, windows[0].UsedPercent);
+        Assert.Equal(0.0267d, windows[1].UsedPercent);
+        Assert.Equal(DateTimeOffset.Parse("2026-10-15T00:00:00.000Z", CultureInfo.InvariantCulture),
+            windows[0].ResetsAtUtc);
+        Assert.True(shape.IndividualUsage && shape.IndividualPlan && shape.BillingCycleEnd);
+        Assert.True(!windows.Any(window => window.DisplayName.Contains("需", StringComparison.Ordinal)));
+    }
+
+    private static async Task ProviderSameConfigRefreshCoalesces()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var token = SyntheticJwt("auth0|user-one");
+        var calls = 0;
+        var http = new ScriptedHttpSender(async (request, cancellationToken) =>
+        {
+            if (!request.Url.AbsolutePath.Contains("usage-summary", StringComparison.Ordinal))
+                return new AllowlistedHttpResponse(404, "{}", request.Url);
+            var n = Interlocked.Increment(ref calls);
+            if (n == 1)
+                return new AllowlistedHttpResponse(200, """{"autoPercentUsed":40,"apiPercentUsed":10}""", request.Url);
+            await Task.Delay(700, cancellationToken).ConfigureAwait(false);
+            return new AllowlistedHttpResponse(200, """{"autoPercentUsed":80,"apiPercentUsed":10}""", request.Url);
+        });
+        var coordinator = new ProviderQuotaCoordinator(http: http, cursorTokens: new InjectedTokenSource(token))
+        {
+            PublishBudget = TimeSpan.FromMilliseconds(200),
+        };
+        var settings = FiveSlotSettings(cursorEnabled: true);
+        var seeded = await coordinator.RefreshAsync(settings, PrimaryObservation(now), CancellationToken.None, true)
+            .ConfigureAwait(false);
+        Assert.Equal(60d, seeded.Find(ProviderSlotIds.Cursor)!.GlanceRemainingPercent);
+        var inflight = coordinator.RefreshAsync(settings, PrimaryObservation(now), CancellationToken.None, true);
+        await Task.Delay(40).ConfigureAwait(false);
+        var second = coordinator.RefreshAsync(settings, PrimaryObservation(now), CancellationToken.None, false);
+        await Task.WhenAll(inflight, second).ConfigureAwait(false);
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(3);
+        ProviderSlotSnapshot? cursor = null;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            cursor = coordinator.CurrentBoard(DateTimeOffset.UtcNow, settings).Find(ProviderSlotIds.Cursor);
+            if (cursor is { Status: QuotaSlotStatus.Live } &&
+                cursor.GlanceRemainingPercent is { } remaining && Math.Abs(remaining - 20d) < 0.01)
+            {
+                break;
+            }
+
+            await Task.Delay(50).ConfigureAwait(false);
+        }
+
+        Assert.Equal(QuotaSlotStatus.Live, cursor!.Status);
+        Assert.Equal(20d, cursor.GlanceRemainingPercent);
+        Assert.True(calls >= 2);
+    }
+
+    private static async Task EngineLateSlotReachesSnapshot(string runRoot)
+    {
+        var token = SyntheticJwt("auth0|user-one");
+        var http = new ScriptedHttpSender(async (request, cancellationToken) =>
+        {
+            if (request.Url.AbsolutePath.Contains("usage-summary", StringComparison.Ordinal))
+            {
+                await Task.Delay(900, cancellationToken).ConfigureAwait(false);
+                return new AllowlistedHttpResponse(200,
+                    """{"billingCycleEnd":"2026-10-15T00:00:00Z","individualUsage":{"plan":{"autoPercentUsed":12.5,"apiPercentUsed":4}}}""",
+                    request.Url);
+            }
+
+            return new AllowlistedHttpResponse(404, "{}", request.Url);
+        });
+        var coordinator = new ProviderQuotaCoordinator(
+            codex: new ScriptedCodexProfile((settings, _, _) =>
+                Task.FromResult(ScriptedCodexSnapshot(settings, 20, "Codex", DateTimeOffset.UtcNow))),
+            http: http, cursorTokens: new InjectedTokenSource(token))
+        {
+            PublishBudget = TimeSpan.FromMilliseconds(200),
+        };
+        var directory = Path.Combine(runRoot, "engine-late-slot");
+        Directory.CreateDirectory(Path.Combine(directory, "codex-home", "sessions"));
+        using var engine = new UsageEngine(Path.Combine(directory, "codex-home"), Path.Combine(directory, "usage.db"),
+            Path.Combine(directory, "hud.log"), providers: coordinator);
+        await engine.SaveSettingsAsync(ProviderSettingKeys.ToStored(FiveSlotSettings(cursorEnabled: true)))
+            .ConfigureAwait(false);
+        await engine.RefreshProviderBoardAsync(true, CancellationToken.None).ConfigureAwait(false);
+        var early = engine.GetSnapshot();
+        Assert.True(early.Providers!.Find(ProviderSlotIds.Cursor)!.Status != QuotaSlotStatus.Live);
+        await Task.Delay(1200).ConfigureAwait(false);
+        var later = engine.GetSnapshot();
+        Assert.Equal(QuotaSlotStatus.Live, later.Providers!.Find(ProviderSlotIds.Cursor)!.Status);
+        Assert.Equal(87.5d, later.Providers.Find(ProviderSlotIds.Cursor)!.GlanceRemainingPercent);
+        var viewModel = new MainViewModel();
+        viewModel.Apply(later);
+        Assert.Equal(QuotaSlotStatus.Live, viewModel.Slots.First(slot => slot.SlotId == ProviderSlotIds.Cursor).Status);
+        viewModel.ApplyProviders(engine.GetProviderBoard());
+        Assert.Equal(QuotaSlotStatus.Live, viewModel.Slots.First(slot => slot.SlotId == ProviderSlotIds.Cursor).Status);
+    }
+
+    private static void ProviderResetCrossingAgesBeforeFreshness()
+    {
+        var observed = DateTimeOffset.UtcNow.AddSeconds(-8);
+        var reset = DateTimeOffset.UtcNow.AddSeconds(-1);
+        var snapshot = new ProviderSlotSnapshot(ProviderSlotIds.Grok, ProviderIds.Grok, "Grok", true, false,
+            QuotaSlotStatus.Live, "实时", observed, "src",
+            new[] { new QuotaWindowObservation("weekly", "每周额度", 40, reset, 10080, true) });
+        var aged = ProviderQuotaCoordinator.AgeIfNeeded(snapshot, DateTimeOffset.UtcNow);
+        Assert.Equal(QuotaSlotStatus.Stale, aged.Status);
+        Assert.True(!aged.GlanceRemainingPercent.HasValue);
+        Assert.True(aged.StatusText.Contains("到期", StringComparison.Ordinal));
+        var stillLive = ProviderQuotaCoordinator.AgeIfNeeded(snapshot with
+        {
+            Windows = new[]
+            {
+                new QuotaWindowObservation("weekly", "每周额度", 40, DateTimeOffset.UtcNow.AddHours(2), 10080, true),
+            },
+        }, DateTimeOffset.UtcNow);
+        Assert.Equal(QuotaSlotStatus.Live, stillLive.Status);
+        Assert.Equal(60d, stillLive.GlanceRemainingPercent);
+    }
+
+    private static void QuotaIdentityChangeDiscardsPair(string runRoot)
+    {
+        using var database = NewDatabase(runRoot, "quota-identity");
+        var now = DateTimeOffset.UtcNow;
+        var state = new QuotaStateMachine(database);
+        var first = new QuotaObservation(new QuotaBucket("primary", "Codex", 80, 300, now.AddHours(3)),
+            Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false);
+        state.Observe(first, BoundIdentity.HashAccount("acct-a"));
+        var switched = new QuotaObservation(new QuotaBucket("primary", "Codex", 10, 300, now.AddHours(4)),
+            Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now.AddSeconds(2), false);
+        state.Observe(switched, BoundIdentity.HashAccount("acct-b"));
+        Assert.Equal(0L, database.GetResetSignalCount());
+        state.InvalidateAssociation();
+        var missingIdentity = state.Observe(new QuotaObservation(new QuotaBucket("primary", "Codex", 12, 300,
+            now.AddHours(4)), Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now.AddSeconds(3), false),
+            null);
+        Assert.Equal(12d, missingIdentity.Primary!.UsedPercent);
+        Assert.True(!missingIdentity.IsStale);
+    }
+
+    private static void BoundIdentityNamespacesNotMixed()
+    {
+        var accountBound = BoundIdentity.HashAccount("same-raw");
+        var userBound = BoundIdentity.HashUser("same-raw");
+        Assert.True(accountBound != userBound);
+        var rowUserOnly = new ThreadMetadataRow("t1", null, null, null, null, null, null, null, null, null, null,
+            null, "same-raw");
+        var rowAccount = new ThreadMetadataRow("t2", null, null, null, null, null, null, null, null, null, null,
+            "same-raw", null);
+        Assert.Equal(AttributionClassifier.Kind.Unverified,
+            PrimaryAccountAttribution.ClassifyRow(rowUserOnly, accountBound, BoundAccountIdentity.Account));
+        Assert.Equal(AttributionClassifier.Kind.Bound,
+            PrimaryAccountAttribution.ClassifyRow(rowAccount, accountBound, BoundAccountIdentity.Account));
+        Assert.Equal(AttributionClassifier.Kind.Unverified,
+            PrimaryAccountAttribution.ClassifyRow(rowAccount, userBound, BoundAccountIdentity.User));
+        var parsedAccount = AccountIdentityParser.Parse("""{"result":{"account_id":"acct-9"}}""");
+        Assert.Equal(BoundAccountIdentity.Account, parsedAccount!.Namespace);
+        Assert.Equal(BoundIdentity.HashAccount("acct-9"), parsedAccount.Hash);
+        var parsedUser = AccountIdentityParser.Parse("""{"result":{"user_id":"user-9"}}""");
+        Assert.Equal(BoundAccountIdentity.User, parsedUser!.Namespace);
+        Assert.Equal(BoundIdentity.HashUser("user-9"), parsedUser.Hash);
+        var emailBound = BoundIdentity.HashEmail("acct.example@example.test");
+        Assert.Equal(AttributionClassifier.Kind.Unverified,
+            PrimaryAccountAttribution.ClassifyRow(rowAccount, emailBound, BoundAccountIdentity.Email));
+    }
+
+    private static void AccountIdentityNestedChatgptEnvelope()
+    {
+        const string nested = """{"jsonrpc":"2.0","id":3,"result":{"account":{"type":"chatgpt","email":"acct.example@example.test","planType":"plus"},"requiresOpenaiAuth":true}}""";
+        var parsed = AccountIdentityParser.Parse(nested, out var shape);
+        Assert.Equal(BoundAccountIdentity.Email, parsed!.Namespace);
+        Assert.Equal(BoundIdentity.HashEmail("acct.example@example.test"), parsed.Hash);
+        Assert.True(shape.HasResult);
+        Assert.True(shape.HasAccountObject);
+        Assert.True(!shape.AccountIsNull);
+        Assert.True(shape.HasEmail);
+        Assert.True(!shape.HasAccountId);
+        Assert.True(!shape.HasUserId);
+        Assert.True(shape.RequiresOpenaiAuth);
+        Assert.Equal("chatgpt", shape.AccountType);
+        Assert.True(shape.Format().Contains("email=1", StringComparison.Ordinal));
+        Assert.True(!shape.Format().Contains("acct.example", StringComparison.Ordinal));
+        Assert.True(!parsed.PresenceFlags!.Contains("acct.example", StringComparison.Ordinal));
+        Assert.Equal(AttributionClassifier.Kind.Unverified,
+            PrimaryAccountAttribution.ClassifyRow(
+                new ThreadMetadataRow("t-email", null, null, null, null, null, null, null, null, null, null,
+                    "acct.example@example.test", null),
+                parsed.Hash, parsed.Namespace));
+
+        var missing = AccountIdentityParser.Parse("""{"result":{"account":null,"requiresOpenaiAuth":true}}""",
+            out var nullShape);
+        Assert.True(missing is null);
+        Assert.True(nullShape.AccountIsNull);
+        Assert.True(!nullShape.HasEmail);
+
+        var apiKey = AccountIdentityParser.Parse("""{"result":{"account":{"type":"apiKey"},"requiresOpenaiAuth":false}}""",
+            out var apiShape);
+        Assert.True(apiKey is null);
+        Assert.Equal("apiKey", apiShape.AccountType);
+        Assert.True(!apiShape.HasEmail);
+
+        var error = AccountIdentityParser.Parse("""{"error":{"code":-32600,"message":"x"}}""", out var errorShape);
+        Assert.True(error is null);
+        Assert.True(errorShape.HasError);
+        Assert.True(!errorShape.Format().Contains("message", StringComparison.Ordinal));
+    }
+
+    private static void SlotDetailHintRequiresActualIdentity()
+    {
+        var now = DateTimeOffset.Parse("2026-08-05T02:38:24Z", CultureInfo.InvariantCulture);
+        var windows = new[] { new QuotaWindowObservation("primary", "Codex 5h", 15, now.AddHours(1), 300, true) };
+        var withIdentity = new ProviderSlotSnapshot(ProviderSlotIds.CodexPrimary, ProviderIds.Codex, "Codex 当前", true,
+            true, QuotaSlotStatus.Live, "官方 App Server", now, "current", windows,
+            OpaqueIdentityHash: BoundIdentity.HashEmail("acct.example@example.test"));
+        var withoutIdentity = withIdentity with { OpaqueIdentityHash = null };
+        var cursor = new ProviderSlotSnapshot(ProviderSlotIds.Cursor, ProviderIds.Cursor, "Cursor", true, false,
+            QuotaSlotStatus.Live, "live", now, "cursor", windows);
+        var viewModel = new MainViewModel();
+        viewModel.Apply(new HudSnapshot(new QuotaObservation(new QuotaBucket("primary", "Codex 5h", 15, 300,
+            now.AddHours(1)), Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false),
+            Array.Empty<SessionAggregate>(), null, now, false, "synthetic", Array.Empty<string>(),
+            Providers: new ProviderQuotaBoard(new[] { withIdentity, cursor }, now)));
+        viewModel.SelectSlot(ProviderSlotIds.CodexPrimary, true);
+        Assert.Equal("当前绑定账户", viewModel.SlotDetailAccountHint);
+        Assert.True(!viewModel.RenderedStrings().Any(value =>
+            value.Contains("acct.example@example.test", StringComparison.Ordinal)));
+        viewModel.Apply(new HudSnapshot(new QuotaObservation(new QuotaBucket("primary", "Codex 5h", 15, 300,
+            now.AddHours(1)), Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false),
+            Array.Empty<SessionAggregate>(), null, now, false, "synthetic", Array.Empty<string>(),
+            Providers: new ProviderQuotaBoard(new[] { withoutIdentity, cursor }, now)));
+        viewModel.SelectSlot(ProviderSlotIds.CodexPrimary, true);
+        Assert.Equal("主目录已确认绑定", viewModel.SlotDetailAccountHint);
+        Assert.True(viewModel.SlotDetailWindows.Count > 0);
+        viewModel.SelectSlot(ProviderSlotIds.Cursor, true);
+        Assert.Equal("", viewModel.SlotDetailAccountHint);
+    }
+
+    private static void OwnerConfirmedPrimaryRestoresAnalysis()
+    {
+        var now = DateTimeOffset.Parse("2026-08-05T02:38:24Z", CultureInfo.InvariantCulture);
+        var sessions = SampleSessions(now);
+        var quota = new QuotaObservation(new QuotaBucket("primary", "Codex 5h", 15, 300, now.AddHours(1)),
+            Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false);
+        var snapshot = new HudSnapshot(quota, sessions,
+            new CanonicalTokenUsage(100, 80, 20, 0, 30, 5, 130, 130), now, false, "synthetic",
+            Array.Empty<string>(), MachineLocalSessionCount: 3, MachineLocalRunningCount: 1,
+            VerifiedAnalysisCount: 0, UnverifiedHistoryCount: 3, ForeignHistoryCount: 0,
+            AccountAnalysisState: AccountAnalysisState.OwnerConfirmedDirectory);
+        var viewModel = new MainViewModel();
+        viewModel.Apply(snapshot);
+        Assert.True(!viewModel.AnalysisEmptyVisible);
+        Assert.True(viewModel.Rows.Any(row => row.ThreadId == "thread-running-0001"));
+        Assert.True(viewModel.Rows.Any(row => row.ThreadId == "thread-old-000003"));
+        Assert.True(!viewModel.RenderedStrings().Any(value =>
+            value.Contains("当前账户分析不可用", StringComparison.Ordinal)));
+        Assert.True(!viewModel.RenderedStrings().Any(value =>
+            value.Contains("主目录本地历史（账号归属未核验）", StringComparison.Ordinal)));
+
+        var mismatch = snapshot with
+        {
+            Sessions = Array.Empty<SessionAggregate>(),
+            AccountAnalysisState = AccountAnalysisState.IdentityMismatch,
+            PrimaryBindingNote = "当前 App 身份已变化，未把旧主目录历史改绑到新身份。",
+            MachineLocalSessionCount = 3,
+            ForeignHistoryCount = 2,
+        };
+        viewModel.Apply(mismatch);
+        Assert.True(viewModel.AnalysisEmptyVisible);
+        Assert.Equal("当前账户分析未改绑", viewModel.AnalysisEmptyTitle);
+        Assert.True(viewModel.AnalysisEmptyDetail.Contains("未把旧主目录历史改绑", StringComparison.Ordinal));
+    }
+
+    private static void IdentityMismatchDoesNotRebind()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var sessions = SampleSessions(now);
+        var rows = new[]
+        {
+            MetaRow("thread-running-0001", "acct-1"),
+            MetaRow("thread-recent-0002", "acct-2"),
+            MetaRow("thread-old-000003", null),
+        };
+        var columns = new IdentityColumnPresence(true, true, true, false, false);
+        var oldHash = BoundIdentity.HashAccount("acct-1");
+        var newHash = BoundIdentity.HashAccount("acct-9");
+        var mismatch = PrimaryAccountAttribution.Partition(sessions, rows, newHash, columns,
+            BoundAccountIdentity.Account, oldHash);
+        Assert.Equal(AccountAnalysisState.IdentityMismatch, mismatch.State);
+        Assert.Equal(0, mismatch.Analysis.Count);
+        Assert.True(mismatch.Foreign.Any(item => item.Metadata.ThreadId == "thread-running-0001"));
+        Assert.True(mismatch.Unverified.Any(item => item.Metadata.ThreadId == "thread-old-000003"));
+        Assert.True(!mismatch.Analysis.Any(item => item.Metadata.ThreadId == "thread-old-000003"));
+
+        var sameStamp = PrimaryAccountAttribution.Partition(sessions, rows, oldHash, columns,
+            BoundAccountIdentity.Account, oldHash);
+        Assert.Equal(AccountAnalysisState.OwnerConfirmedDirectory, sameStamp.State);
+        Assert.True(sameStamp.Analysis.Any(item => item.Metadata.ThreadId == "thread-old-000003"));
+        Assert.True(!sameStamp.Analysis.Any(item => item.Metadata.ThreadId == "thread-recent-0002"));
+    }
+
+    private static void PiCodexParserAndAuthShape()
+    {
+        Assert.True(ProviderHttpAllowlist.IsAllowed(ProviderHttpAllowlist.PiCodexUsage));
+        Assert.True(!ProviderHttpAllowlist.IsAllowed(new Uri("https://chatgpt.com/backend-api/other")));
+        var accountId = "acct_pi_secondary";
+        var jwt = SyntheticChatGptJwt(accountId, DateTimeOffset.UtcNow.AddHours(2));
+        var json = "{\"openai-codex\":{\"type\":\"oauth\",\"access\":\"" + jwt +
+                   "\",\"expires\":" + DateTimeOffset.UtcNow.AddHours(2).ToUnixTimeMilliseconds() +
+                   ",\"accountId\":\"" + accountId + "\"},\"openai\":{\"type\":\"api_key\",\"key\":\"sk-other\"}}";
+        var extracted = PiCodexAuthParser.Extract(json);
+        Assert.True(extracted is not null);
+        Assert.Equal(accountId, extracted!.AccountId);
+        var inspection = PiCodexAuthParser.Inspect(json);
+        Assert.True(inspection.Usable);
+        Assert.True(inspection.TypeOauth);
+        Assert.True(!json.Contains(extracted.AccessToken, StringComparison.Ordinal) ||
+                    extracted.AccessToken == jwt);
+        var otherOnly = PiCodexAuthParser.Inspect("""{"openai":{"type":"api_key","key":"sk-other"}}""");
+        Assert.True(!otherOnly.Usable);
+        Assert.Equal("missing_key", otherOnly.FormatKind);
+        var expiredJwt = SyntheticChatGptJwt(accountId, DateTimeOffset.UtcNow.AddHours(-2));
+        var expiredJson = "{\"openai-codex\":{\"type\":\"oauth\",\"access\":\"" + expiredJwt +
+                          "\",\"expires\":" + DateTimeOffset.UtcNow.AddHours(-2).ToUnixTimeMilliseconds() + "}}";
+        var expired = PiCodexAuthParser.Inspect(expiredJson);
+        Assert.True(expired.Expired);
+        Assert.True(!expired.Usable);
+        Assert.True(PiCodexAuthParser.Extract(expiredJson) is null);
+
+        var now = DateTimeOffset.UtcNow;
+        var windows = PiCodexQuotaParser.Parse(
+            """{"rate_limit":{"primary_window":{"used_percent":22.5,"reset_after_seconds":3600},"secondary_window":{"used_percent":8}}}""",
+            now, out var error, out var flags);
+        Assert.True(error is null);
+        Assert.Equal(2, windows.Count);
+        Assert.Equal(22.5d, windows[0].UsedPercent);
+        Assert.True(windows[0].ResetsAtUtc.HasValue);
+        Assert.True(!windows[1].ResetsAtUtc.HasValue);
+        Assert.True(flags.Contains("rate_limit=1", StringComparison.Ordinal));
+        var missing = PiCodexQuotaParser.Parse("{}", now, out var missingError, out _);
+        Assert.Equal(0, missing.Count);
+        Assert.Equal("pi_codex_rate_limit_missing", missingError);
+    }
+
+    private static async Task PiCodexAdapterStatusesAndCache()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var accountId = "acct_pi_live";
+        var jwt = SyntheticChatGptJwt(accountId, now.AddHours(1));
+        var http = new ScriptedHttpSender((request, _) =>
+        {
+            Assert.Equal(ProviderHttpAllowlist.PiCodexUsage.AbsolutePath, request.Url.AbsolutePath);
+            Assert.True(request.Headers.ContainsKey("Authorization"));
+            Assert.Equal(accountId, request.Headers["chatgpt-account-id"]);
+            return Task.FromResult(new AllowlistedHttpResponse(200,
+                """{"rate_limit":{"primary_window":{"used_percent":40,"reset_after_seconds":7200}}}""",
+                request.Url));
+        });
+        var tokens = new InjectedPiCodexTokenSource(new PiCodexCredential(jwt, accountId), "fp-a");
+        var adapter = new PiCodexQuotaAdapter(http, tokens);
+        var slot = new ProviderSlotSettings(ProviderSlotIds.CodexSecondary, "Codex 第二账户", true);
+        var live = await adapter.ReadAsync(slot, CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.Live, live.Status);
+        Assert.Equal(60d, live.GlanceRemainingPercent);
+        Assert.Equal(BoundIdentity.HashAccount(accountId), live.OpaqueIdentityHash);
+        Assert.True(live.SourceDescription.Contains("wham/usage", StringComparison.Ordinal));
+
+        var expired = await new PiCodexQuotaAdapter(http,
+            new InjectedPiCodexTokenSource(null, "fp-b",
+                new PiCodexLoginInspection(true, true, true, true, true, true, true, false, "oauth_expired")))
+            .ReadAsync(slot, CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.NotConnected, expired.Status);
+        Assert.Equal(PiCodexSubscription.ExpiredCode, expired.ErrorCode);
+
+        var coordinator = new ProviderQuotaCoordinator(piCodex: new ScriptedPiCodexAdapter((_, _) =>
+            Task.FromResult(live)));
+        var settings = FiveSlotSettings(true);
+        var board = await coordinator.RefreshAsync(settings, PrimaryObservation(now), CancellationToken.None, true,
+            "primary-hash");
+        Assert.True(!coordinator.Cache.SharesReference(ProviderSlotIds.CodexPrimary, ProviderSlotIds.CodexSecondary));
+        Assert.Equal(60d, board.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent);
+        Assert.Equal(QuotaSlotStatus.Live, board.Find(ProviderSlotIds.CodexPrimary)!.Status);
+    }
+
+    private static string SyntheticChatGptJwt(string accountId, DateTimeOffset expires)
+    {
+        static string B64(string value)
+        {
+            var bytes = Encoding.UTF8.GetBytes(value);
+            return Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        }
+
+        var payload = "{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"" + accountId +
+                      "\"},\"exp\":" + expires.ToUnixTimeSeconds() + "}";
+        return B64("{\"alg\":\"none\"}") + "." + B64(payload) + ".x";
+    }
+
+    private static void IsolatedPreviewRequiresDataAndHome()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "cuh-preview-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            File.WriteAllText(Path.Combine(directory, IsolatedPreviewLaunch.MarkerFileName), "preview");
+            Assert.True(!IsolatedPreviewLaunch.PreviewPackageAllowsStart(Array.Empty<string>(), directory));
+            Assert.True(IsolatedPreviewLaunch.PreviewPackageAllowsStart(
+                new[] { IsolatedPreviewLaunch.DataDirOption, "preview-data",
+                    IsolatedPreviewLaunch.CodexHomeOption, "preview-codex" }, directory));
+            Assert.True(IsolatedPreviewLaunch.IsIsolated(
+                new[] { IsolatedPreviewLaunch.DataDirOption, "preview-data" }, directory));
+            Assert.True(!IsolatedPreviewLaunch.IsIsolated(Array.Empty<string>(),
+                Path.Combine(directory, "no-marker")));
+        }
+        finally
+        {
+            Directory.Delete(directory, true);
+        }
+    }
+
+    private static void GrokAuthShapeIssuerEntries()
+    {
+        var future = DateTimeOffset.UtcNow.AddHours(4).ToString("o", CultureInfo.InvariantCulture);
+        var json = "{\"https://auth.example\":{\"client\":{\"key\":\"issuer-token\",\"expires_at\":\"" + future + "\"}}}";
+        var extracted = GrokAuthTokenParser.Extract(json);
+        Assert.Equal("issuer-token", extracted);
+        var inspection = GrokAuthTokenParser.Inspect(json);
+        Assert.True(inspection.RecognizedIssuerEntries);
+        Assert.True(inspection.Usable);
+        Assert.Equal("issuer_entries", inspection.FormatKind);
+        Assert.Equal("secret-token", GrokAuthTokenParser.Extract("""{"access_token":"secret-token"}"""));
+        var expired = DateTimeOffset.UtcNow.AddHours(-1).ToString("o", CultureInfo.InvariantCulture);
+        var expiredJson = "{\"https://auth.example\":{\"client\":{\"key\":\"old\",\"expires_at\":\"" + expired + "\"}}}";
+        var expiredInspect = GrokAuthTokenParser.Inspect(expiredJson);
+        Assert.True(expiredInspect.Expired);
+        Assert.True(!expiredInspect.Usable);
+        Assert.True(!expiredInspect.HasRefreshToken);
+        Assert.True(GrokAuthTokenParser.Extract(expiredJson) is null);
+        var clock = new DateTimeOffset(2026, 9, 21, 12, 0, 0, TimeSpan.Zero);
+        var renewableJson = "{\"https://auth.example\":{\"client\":{\"key\":\"old\",\"refresh_token\":\"grant-fixture\",\"expires_at\":\"" +
+                            clock.AddMinutes(-5).ToString("o", CultureInfo.InvariantCulture) + "\"}}}";
+        var past = GrokAuthTokenParser.Inspect(renewableJson, clock);
+        Assert.True(past.Expired);
+        Assert.True(!past.Usable);
+        Assert.True(past.HasRefreshToken);
+        Assert.True(past.Renewable);
+        Assert.True(GrokAuthTokenParser.Extract(renewableJson, clock) is null);
+        var beforeExpiry = GrokAuthTokenParser.Inspect(renewableJson, clock.AddMinutes(-10));
+        Assert.True(beforeExpiry.Usable);
+        Assert.True(!beforeExpiry.Expired);
+        Assert.Equal("old", GrokAuthTokenParser.Extract(renewableJson, clock.AddMinutes(-10)));
+        var unknown = GrokAuthTokenParser.Inspect("""{"hello":"world"}""");
+        Assert.Equal("unsupported", unknown.FormatKind);
+        Assert.True(!unknown.Usable);
+        var tempAuth = Path.Combine(Path.GetTempPath(), "cuh-grok-bin-" + Guid.NewGuid().ToString("N"), "auth.json");
+        Assert.True(GrokCliModelsRenewer.ResolveExecutable(tempAuth) is null);
+        Assert.Equal(TimeSpan.FromSeconds(35), ProviderQuotaCoordinator.SlotReadTimeout(ProviderSlotIds.Grok));
+        Assert.Equal(TimeSpan.FromSeconds(8), ProviderQuotaCoordinator.SlotReadTimeout(ProviderSlotIds.Cursor));
+    }
+
+    private static async Task GrokLoginUnsupportedNotSignIn()
+    {
+        var http = new ScriptedHttpSender((_, _) => Task.FromResult(new AllowlistedHttpResponse(200, "{}",
+            ProviderHttpAllowlist.GrokBilling)));
+        var directory = Path.Combine(Path.GetTempPath(), "cuh-grok-shape-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "auth.json");
+        File.WriteAllText(path, """{"unrecognized":true}""");
+        var live = await new GrokQuotaAdapter(http, new GrokAuthFileTokenSource(path)).ReadAsync(
+            new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", true), CancellationToken.None);
+        Assert.Equal("grok_login_unsupported", live.ErrorCode);
+        Assert.Equal(QuotaSlotStatus.Unavailable, live.Status);
+        Assert.True(!live.StatusText.Contains("登录", StringComparison.Ordinal) ||
+                    live.StatusText.Contains("无法识别", StringComparison.Ordinal));
+        Directory.Delete(directory, true);
+    }
+
+    private static async Task GrokExpiredRenewsThenQuota()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "cuh-grok-renew-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "auth.json");
+        File.WriteAllText(path, SyntheticGrokIssuer("old-key", DateTimeOffset.UtcNow.AddHours(-2), null));
+        var http = new ScriptedHttpSender((request, _) => Task.FromResult(GrokBillingOk(request)));
+        var idle = new ScriptedGrokRenewer();
+        var expiredOnly = await new GrokQuotaAdapter(http, new GrokAuthFileTokenSource(path, idle)).ReadAsync(
+            new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", true), CancellationToken.None);
+        Assert.Equal(0, idle.Calls);
+        Assert.Equal("grok_login_expired", expiredOnly.ErrorCode);
+        Assert.Equal(QuotaSlotStatus.NotConnected, expiredOnly.Status);
+
+        File.WriteAllText(path, SyntheticGrokIssuer("old-key", DateTimeOffset.UtcNow.AddHours(-2), "grant-fixture"));
+        var renewer = new ScriptedGrokRenewer
+        {
+            OnRefresh = () => File.WriteAllText(path,
+                SyntheticGrokIssuer("new-key", DateTimeOffset.UtcNow.AddHours(4), "grant-fixture")),
+        };
+        var live = await new GrokQuotaAdapter(http, new GrokAuthFileTokenSource(path, renewer)).ReadAsync(
+            new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", true), CancellationToken.None);
+        Assert.Equal(1, renewer.Calls);
+        Assert.Equal(QuotaSlotStatus.Live, live.Status);
+        Assert.True(live.ErrorCode is null);
+        Assert.True(live.Windows.Count > 0);
+        Assert.Equal(89d, live.GlanceRemainingPercent);
+        Assert.True(live.StatusText.Contains("额度", StringComparison.Ordinal));
+        Directory.Delete(directory, true);
+    }
+
+    private static async Task GrokRenewalRereadsChangedCredential()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "cuh-grok-reread-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "auth.json");
+        File.WriteAllText(path, SyntheticGrokIssuer("old-key", DateTimeOffset.UtcNow.AddHours(-1), "grant-fixture"));
+        string? seen = null;
+        var http = new ScriptedHttpSender((request, _) =>
+        {
+            request.Headers.TryGetValue("Authorization", out var header);
+            seen = header;
+            return Task.FromResult(GrokBillingOk(request));
+        });
+        var renewer = new ScriptedGrokRenewer
+        {
+            OnRefresh = () => File.WriteAllText(path,
+                SyntheticGrokIssuer("new-key", DateTimeOffset.UtcNow.AddHours(3), "grant-fixture")),
+        };
+        var live = await new GrokQuotaAdapter(http, new GrokAuthFileTokenSource(path, renewer)).ReadAsync(
+            new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", true), CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.Live, live.Status);
+        Assert.Equal("Bearer new-key", seen);
+        Assert.True(!string.Equals(seen, "Bearer old-key", StringComparison.Ordinal));
+        Directory.Delete(directory, true);
+    }
+
+    private static async Task GrokRenewalSingleFlight()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "cuh-grok-flight-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "auth.json");
+        File.WriteAllText(path, SyntheticGrokIssuer("old-key", DateTimeOffset.UtcNow.AddHours(-1), "grant-fixture"));
+        var renewer = new ScriptedGrokRenewer
+        {
+            Delay = TimeSpan.FromMilliseconds(250),
+            OnRefresh = () => File.WriteAllText(path,
+                SyntheticGrokIssuer("new-key", DateTimeOffset.UtcNow.AddHours(3), "grant-fixture")),
+        };
+        var tokens = new GrokAuthFileTokenSource(path, renewer);
+        var http = new ScriptedHttpSender((request, _) => Task.FromResult(GrokBillingOk(request)));
+        var adapter = new GrokQuotaAdapter(http, tokens);
+        var settings = new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", true);
+        var tasks = Enumerable.Range(0, 8)
+            .Select(_ => adapter.ReadAsync(settings, CancellationToken.None))
+            .ToArray();
+        var snapshots = await Task.WhenAll(tasks);
+        Assert.Equal(1, renewer.Calls);
+        Assert.True(snapshots.All(item => item.Status == QuotaSlotStatus.Live));
+        Directory.Delete(directory, true);
+    }
+
+    private static async Task GrokRenewalTimeoutAndFailure()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "cuh-grok-fail-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "auth.json");
+        File.WriteAllText(path, SyntheticGrokIssuer("old-key", DateTimeOffset.UtcNow.AddHours(-1), "grant-fixture"));
+        var settings = new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", true);
+        var http = new ScriptedHttpSender((request, _) => Task.FromResult(GrokBillingOk(request)));
+
+        var timeoutRenewer = new ScriptedGrokRenewer { Delay = TimeSpan.FromSeconds(5) };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMilliseconds(80));
+        var timed = await new GrokQuotaAdapter(http, new GrokAuthFileTokenSource(path, timeoutRenewer))
+            .ReadAsync(settings, timeout.Token);
+        Assert.Equal("grok_renewal_unavailable", timed.ErrorCode);
+        Assert.Equal(QuotaSlotStatus.Unavailable, timed.Status);
+        Assert.True(timed.Windows.Count == 0);
+        Assert.True(timed.GlanceRemainingPercent is null);
+        Assert.True(!timed.StatusText.Contains("Live", StringComparison.Ordinal));
+
+        var failed = new ScriptedGrokRenewer { Result = GrokRenewalKind.TransientFailure };
+        var unavailable = await new GrokQuotaAdapter(http, new GrokAuthFileTokenSource(path, failed))
+            .ReadAsync(settings, CancellationToken.None);
+        Assert.Equal("grok_renewal_unavailable", unavailable.ErrorCode);
+        Assert.Equal(QuotaSlotStatus.Unavailable, unavailable.Status);
+        Assert.True(unavailable.Windows.Count == 0);
+
+        var missing = await new GrokQuotaAdapter(http, new GrokAuthFileTokenSource(path))
+            .ReadAsync(settings, CancellationToken.None);
+        Assert.Equal("grok_renewal_unavailable", missing.ErrorCode);
+        Assert.Equal(QuotaSlotStatus.Unavailable, missing.Status);
+        Directory.Delete(directory, true);
+    }
+
+    private static async Task GrokRenewalRevokedDistinct()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "cuh-grok-revoked-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "auth.json");
+        File.WriteAllText(path, SyntheticGrokIssuer("old-key", DateTimeOffset.UtcNow.AddHours(-1), "grant-fixture"));
+        var renewer = new ScriptedGrokRenewer
+        {
+            OnRefresh = () => File.WriteAllText(path,
+                SyntheticGrokIssuer("old-key", DateTimeOffset.UtcNow.AddHours(-1), null)),
+        };
+        var live = await new GrokQuotaAdapter(
+            new ScriptedHttpSender((request, _) => Task.FromResult(GrokBillingOk(request))),
+            new GrokAuthFileTokenSource(path, renewer)).ReadAsync(
+            new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", true), CancellationToken.None);
+        Assert.Equal("grok_login_revoked", live.ErrorCode);
+        Assert.Equal(QuotaSlotStatus.NotConnected, live.Status);
+        Assert.True(!string.Equals(live.ErrorCode, "grok_login_expired", StringComparison.Ordinal));
+        Assert.True(live.Windows.Count == 0);
+        Directory.Delete(directory, true);
+    }
+
+    private static async Task Grok401RetriesAfterRefresh()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "cuh-grok-401-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "auth.json");
+        File.WriteAllText(path, SyntheticGrokIssuer("old-key", DateTimeOffset.UtcNow.AddHours(2), "grant-fixture"));
+        var calls = 0;
+        string? lastBearer = null;
+        var http = new ScriptedHttpSender((request, _) =>
+        {
+            if (!request.Url.AbsolutePath.Contains("billing", StringComparison.Ordinal))
+                return Task.FromResult(new AllowlistedHttpResponse(200, "{}", request.Url));
+            request.Headers.TryGetValue("Authorization", out lastBearer);
+            var count = Interlocked.Increment(ref calls);
+            if (count == 1)
+                return Task.FromResult(new AllowlistedHttpResponse(401, "{}", request.Url));
+            return Task.FromResult(GrokBillingOk(request));
+        });
+        var renewer = new ScriptedGrokRenewer
+        {
+            OnRefresh = () => File.WriteAllText(path,
+                SyntheticGrokIssuer("new-key", DateTimeOffset.UtcNow.AddHours(4), "grant-fixture")),
+        };
+        var live = await new GrokQuotaAdapter(http, new GrokAuthFileTokenSource(path, renewer)).ReadAsync(
+            new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", true), CancellationToken.None);
+        Assert.Equal(1, renewer.Calls);
+        Assert.Equal(2, calls);
+        Assert.Equal(QuotaSlotStatus.Live, live.Status);
+        Assert.Equal("Bearer new-key", lastBearer);
+        Directory.Delete(directory, true);
+    }
+
+    private static string SyntheticGrokIssuer(string key, DateTimeOffset expires, string? refresh)
+    {
+        var exp = expires.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture);
+        if (refresh is null)
+        {
+            return "{\"https://auth.example\":{\"client\":{\"key\":\"" + key +
+                   "\",\"expires_at\":\"" + exp + "\"}}}";
+        }
+
+        return "{\"https://auth.example\":{\"client\":{\"key\":\"" + key +
+               "\",\"refresh_token\":\"" + refresh + "\",\"expires_at\":\"" + exp + "\"}}}";
+    }
+
+    private static AllowlistedHttpResponse GrokBillingOk(AllowlistedHttpRequest request) =>
+        new(200,
+            """{"usagePercent":11,"currentPeriod":{"start":"2026-09-14T00:00:00Z","end":"2026-09-28T00:00:00Z"}}""",
+            request.Url);
+
+    private static void ProviderLiveDiagnosticSanitized()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(70));
+        var result = ProviderLiveDiagnostic.RunAsync(timeout.Token).GetAwaiter().GetResult();
+        Assert.Equal(5, result.Slots.Count);
+        foreach (var slotId in ProviderSlotIds.All)
+            Assert.True(result.Slots.Any(slot => slot.SlotId == slotId));
+        Assert.Equal(0, ProviderLiveDiagnostic.SecretHits(result.Output).Count);
+        Assert.True(result.Output.Contains("settings_untouched=1", StringComparison.Ordinal));
+        Assert.True(!result.Output.Contains("eyJ", StringComparison.Ordinal));
+    }
+
+    private sealed class ScriptedGrokRenewer : IGrokSessionRenewer
+    {
+        public int Calls;
+        public TimeSpan Delay = TimeSpan.Zero;
+        public GrokRenewalKind Result = GrokRenewalKind.Refreshed;
+        public Action? OnRefresh;
+
+        public async Task<GrokRenewalKind> RefreshSessionAsync(CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref Calls);
+            if (Delay > TimeSpan.Zero)
+                await Task.Delay(Delay, cancellationToken).ConfigureAwait(false);
+            OnRefresh?.Invoke();
+            return Result;
+        }
+    }
+
+    private sealed class ScriptedCodexProfile : CodexQuotaProfile
+    {
+        private readonly Func<ProviderSlotSettings, string?, CancellationToken, Task<ProviderSlotSnapshot>> _read;
+
+        public ScriptedCodexProfile(
+            Func<ProviderSlotSettings, string?, CancellationToken, Task<ProviderSlotSnapshot>> read) =>
+            _read = read;
+
+        public override Task<ProviderSlotSnapshot> ReadAsync(ProviderSlotSettings settings, string? isolatedHome,
+            bool suppliesLocalAnalysis, CancellationToken cancellationToken, string? primaryHome = null) =>
+            _read(settings, isolatedHome, cancellationToken);
+    }
+
+    private sealed class ScriptedPiCodexAdapter : PiCodexQuotaAdapter
+    {
+        private readonly Func<ProviderSlotSettings, CancellationToken, Task<ProviderSlotSnapshot>> _read;
+
+        public ScriptedPiCodexAdapter(
+            Func<ProviderSlotSettings, CancellationToken, Task<ProviderSlotSnapshot>> read)
+            : base(new ScriptedHttpSender((_, _) => Task.FromResult(
+                new AllowlistedHttpResponse(404, "{}", ProviderHttpAllowlist.PiCodexUsage))),
+                new InjectedPiCodexTokenSource(null)) =>
+            _read = read;
+
+        public override Task<ProviderSlotSnapshot> ReadAsync(ProviderSlotSettings settings,
+            CancellationToken cancellationToken) =>
+            _read(settings, cancellationToken);
+    }
+
+    private sealed class HugeBodyHandler : System.Net.Http.HttpMessageHandler
+    {
+        protected override Task<System.Net.Http.HttpResponseMessage> SendAsync(
+            System.Net.Http.HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var response = new System.Net.Http.HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new System.Net.Http.StringContent(new string('a', 80_000), Encoding.UTF8, "application/json"),
+                RequestMessage = request,
+            };
+            return Task.FromResult(response);
+        }
+    }
+
+    private static void HudRailDockRapidClick(string runRoot)
+    {
+        EnsureWpfTestApplication();
+        var directory = Path.Combine(runRoot, "hud-rail-rapid");
+        Directory.CreateDirectory(Path.Combine(directory, "codex-home", "sessions"));
+        using var engine = new UsageEngine(Path.Combine(directory, "codex-home"), Path.Combine(directory, "usage.db"),
+            Path.Combine(directory, "hud.log"));
+        using var window = new MainWindow(engine, () => Task.CompletedTask, false);
+        window.ShowActivated = false;
+        window.ShowInTaskbar = false;
+        window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+        window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
+        window.Show();
+        var viewModelField = typeof(MainWindow).GetField("_viewModel",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var viewModel = (MainViewModel)viewModelField.GetValue(window)!;
+        viewModel.Apply(CreateUiCaptureSnapshot());
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        Assert.Equal(System.Windows.Visibility.Visible,
+            ((System.Windows.FrameworkElement)window.FindName("RailVerticalShell")!).Visibility);
+        Assert.Equal(System.Windows.Visibility.Collapsed,
+            ((System.Windows.FrameworkElement)window.FindName("CompactVerticalShell")!).Visibility);
+        Assert.Equal(5, viewModel.Slots.Count);
+        window.UpdateLayout();
+        var railList = (System.Windows.Controls.ItemsControl)(window.FindName("RailSlotList")
+            ?? throw new InvalidOperationException("rail_slot_list_missing"));
+        railList.UpdateLayout();
+        var popup = (System.Windows.Controls.Primitives.Popup)(window.FindName("SlotDetailPopup")
+            ?? throw new InvalidOperationException("slot_detail_popup_missing"));
+        for (var index = 0; index < viewModel.Slots.Count; index++)
+        {
+            var button = FindRailSlotButton(railList, index);
+            var enter = new System.Windows.Input.MouseEventArgs(System.Windows.Input.Mouse.PrimaryDevice, 0)
+            {
+                RoutedEvent = System.Windows.Input.Mouse.MouseEnterEvent,
+            };
+            button.RaiseEvent(enter);
+            window.UpdateLayout();
+            Assert.True(popup.IsOpen, $"rail_hover_did_not_open_popup:{index}");
+            var focusDevice = System.Windows.Input.Keyboard.PrimaryDevice;
+            if (focusDevice is not null)
+            {
+                var focus = new System.Windows.Input.KeyboardFocusChangedEventArgs(focusDevice, 0, null, button)
+                {
+                    RoutedEvent = System.Windows.UIElement.GotKeyboardFocusEvent,
+                };
+                button.RaiseEvent(focus);
+                window.UpdateLayout();
+                Assert.True(popup.IsOpen, $"rail_focus_did_not_keep_popup:{index}");
+            }
+        }
+
+        var cursorButton = FindRailSlotButton(railList, 2);
+        cursorButton.RaiseEvent(new System.Windows.RoutedEventArgs(System.Windows.Controls.Button.ClickEvent));
+        window.UpdateLayout();
+        Assert.True(popup.IsOpen);
+        Assert.Equal(ProviderSlotIds.Cursor, viewModel.SelectedSlotId);
+        InvokeWindowMethod(window, "OnCloseSlotDetail", window, new System.Windows.RoutedEventArgs());
+        Assert.True(!popup.IsOpen);
+
+        foreach (var slot in viewModel.Slots)
+        {
+            viewModel.SelectSlot(slot.SlotId, true);
+            InvokeWindowMethod(window, "PlaceSlotDetailPopup");
+        }
+
+        viewModel.SelectSlot(ProviderSlotIds.CodexPrimary, true);
+        InvokeWindowMethod(window, "OnOpenPrimaryAnalysis", window, new System.Windows.RoutedEventArgs());
+        Assert.True(viewModel.IsExpanded);
+        InvokeWindowMethod(window, "OnToggleExpand", window, new System.Windows.RoutedEventArgs());
+        Assert.True(!viewModel.IsExpanded);
+        var dockField = typeof(MainWindow).GetField("_dockSide",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        foreach (var side in new[] { "Left", "Right", "Top" })
+        {
+            dockField.SetValue(window, Enum.Parse(dockField.FieldType, side));
+            InvokeWindowMethod(window, "ApplyExpansionState", false);
+            if (side == "Top")
+            {
+                Assert.Equal(System.Windows.Visibility.Visible,
+                    ((System.Windows.FrameworkElement)window.FindName("RailTopShell")!).Visibility);
+            }
+            else
+            {
+                Assert.Equal(System.Windows.Visibility.Visible,
+                    ((System.Windows.FrameworkElement)window.FindName("RailVerticalShell")!).Visibility);
+            }
+        }
+
+        viewModel.SelectSlot(ProviderSlotIds.Cursor, true);
+        Assert.True(!viewModel.SelectedSlotSuppliesAnalysis);
+        viewModel.SelectSlot(ProviderSlotIds.CodexPrimary, true);
+        Assert.True(viewModel.SelectedSlotSuppliesAnalysis);
+        window.Hide();
+    }
+
+    private static void HudRailLayoutBounds(string runRoot)
+    {
+        EnsureWpfTestApplication();
+        var directory = Path.Combine(runRoot, "hud-rail-layout");
+        Directory.CreateDirectory(Path.Combine(directory, "codex-home", "sessions"));
+        using var engine = new UsageEngine(Path.Combine(directory, "codex-home"), Path.Combine(directory, "usage.db"),
+            Path.Combine(directory, "hud.log"));
+        using var window = new MainWindow(engine, () => Task.CompletedTask, false);
+        window.ShowActivated = false;
+        window.ShowInTaskbar = false;
+        window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+        window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
+        window.Show();
+        var viewModelField = typeof(MainWindow).GetField("_viewModel",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var viewModel = (MainViewModel)viewModelField.GetValue(window)!;
+        var snapshot = CreateUiCaptureSnapshot();
+        viewModel.Apply(snapshot);
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 1920, 1080));
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        window.UpdateLayout();
+        Assert.Equal(252d, window.Width);
+        Assert.True(window.Height > 402d, $"unconstrained_rail_height:{window.Height}");
+        AssertFifthRailSlotReachable(window, expectScroll: false);
+        AssertRailKeyTextNotEllipsized(window);
+        AssertProviderMarksHaveGlyphs(window);
+
+        viewModel.SelectSlot(ProviderSlotIds.CodexPrimary, true);
+        InvokeWindowMethod(window, "PlaceSlotDetailPopup");
+        Assert.True(viewModel.SlotDetailWindows.Count >= 2);
+        Assert.True(viewModel.SlotDetailWindows.All(row => row.HasLiveProgress && !row.HasDashedTrack));
+        Assert.True(!viewModel.SlotDetailBody.Contains("身份：", StringComparison.Ordinal));
+        var primaryHash = snapshot.Providers!.Slots[0].OpaqueIdentityHash!;
+        Assert.True(!viewModel.RenderedStrings().Any(value =>
+            value.Contains(OpaqueIdentity.Short(primaryHash), StringComparison.Ordinal)));
+        Assert.Equal("当前绑定账户", viewModel.SlotDetailAccountHint);
+
+        var stalePrimary = snapshot.Providers.Slots[0] with { Status = QuotaSlotStatus.Stale };
+        var staleBoard = snapshot.Providers with
+        {
+            Slots = new[] { stalePrimary }.Concat(snapshot.Providers.Slots.Skip(1)).ToArray(),
+        };
+        viewModel.Apply(snapshot with { Providers = staleBoard });
+        viewModel.SelectSlot(ProviderSlotIds.CodexPrimary, true);
+        Assert.True(viewModel.SlotDetailWindows.All(row => !row.HasLiveProgress && row.HasDashedTrack));
+        Assert.True(viewModel.SlotDetailWindows.All(row => row.RemainingText.Contains("陈旧", StringComparison.Ordinal)));
+
+        var emptyBot = snapshot.Providers.Slots[4] with
+        {
+            Status = QuotaSlotStatus.Unavailable,
+            Windows = Array.Empty<QuotaWindowObservation>(),
+        };
+        var unavailableBoard = snapshot.Providers with
+        {
+            Slots = snapshot.Providers.Slots.Take(4).Append(emptyBot).ToArray(),
+        };
+        viewModel.Apply(snapshot with { Providers = unavailableBoard });
+        viewModel.SelectSlot(ProviderSlotIds.GrokBot, true);
+        Assert.True(viewModel.SlotDetailWindows.All(row => !row.HasLiveProgress && row.HasDashedTrack));
+        Assert.True(viewModel.SlotDetailWindows.All(row => row.RemainingText == "—"));
+
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 1920, 360));
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        window.UpdateLayout();
+        Assert.True(window.Height <= 360d, $"constrained_rail_taller_than_work:{window.Height}");
+        AssertFifthRailSlotReachable(window, expectScroll: true);
+        window.Hide();
+    }
+
+    private static void HudTopbarConstrainedWorkarea(string runRoot)
+    {
+        EnsureWpfTestApplication();
+        var directory = Path.Combine(runRoot, "hud-topbar-640");
+        Directory.CreateDirectory(Path.Combine(directory, "codex-home", "sessions"));
+        using var engine = new UsageEngine(Path.Combine(directory, "codex-home"), Path.Combine(directory, "usage.db"),
+            Path.Combine(directory, "hud.log"));
+        using var window = new MainWindow(engine, () => Task.CompletedTask, false);
+        window.ShowActivated = false;
+        window.ShowInTaskbar = false;
+        window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+        window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
+        window.Show();
+        var viewModelField = typeof(MainWindow).GetField("_viewModel",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var viewModel = (MainViewModel)viewModelField.GetValue(window)!;
+        viewModel.Apply(CreateUiCaptureSnapshot());
+        var dockField = typeof(MainWindow).GetField("_dockSide",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        dockField.SetValue(window, Enum.Parse(dockField.FieldType, "Top"));
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 1920, 1080));
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        window.UpdateLayout();
+        Assert.True(Math.Abs(window.Width - 1100d) < 1.5d, $"top_1100_width:{window.Width}");
+        Assert.True(!viewModel.TopBarNarrowLayout);
+
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 664, 900));
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        window.UpdateLayout();
+        Assert.True(Math.Abs(window.Width - 640d) < 1.5d, $"top_640_width:{window.Width}");
+        Assert.True(viewModel.TopBarNarrowLayout);
+        AssertTopAliasesVisible(window);
+
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 500, 800));
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        window.UpdateLayout();
+        Assert.True(window.Width <= 500d, $"narrow_workarea_forced_overflow:{window.Width}");
+        Assert.True(viewModel.TopBarNarrowLayout);
+        window.Hide();
+    }
+
     private static void HudV2EdgeBeaconVisualContract()
     {
         var root = ProjectRoot();
@@ -3262,6 +5232,18 @@ internal static class Program
             Path.Combine(root, "other", "CodexUsageHud.App.exe")));
         Assert.True(xaml.Contains("ResizeMode=\"NoResize\"", StringComparison.Ordinal));
         Assert.True(!xaml.Contains("最近统计·raw", StringComparison.Ordinal));
+        foreach (var required in new[]
+                 {
+                     "RailVerticalShell", "RailTopShell", "SlotDetailPopup", "五个额度槽",
+                     "OnRailSlotClick", "PiCodexPresenceText", "CompactLayoutComboBox",
+                 })
+            Assert.True((xaml + window).Contains(required, StringComparison.Ordinal));
+        Assert.True(window.Contains("RailWidth = 252", StringComparison.Ordinal));
+        Assert.True(window.Contains("OverrideWorkAreaForTests", StringComparison.Ordinal));
+        Assert.True(window.Contains("CompactWidth = 224", StringComparison.Ordinal));
+        Assert.True(xaml.Contains("ProviderMark", StringComparison.Ordinal));
+        Assert.True(xaml.Contains("SlotDetailWindowsList", StringComparison.Ordinal));
+        Assert.True(xaml.Contains("RailSlotScroller", StringComparison.Ordinal));
     }
 
     private static void HudWpfConstructionSmoke(string runRoot)
@@ -3274,9 +5256,24 @@ internal static class Program
             Path.Combine(directory, "hud.log"));
         try
         {
-            using var window = new MainWindow(engine, () => Task.CompletedTask);
-            Assert.Equal(224d, window.Width);
-            Assert.Equal(324d, window.Height);
+            using var window = new MainWindow(engine, () => Task.CompletedTask, false);
+            Assert.Equal(252d, window.Width);
+            window.ShowActivated = false;
+            window.ShowInTaskbar = false;
+            window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+            window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
+            window.Show();
+            var viewModelField = typeof(MainWindow).GetField("_viewModel",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            var viewModel = (MainViewModel)viewModelField.GetValue(window)!;
+            viewModel.Apply(CreateUiCaptureSnapshot());
+            window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 1920, 1080));
+            InvokeWindowMethod(window, "ApplyExpansionState", false);
+            window.UpdateLayout();
+            Assert.Equal(252d, window.Width);
+            Assert.True(window.Height > 402d, $"rail_height_too_short:{window.Height}");
+            AssertFifthRailSlotReachable(window, expectScroll: false);
+            window.Hide();
         }
         catch (Exception exception)
         {
@@ -3336,12 +5333,15 @@ internal static class Program
         Assert.True(!readme.Contains("intentionally does not deduplicate across different thread",
             StringComparison.Ordinal));
         Assert.True(!readme.Contains("future validation item", StringComparison.Ordinal));
-        Assert.True(readme.Contains("84 checks", StringComparison.Ordinal));
+        Assert.True(readme.Contains("127 checks", StringComparison.Ordinal));
         Assert.True(readme.Contains("cache_read_input_tokens", StringComparison.Ordinal));
         Assert.True(!publicEvidence.Contains("FINAL_PACKAGE_VERIFIED", StringComparison.Ordinal));
         Assert.True(!publicEvidence.Contains("78 existing checks", StringComparison.Ordinal));
-        Assert.True(publicEvidence.Contains("PRE_RELEASE_CANDIDATE", StringComparison.Ordinal));
-        Assert.True(publicEvidence.Contains("84 automated tests", StringComparison.Ordinal));
+        Assert.True(publicEvidence.Contains("1.1.0", StringComparison.Ordinal));
+        Assert.True(publicEvidence.Contains("grok models", StringComparison.Ordinal));
+        Assert.True(publicEvidence.Contains("127 checks", StringComparison.Ordinal));
+        Assert.True(!publicEvidence.Contains("ISOLATED_PREVIEW.marker", StringComparison.Ordinal) ||
+                    publicEvidence.Contains("do not contain", StringComparison.Ordinal));
         Assert.True(spec.Contains("cache_read_input_tokens", StringComparison.Ordinal));
         Assert.True(spec.Contains("seven independent", StringComparison.Ordinal));
         Assert.True(spec.Contains("missing is distinct from explicit zero", StringComparison.Ordinal) ||
@@ -3390,8 +5390,8 @@ internal static class Program
 
         Assert.True(!window.Topmost);
         Assert.True(!window.ShowInTaskbar);
-        Assert.Near(224d, window.Width, 0.5d);
-        Assert.Near(324d, window.Height, 0.5d);
+        Assert.Near(156d, window.Width, 0.5d);
+        Assert.Near(508d, window.Height, 0.5d);
 
         InvokeWindowMethod(window, "OnToggleTopmost", window, new System.Windows.RoutedEventArgs());
         Assert.True(window.Topmost);
@@ -3488,7 +5488,7 @@ internal static class Program
         Assert.True(viewModel.IsExpanded);
         Assert.Near(1180d, window.Width, 0.5d);
         InvokeWindowMethod(window, "OnToggleExpand", window, new System.Windows.RoutedEventArgs());
-        Assert.Near(224d, window.Width, 0.5d);
+        Assert.Near(156d, window.Width, 0.5d);
         InvokeWindowMethod(window, "OnToggleExpand", window, new System.Windows.RoutedEventArgs());
         Assert.Near(1180d, window.Width, 0.5d);
         Assert.Near(820d, window.Height, 0.5d);
@@ -3520,20 +5520,20 @@ internal static class Program
         InvokeWindowMethod(window, "OnMinimizeToTray", window, new System.Windows.RoutedEventArgs());
         Assert.True(!window.IsVisible);
         Assert.True(!viewModel.IsExpanded);
-        Assert.Near(224d, window.Width, 0.5d);
-        Assert.Near(324d, window.Height, 0.5d);
+        Assert.Near(156d, window.Width, 0.5d);
+        Assert.Near(508d, window.Height, 0.5d);
         InvokeWindowMethod(window, "RestoreFromExternalActivation");
         Assert.True(window.IsVisible);
         Assert.True(!viewModel.IsExpanded);
-        Assert.Near(224d, window.Width, 0.5d);
-        Assert.Near(324d, window.Height, 0.5d);
+        Assert.Near(156d, window.Width, 0.5d);
+        Assert.Near(508d, window.Height, 0.5d);
         InvokeWindowMethod(window, "OnMinimizeToTray", window, new System.Windows.RoutedEventArgs());
         Assert.True(!window.IsVisible);
         tray.ContextMenuStrip?.Items[0].PerformClick();
         window.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
         Assert.True(window.IsVisible);
-        Assert.Near(224d, window.Width, 0.5d);
-        Assert.Near(324d, window.Height, 0.5d);
+        Assert.Near(156d, window.Width, 0.5d);
+        Assert.Near(508d, window.Height, 0.5d);
 
         engine.SaveSettingsAsync(new Dictionary<string, string>
         {
@@ -3552,8 +5552,8 @@ internal static class Program
         InvokeWindowMethod(window, "ApplyExpansionState", false);
         Assert.True(!viewModel.IsExpanded);
         Assert.True(window.Topmost);
-        Assert.Near(224d, window.Width, 0.5d);
-        Assert.Near(324d, window.Height, 0.5d);
+        Assert.Near(156d, window.Width, 0.5d);
+        Assert.Near(508d, window.Height, 0.5d);
         window.Topmost = false;
         InvokeWindowMethod(window, "UpdateTopmostState");
 
@@ -3812,8 +5812,8 @@ internal static class Program
         Assert.Near(work.Left - window.Width + 9, window.Left, 1.5);
 
         Dock("Top");
-        Assert.Near(660, window.Width, 0.5);
-        Assert.Near(80, window.Height, 0.5);
+        Assert.Near(980, window.Width, 40);
+        Assert.Near(96, window.Height, 0.5);
         var topCountdown = (System.Windows.Controls.TextBlock)(window.FindName("CompactTopCountdownText")
             ?? throw new InvalidOperationException("top_countdown_missing"));
         var topRunning = (System.Windows.Controls.TextBlock)(window.FindName("CompactTopRunningText")
@@ -8206,6 +10206,11 @@ internal static class Program
         public static void True(bool condition)
         {
             if (!condition) throw new InvalidOperationException("assertion_failed");
+        }
+
+        public static void True(bool condition, string message)
+        {
+            if (!condition) throw new InvalidOperationException(message);
         }
 
         public static void Equal<T>(T expected, T actual)

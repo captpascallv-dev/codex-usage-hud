@@ -21,8 +21,8 @@ $publicSpecPath = [IO.Path]::GetFullPath((Join-Path $projectRoot 'docs\TECHNICAL
 $publicImagesPath = [IO.Path]::GetFullPath((Join-Path $projectRoot 'docs\images'))
 $licensePath = [IO.Path]::GetFullPath((Join-Path $projectRoot 'LICENSE'))
 $thirdPartyNoticesPath = [IO.Path]::GetFullPath((Join-Path $projectRoot 'THIRD_PARTY_NOTICES.md'))
-$smokeRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot ".artifacts\correction-03\package-smoke\$timestamp"))
-$verifyRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot ".artifacts\correction-03\package-verify\$timestamp"))
+$smokeRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot ".artifacts\package-smoke\$timestamp"))
+$verifyRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot ".artifacts\package-verify\$timestamp"))
 $distPrefix = $distRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 $stagingPrefix = $stagingRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
 if (-not $publishRoot.StartsWith($stagingPrefix, [StringComparison]::OrdinalIgnoreCase) -or
@@ -186,5 +186,5 @@ Write-Output "ZIP path=dist\CodexUsageHUD-win-x64.zip hash=$zipHash"
 Write-Output 'ZIP_HASH path=dist\CodexUsageHUD-win-x64.zip.sha256 self_referential=False'
 Write-Output "INTERNAL_MANIFEST passed=True entries=$($lines.Count)"
 Write-Output 'PACKAGE_PRIVACY passed=True private_paths=False stable_session_ids=False'
-Write-Output "LAUNCH_SMOKE passed=$launchOk data_scope=.artifacts\correction-03\package-smoke"
+Write-Output "LAUNCH_SMOKE passed=$launchOk data_scope=.artifacts\package-smoke"
 Write-Output "SIGNATURE status=$signature unsigned_caveat_documented=True"

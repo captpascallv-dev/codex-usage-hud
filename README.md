@@ -28,6 +28,13 @@ Codex Usage HUD 是一个非官方的 Windows 10/11 x64 本地伴侣应用。它
 Windows 可能因为应用尚未购买代码签名证书而显示 SmartScreen 提示。Release 同时提供
 SHA-256 校验文件，用于确认下载内容没有发生变化。
 
+### v1.1.1 Codex备续期与 Grok 额度显示修复
+
+Codex备的 PI 登录 access token 到期后，HUD 会先让已安装的 PI 通过原生
+`pi auth check --provider openai-codex` 续期，再读取该账户自己的额度；
+额度接口返回认证错误时也会限次续期并重试。HUD 不改写 PI 凭据。
+本版还修复了 Grok 主目录中无关文件变化导致额度暂时消失的问题。
+
 ### v1.1.0 五账户额度与 Grok 自动续期
 
 默认收起为五槽细边栏：当前 Codex App、第二 Codex（本机 PI 的 ChatGPT/Codex 订阅）、

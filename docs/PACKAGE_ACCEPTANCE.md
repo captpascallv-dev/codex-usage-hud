@@ -1,6 +1,6 @@
 # Codex Usage HUD — package acceptance summary
 
-Build: `1.1.0` — five-slot quota rail and Grok CLI renewal.
+Build: `1.1.1` — PI-backed Codex renewal and Grok quota visibility fixes.
 
 This summary describes the published interface and its validation scope. It
 contains no real local usage, session identifiers, credentials or machine paths.
@@ -62,6 +62,13 @@ login shape, isolated-preview marker gating). Grok live renewal was verified
 on the maintainer machine with sanitized status/expiry/window/percent fields
 only. That local install is separate from this public package. Physical
 multi-monitor DPI soak and overnight soak were not claimed for this release.
+
+v1.1.1 adds focused synthetic PI renewal coverage (seven targeted checks) and
+retains an accepted local Grok cache-invalidation fix. PI native `auth check`
+recovered an expired local login; a later sanitized quota read returned Live
+with two windows. A real credential was not force-expired to exercise the HUD
+renewal branch. The local compact WPF rail was not visually targetable by the
+automation, so its text was not independently confirmed on-screen.
 
 A green test result does not replace the real window and interaction checks.
 

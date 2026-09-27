@@ -203,9 +203,8 @@ public static class PiCodexSubscription
     public const string MissingStatusText = "未连接：本机 PI 没有 ChatGPT/Codex 订阅登录";
     public const string MissingDetail = "需要 PI 已登录 openai-codex；不要求第二套 CODEX_HOME";
     public const string MissingCode = "pi_codex_sign_in_required";
-    public const string ExpiredStatusText = "未连接：PI ChatGPT 订阅登录已过期";
-    public const string ExpiredDetail = "不刷新或改写 PI 凭据";
-    public const string ExpiredCode = "pi_codex_login_expired";
+    public const string RenewalStatusText = "PI 登录续期暂不可用，未展示实时额度";
+    public const string RenewalCode = "pi_codex_renewal_unavailable";
     public const string UnsupportedStatusText = "PI openai-codex 登录格式当前无法识别";
     public const string UnsupportedDetail = "不尝试刷新、重新登录或改写凭据";
     public const string UnsupportedCode = "pi_codex_login_unsupported";

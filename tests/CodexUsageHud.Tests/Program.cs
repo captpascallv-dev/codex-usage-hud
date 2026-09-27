@@ -188,6 +188,11 @@ internal static class Program
             ("identity_mismatch_does_not_rebind", IdentityMismatchDoesNotRebind),
             ("pi_codex_parser_and_auth_shape", PiCodexParserAndAuthShape),
             ("pi_codex_adapter_statuses_and_cache", () => PiCodexAdapterStatusesAndCache().GetAwaiter().GetResult()),
+            ("pi_expired_native_renewal_rereads_quota", () => PiExpiredRenewal().GetAwaiter().GetResult()),
+            ("pi_renewal_single_flight", () => PiRenewalSingleFlight().GetAwaiter().GetResult()),
+            ("pi_renewal_coordinator_stamp_tracks_pi_rotation", () => PiRenewalCoordinatorStamp().GetAwaiter().GetResult()),
+            ("pi_renewal_timeout_failure_and_login_required", () => PiRenewalFailures().GetAwaiter().GetResult()),
+            ("pi_401_retry_once_and_unexpired_unchanged", () => PiRetryOnce().GetAwaiter().GetResult()),
             ("isolated_preview_requires_data_and_home", IsolatedPreviewRequiresDataAndHome),
             ("grok_auth_shape_issuer_entries", GrokAuthShapeIssuerEntries),
             ("grok_login_unsupported_not_sign_in", () => GrokLoginUnsupportedNotSignIn().GetAwaiter().GetResult()),
@@ -4580,10 +4585,11 @@ internal static class Program
 
         var expired = await new PiCodexQuotaAdapter(http,
             new InjectedPiCodexTokenSource(null, "fp-b",
-                new PiCodexLoginInspection(true, true, true, true, true, true, true, false, "oauth_expired")))
+                new PiCodexLoginInspection(true, true, true, true, true, true, true, false, "oauth_expired")),
+            new ScriptedPiRenewer(_ => Task.FromResult(PiCodexRenewalResult.Failed)))
             .ReadAsync(slot, CancellationToken.None);
-        Assert.Equal(QuotaSlotStatus.NotConnected, expired.Status);
-        Assert.Equal(PiCodexSubscription.ExpiredCode, expired.ErrorCode);
+        Assert.Equal(QuotaSlotStatus.Unavailable, expired.Status);
+        Assert.Equal("pi_codex_renewal_unavailable", expired.ErrorCode);
 
         var coordinator = new ProviderQuotaCoordinator(piCodex: new ScriptedPiCodexAdapter((_, _) =>
             Task.FromResult(live)));
@@ -4593,6 +4599,230 @@ internal static class Program
         Assert.True(!coordinator.Cache.SharesReference(ProviderSlotIds.CodexPrimary, ProviderSlotIds.CodexSecondary));
         Assert.Equal(60d, board.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent);
         Assert.Equal(QuotaSlotStatus.Live, board.Find(ProviderSlotIds.CodexPrimary)!.Status);
+    }
+
+    private static readonly ProviderSlotSettings PiSlot =
+        new(ProviderSlotIds.CodexSecondary, "Codex备", true);
+    private const string PiUsageFixture =
+        "{\"rate_limit\":{\"primary_window\":{\"used_percent\":25,\"reset_after_seconds\":3600}," +
+        "\"secondary_window\":{\"used_percent\":50,\"reset_after_seconds\":7200}}}";
+
+    private sealed class MutablePiTokens : IPiCodexTokenSource
+    {
+        private int _version;
+        public bool Expired { get; private set; } = true;
+        public bool Present { get; private set; } = true;
+        public string Access { get; private set; } = "synthetic-old";
+        public string Account { get; private set; } = "synthetic-pi-account";
+        public void Fresh(string access = "synthetic-new") { Access = access; Expired = false; _version++; }
+        public void Missing() { Present = false; _version++; }
+        public PiCodexLoginInspection InspectLogin() => !Present ? PiCodexLoginInspection.Missing :
+            new PiCodexLoginInspection(true, true, true, true, true, true, Expired, !Expired,
+                Expired ? "oauth_expired" : "oauth");
+        public PiCodexCredential? ReadCredential() => Present && !Expired
+            ? new PiCodexCredential(Access, Account) : null;
+        public string ConfigurationFingerprint() => _version.ToString(CultureInfo.InvariantCulture);
+    }
+
+    private sealed class ScriptedPiRenewer : IPiCodexSessionRenewer
+    {
+        private readonly Func<CancellationToken, Task<PiCodexRenewalResult>> _run;
+        public int Calls;
+        public ScriptedPiRenewer(Func<CancellationToken, Task<PiCodexRenewalResult>> run) => _run = run;
+        public Task<PiCodexRenewalResult> CheckAsync(CancellationToken token)
+        {
+            Interlocked.Increment(ref Calls);
+            return _run(token);
+        }
+    }
+
+    private static async Task PiExpiredRenewal()
+    {
+        var tokens = new MutablePiTokens();
+        var renewer = new ScriptedPiRenewer(_ =>
+        {
+            tokens.Fresh();
+            return Task.FromResult(PiCodexRenewalResult.Ready);
+        });
+        var calls = 0;
+        var http = new ScriptedHttpSender((request, _) =>
+        {
+            Interlocked.Increment(ref calls);
+            Assert.Equal("Bearer synthetic-new", request.Headers["Authorization"]);
+            Assert.Equal(tokens.Account, request.Headers["chatgpt-account-id"]);
+            Assert.Equal(ProviderHttpAllowlist.PiCodexUsage, request.Url);
+            return Task.FromResult(new AllowlistedHttpResponse(200, PiUsageFixture, request.Url));
+        });
+        var result = await new PiCodexQuotaAdapter(http, tokens, renewer).ReadAsync(PiSlot, CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.Live, result.Status);
+        Assert.Equal(2, result.Windows.Count);
+        Assert.Equal(50d, result.GlanceRemainingPercent);
+        Assert.Equal(25d, result.Windows[0].UsedPercent);
+        Assert.Equal(1, renewer.Calls);
+        Assert.Equal(1, calls);
+    }
+
+    private static async Task PiRenewalSingleFlight()
+    {
+        var tokens = new MutablePiTokens();
+        var release = new TaskCompletionSource<PiCodexRenewalResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var renewer = new ScriptedPiRenewer(_ => release.Task);
+        var requests = 0;
+        var http = new ScriptedHttpSender((request, _) =>
+        {
+            Interlocked.Increment(ref requests);
+            return Task.FromResult(new AllowlistedHttpResponse(200, PiUsageFixture, request.Url));
+        });
+        var adapter = new PiCodexQuotaAdapter(http, tokens, renewer);
+        var first = adapter.ReadAsync(PiSlot, CancellationToken.None);
+        var second = adapter.ReadAsync(PiSlot, CancellationToken.None);
+        using var abandoned = new CancellationTokenSource();
+        var cancelled = adapter.ReadAsync(PiSlot, abandoned.Token);
+        Assert.Equal(1, renewer.Calls);
+        Assert.True(!first.IsCompleted && !second.IsCompleted);
+        abandoned.Cancel();
+        try
+        {
+            await cancelled;
+            throw new InvalidOperationException("cancelled_waiter_completed");
+        }
+        catch (OperationCanceledException) { }
+        tokens.Fresh();
+        release.SetResult(PiCodexRenewalResult.Ready);
+        var results = await Task.WhenAll(first, second).WaitAsync(TimeSpan.FromSeconds(2));
+        Assert.True(results.All(item => item.Status == QuotaSlotStatus.Live));
+        Assert.Equal(2, requests);
+        Assert.Equal(1, renewer.Calls);
+    }
+
+    private static async Task PiRenewalCoordinatorStamp()
+    {
+        var tokens = new MutablePiTokens();
+        var renewer = new ScriptedPiRenewer(_ =>
+        {
+            tokens.Fresh();
+            return Task.FromResult(PiCodexRenewalResult.Ready);
+        });
+        var http = new ScriptedHttpSender((request, _) =>
+            Task.FromResult(new AllowlistedHttpResponse(200, PiUsageFixture, request.Url)));
+        var adapter = new PiCodexQuotaAdapter(http, tokens, renewer);
+        var coordinator = new ProviderQuotaCoordinator(piCodex: adapter, piTokens: tokens);
+        var settings = new ProviderAccessSettings(new[] { PiSlot }, CompactLayoutModes.Rail, true);
+        var board = await coordinator.RefreshAsync(settings, null, CancellationToken.None, manual: true);
+        Assert.Equal(QuotaSlotStatus.Live, board.Find(ProviderSlotIds.CodexSecondary)!.Status);
+        Assert.Equal(QuotaSlotStatus.Live, coordinator.CurrentBoard(DateTimeOffset.UtcNow, settings)
+            .Find(ProviderSlotIds.CodexSecondary)!.Status);
+        Assert.Equal(1, renewer.Calls);
+    }
+
+    private static async Task PiRenewalFailures()
+    {
+        var tokens = new MutablePiTokens();
+        var requests = 0;
+        var http = new ScriptedHttpSender((request, _) =>
+        {
+            Interlocked.Increment(ref requests);
+            return Task.FromResult(new AllowlistedHttpResponse(200, PiUsageFixture, request.Url));
+        });
+        foreach (var kind in new[] { PiCodexRenewalResult.Timeout, PiCodexRenewalResult.Failed,
+                     PiCodexRenewalResult.BinaryMissing, PiCodexRenewalResult.Ready })
+        {
+            var renewer = new ScriptedPiRenewer(_ => Task.FromResult(kind));
+            var adapter = new PiCodexQuotaAdapter(http, tokens, renewer);
+            var result = await adapter.ReadAsync(PiSlot, CancellationToken.None);
+            Assert.Equal(QuotaSlotStatus.Unavailable, result.Status);
+            Assert.Equal("pi_codex_renewal_unavailable", result.ErrorCode);
+            Assert.True(result.GlanceRemainingPercent is null);
+            var repeat = await adapter.ReadAsync(PiSlot, CancellationToken.None);
+            Assert.Equal(QuotaSlotStatus.Unavailable, repeat.Status);
+            Assert.Equal(1, renewer.Calls); // failure backoff, including exit 0 with no fresh token
+        }
+        var missing = new MutablePiTokens();
+        missing.Missing();
+        var skip = new ScriptedPiRenewer(_ => throw new InvalidOperationException("should not run"));
+        var notLoggedIn = await new PiCodexQuotaAdapter(http, missing, skip).ReadAsync(PiSlot, CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.NotConnected, notLoggedIn.Status);
+        Assert.Equal(PiCodexSubscription.MissingCode, notLoggedIn.ErrorCode);
+        Assert.Equal(0, skip.Calls);
+        var loginLost = new ScriptedPiRenewer(_ =>
+        {
+            tokens.Missing();
+            return Task.FromResult(PiCodexRenewalResult.Failed);
+        });
+        var required = await new PiCodexQuotaAdapter(http, tokens, loginLost).ReadAsync(PiSlot, CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.NotConnected, required.Status);
+        Assert.Equal(0, requests);
+    }
+
+    private static async Task PiRetryOnce()
+    {
+        var tokens = new MutablePiTokens();
+        tokens.Fresh("synthetic-before");
+        var renewer = new ScriptedPiRenewer(_ =>
+        {
+            tokens.Fresh("synthetic-after");
+            return Task.FromResult(PiCodexRenewalResult.Ready);
+        });
+        var calls = 0;
+        var http = new ScriptedHttpSender((request, _) =>
+        {
+            calls++;
+            Assert.Equal(calls == 1 ? "Bearer synthetic-before" : "Bearer synthetic-after",
+                request.Headers["Authorization"]);
+            return Task.FromResult(new AllowlistedHttpResponse(calls == 1 ? 401 : 200,
+                calls == 1 ? "" : PiUsageFixture, request.Url));
+        });
+        var adapter = new PiCodexQuotaAdapter(http, tokens, renewer);
+        var result = await adapter.ReadAsync(PiSlot, CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.Live, result.Status);
+        Assert.Equal(2, calls);
+        Assert.Equal(1, renewer.Calls);
+
+        var rejectedCalls = 0;
+        var reject = new ScriptedHttpSender((request, _) =>
+        {
+            rejectedCalls++;
+            return Task.FromResult(new AllowlistedHttpResponse(403, "", request.Url));
+        });
+        var failedAdapter = new PiCodexQuotaAdapter(reject, tokens, renewer);
+        var rejected = await failedAdapter.ReadAsync(PiSlot, CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.NotConnected, rejected.Status);
+        Assert.Equal("pi_codex_unauthorized", rejected.ErrorCode);
+        Assert.True(rejected.GlanceRemainingPercent is null);
+        Assert.Equal(2, rejectedCalls); // no third quota attempt or refresh loop
+        Assert.Equal(2, renewer.Calls);
+
+        var failedRenewer = new ScriptedPiRenewer(_ => Task.FromResult(PiCodexRenewalResult.Timeout));
+        var singleRejectCalls = 0;
+        var singleReject = new ScriptedHttpSender((request, _) =>
+        {
+            singleRejectCalls++;
+            return Task.FromResult(new AllowlistedHttpResponse(401, "", request.Url));
+        });
+        var failed = await new PiCodexQuotaAdapter(singleReject, tokens, failedRenewer)
+            .ReadAsync(PiSlot, CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.Unavailable, failed.Status);
+        Assert.Equal(1, singleRejectCalls);
+        Assert.Equal(1, failedRenewer.Calls);
+
+        var unchanged = new ScriptedPiRenewer(_ => throw new InvalidOperationException("unexpected renewal"));
+        var normalHttp = new ScriptedHttpSender((request, _) =>
+            Task.FromResult(new AllowlistedHttpResponse(200, PiUsageFixture, request.Url)));
+        var normal = await new PiCodexQuotaAdapter(normalHttp, tokens, unchanged)
+            .ReadAsync(PiSlot, CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.Live, normal.Status);
+        Assert.Equal(0, unchanged.Calls);
+        var changedHttp = new ScriptedHttpSender((request, _) =>
+        {
+            tokens.Fresh("synthetic-other-login");
+            return Task.FromResult(new AllowlistedHttpResponse(200, PiUsageFixture, request.Url));
+        });
+        var changed = await new PiCodexQuotaAdapter(changedHttp, tokens, unchanged)
+            .ReadAsync(PiSlot, CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.Unavailable, changed.Status);
+        Assert.True(changed.GlanceRemainingPercent is null);
+        Assert.Equal(0, unchanged.Calls);
+        Assert.Equal(TimeSpan.FromSeconds(24), ProviderQuotaCoordinator.SlotReadTimeout(ProviderSlotIds.CodexSecondary));
     }
 
     private static string SyntheticChatGptJwt(string accountId, DateTimeOffset expires)

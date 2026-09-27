@@ -208,6 +208,17 @@ public sealed class ProviderQuotaCoordinator
             {
                 snapshot = await ReadSlotAsync(slot, primaryCodexObservation, timeout.Token, primaryIdentityHash,
                     primaryCodexHome).ConfigureAwait(false);
+                // PI's native refresh rotates its own auth file during this read. Bind the
+                // resulting observation to the new stamp, never to the pre-refresh stamp.
+                if (slot.SlotId == ProviderSlotIds.CodexSecondary && IsCurrent(slot.SlotId, started))
+                {
+                    var refreshedKey = ConfigurationKey(slot);
+                    if (!string.Equals(fingerprint, refreshedKey, StringComparison.Ordinal))
+                    {
+                        fingerprint = refreshedKey;
+                        started = BeginGeneration(slot.SlotId, fingerprint);
+                    }
+                }
                 snapshot = snapshot with { ConfigFingerprint = fingerprint };
                 if (snapshot.Status is QuotaSlotStatus.Live or QuotaSlotStatus.Stale or
                     QuotaSlotStatus.Disabled or QuotaSlotStatus.SetupRequired or QuotaSlotStatus.NotConnected
@@ -409,6 +420,8 @@ public sealed class ProviderQuotaCoordinator
     {
         if (string.Equals(slotId, ProviderSlotIds.Grok, StringComparison.Ordinal))
             return TimeSpan.FromSeconds(35);
+        if (string.Equals(slotId, ProviderSlotIds.CodexSecondary, StringComparison.Ordinal))
+            return TimeSpan.FromSeconds(24);
         if (slotId.StartsWith("codex", StringComparison.Ordinal))
             return TimeSpan.FromSeconds(12);
         return TimeSpan.FromSeconds(8);

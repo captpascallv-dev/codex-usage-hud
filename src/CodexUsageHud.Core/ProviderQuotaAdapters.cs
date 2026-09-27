@@ -540,11 +540,18 @@ public class PiCodexQuotaAdapter
 {
     private readonly IAllowlistedHttpSender _http;
     private readonly IPiCodexTokenSource _tokens;
+    private readonly IPiCodexSessionRenewer _renewer;
+    private readonly object _renewalGate = new();
+    private Task<PiCodexRenewalResult>? _inFlight;
+    private DateTimeOffset _retryAfterUtc;
+    private string? _failedStamp;
 
-    public PiCodexQuotaAdapter(IAllowlistedHttpSender http, IPiCodexTokenSource tokens)
+    public PiCodexQuotaAdapter(IAllowlistedHttpSender http, IPiCodexTokenSource tokens,
+        IPiCodexSessionRenewer? renewer = null)
     {
         _http = http;
         _tokens = tokens;
+        _renewer = renewer ?? new PiCodexNativeRenewer();
     }
 
     public virtual async Task<ProviderSlotSnapshot> ReadAsync(ProviderSlotSettings settings,
@@ -597,20 +604,21 @@ public class PiCodexQuotaAdapter
 
             if (inspection.Expired)
             {
+                var renewal = await RenewAsync(_tokens.ConfigurationFingerprint(), false, cancellationToken)
+                    .ConfigureAwait(false);
+                inspection = InspectSafely();
+                if (!inspection.Usable)
+                    return RenewalPlaceholder(settings, inspection, renewal);
+            }
+            else
+            {
                 return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.NotConnected,
-                    PiCodexSubscription.ExpiredStatusText, PiCodexSubscription.ExpiredDetail,
-                    PiCodexSubscription.ExpiredCode) with
+                    PiCodexSubscription.MissingStatusText, PiCodexSubscription.MissingDetail,
+                    PiCodexSubscription.MissingCode) with
                 {
                     FieldPresenceFlags = inspection.Format(),
                 };
             }
-
-            return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.NotConnected,
-                PiCodexSubscription.MissingStatusText, PiCodexSubscription.MissingDetail,
-                PiCodexSubscription.MissingCode) with
-            {
-                FieldPresenceFlags = inspection.Format(),
-            };
         }
 
         PiCodexCredential? credential;
@@ -635,7 +643,15 @@ public class PiCodexQuotaAdapter
             };
         }
 
+        return await ReadUsageAsync(settings, inspection, credential, false, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<ProviderSlotSnapshot> ReadUsageAsync(ProviderSlotSettings settings,
+        PiCodexLoginInspection inspection, PiCodexCredential credential, bool retried,
+        CancellationToken cancellationToken)
+    {
         var identity = BoundIdentity.HashAccount(credential.AccountId);
+        var stamp = _tokens.ConfigurationFingerprint();
         var headers = new Dictionary<string, string>(StringComparer.Ordinal)
         {
             ["Authorization"] = "Bearer " + credential.AccessToken,
@@ -649,9 +665,30 @@ public class PiCodexQuotaAdapter
                 ProviderHttpAllowlist.PiCodexUsage, headers), cancellationToken).ConfigureAwait(false);
             if (response.StatusCode is 401 or 403)
             {
+                if (!retried)
+                {
+                    var renewal = await RenewAsync(stamp, true, cancellationToken).ConfigureAwait(false);
+                    var after = InspectSafely();
+                    if (after.Usable && renewal == PiCodexRenewalResult.Ready)
+                    {
+                        PiCodexCredential? fresh;
+                        try { fresh = _tokens.ReadCredential(); }
+                        catch (Exception) { fresh = null; }
+                        if (fresh is not null)
+                            return await ReadUsageAsync(settings, after, fresh, true, cancellationToken)
+                                .ConfigureAwait(false);
+                    }
+                    if (!after.Usable && (!after.FilePresent || !after.HasOpenAiCodexKey))
+                        return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.NotConnected,
+                            PiCodexSubscription.MissingStatusText, PiCodexSubscription.MissingDetail,
+                            PiCodexSubscription.MissingCode);
+                    return RenewalPlaceholder(settings, after, renewal);
+                }
+
+                MarkRenewalFailure(_tokens.ConfigurationFingerprint());
                 return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.NotConnected,
-                    PiCodexSubscription.ExpiredStatusText, "wham/usage 拒绝",
-                    PiCodexSubscription.ExpiredCode) with
+                    "未连接：PI 续期后额度接口仍拒绝登录", "wham/usage 拒绝",
+                    "pi_codex_unauthorized") with
                 {
                     OpaqueIdentityHash = identity,
                     AccountKey = identity,
@@ -669,6 +706,10 @@ public class PiCodexQuotaAdapter
                 };
             }
 
+            if (!string.Equals(stamp, _tokens.ConfigurationFingerprint(), StringComparison.Ordinal))
+                return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.Unavailable,
+                    "PI 登录读取期间已变化，等待重新读取", "不沿用旧账户额度", "pi_codex_login_changed");
+            lock (_renewalGate) { _retryAfterUtc = default; _failedStamp = null; }
             var now = DateTimeOffset.UtcNow;
             var windows = PiCodexQuotaParser.Parse(response.Body, now, out var error, out var shape);
             if (windows.Count == 0)
@@ -705,5 +746,69 @@ public class PiCodexQuotaAdapter
             return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.Unavailable,
                 "PI Codex 网络不可用", "独立失败", "pi_codex_network");
         }
+    }
+
+    private PiCodexLoginInspection InspectSafely()
+    {
+        try { return _tokens.InspectLogin(); }
+        catch (Exception) { return PiCodexLoginInspection.Missing; }
+    }
+
+    private async Task<PiCodexRenewalResult> RenewAsync(string stamp, bool force,
+        CancellationToken cancellationToken)
+    {
+        Task<PiCodexRenewalResult> pending;
+        lock (_renewalGate)
+        {
+            if (_inFlight is { IsCompleted: false }) pending = _inFlight;
+            else if (string.Equals(_failedStamp, stamp, StringComparison.Ordinal) &&
+                     DateTimeOffset.UtcNow < _retryAfterUtc)
+                return PiCodexRenewalResult.Failed;
+            else
+            {
+                _inFlight = pending = CheckAndRenewAsync(stamp, force);
+            }
+        }
+        return await pending.WaitAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<PiCodexRenewalResult> CheckAndRenewAsync(string stamp, bool force)
+    {
+        var current = InspectSafely();
+        if (current.Usable && (!force || !string.Equals(_tokens.ConfigurationFingerprint(), stamp,
+                StringComparison.Ordinal))) return PiCodexRenewalResult.Ready;
+
+        PiCodexRenewalResult result;
+        try { result = await _renewer.CheckAsync(CancellationToken.None).ConfigureAwait(false); }
+        catch (Exception) { result = PiCodexRenewalResult.Failed; }
+        // Exit 0 is not proof of a refreshed access token; inspect the PI store again.
+        if (result == PiCodexRenewalResult.Ready && !InspectSafely().Usable)
+            result = PiCodexRenewalResult.Failed;
+        if (result != PiCodexRenewalResult.Ready)
+            MarkRenewalFailure(_tokens.ConfigurationFingerprint());
+        return result;
+    }
+
+    private void MarkRenewalFailure(string stamp)
+    {
+        lock (_renewalGate)
+        {
+            _failedStamp = stamp;
+            _retryAfterUtc = DateTimeOffset.UtcNow.AddSeconds(30);
+        }
+    }
+
+    private static ProviderSlotSnapshot RenewalPlaceholder(ProviderSlotSettings settings,
+        PiCodexLoginInspection inspection, PiCodexRenewalResult result)
+    {
+        var missing = !inspection.FilePresent || !inspection.HasOpenAiCodexKey;
+        return ProviderQuotaPresentation.Placeholder(settings, false,
+            missing ? QuotaSlotStatus.NotConnected : QuotaSlotStatus.Unavailable,
+            missing ? PiCodexSubscription.MissingStatusText : PiCodexSubscription.RenewalStatusText,
+            result == PiCodexRenewalResult.Timeout ? "PI auth check 超时" : "PI auth check 未提供可用登录",
+            missing ? PiCodexSubscription.MissingCode : PiCodexSubscription.RenewalCode) with
+        {
+            FieldPresenceFlags = inspection.Format(),
+        };
     }
 }

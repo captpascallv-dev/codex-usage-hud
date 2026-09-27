@@ -58,7 +58,9 @@ public static class ProviderLiveDiagnostic
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(slot.SlotId == ProviderSlotIds.Grok
                 ? TimeSpan.FromSeconds(40)
-                : TimeSpan.FromSeconds(10));
+                : slot.SlotId == ProviderSlotIds.CodexSecondary
+                    ? TimeSpan.FromSeconds(28)
+                    : TimeSpan.FromSeconds(10));
             ProviderSlotSnapshot snapshot;
             string? dependency = null;
             try

@@ -28,6 +28,16 @@ Codex Usage HUD 是一个非官方的 Windows 10/11 x64 本地伴侣应用。它
 Windows 可能因为应用尚未购买代码签名证书而显示 SmartScreen 提示。Release 同时提供
 SHA-256 校验文件，用于确认下载内容没有发生变化。
 
+### Claude 订阅额度槽
+
+在原有五个额度槽之外增加独立的 Claude 订阅槽，默认关闭，已有用户的启用状态保持不变。
+勾选后只读取本机 Claude Code 已有 OAuth 登录里的访问字段，向
+`https://api.anthropic.com/api/oauth/usage` 查询订阅用量。界面显示 5 小时会话和每周全部模型的
+剩余百分比（100 减去接口给出的已用百分比），并只展示接口实际返回的模型窗口和重置时间。
+缺少的窗口不是 0% 或 100%，缺少的重置时间不会推算。不分析 Claude 会话或上下文，不与 Codex
+或其他槽合并，也不从 raw token、本地对话或 API key 账单换算额度。没有可用登录时显示未连接；
+接口限流、暂时失败或格式不支持时显示不可用，并按有界退避重试。HUD 不登录、不刷新、不改写凭据。
+
 ### v1.1.1 Codex备续期与 Grok 额度显示修复
 
 Codex备的 PI 登录 access token 到期后，HUD 会先让已安装的 PI 通过原生
@@ -108,12 +118,12 @@ Codex App Server 现会同时返回名为 `primary` 与 `secondary` 的额度窗
 
 - 完全本地运行，不上传遥测，不做云同步。
 - Codex 额度仍只通过本机 App Server 只读方法 `account/rateLimits/read` 读取。
-- 五个额度槽（两个 Codex、Cursor、Grok、Grok Bot）。当前 Codex 走本机 App Server。
+- 六个额度槽（两个 Codex、Cursor、Grok、Grok Bot、Claude 订阅）。当前 Codex 走本机 App Server。
   第二 Codex 读取本机 PI 已登录的 ChatGPT/Codex 订阅（openai-codex），不要求第二套
-  `CODEX_HOME`，也不会复制登录。Cursor/Grok/Grok Bot 需在设置中勾选后，运行时才读取
-  各自本机已有登录中的必要字段，并只访问该服务自己的额度接口。Grok 访问令牌到期时，
-  若本地仍有可续期凭据，HUD 会调用官方 `grok models` 让 Grok CLI 自己续写登录，而不是
-  把文件时间戳当成退出登录，也不会改写 `auth.json`。
+  `CODEX_HOME`，也不会复制登录。Cursor、Grok、Grok Bot 和 Claude 需在设置中勾选后，运行时才读取
+  各自本机已有登录中的必要字段，并只访问该服务自己的额度接口。Claude 只显示订阅用量，不分析会话。
+  Grok 访问令牌到期时，若本地仍有可续期凭据，HUD 会调用官方 `grok models` 让 Grok CLI 自己续写登录，而不是
+  把文件时间戳当成退出登录，也不会改写 `auth.json`。Claude 登录过期时不刷新、不改写凭据。
 - 会话分析默认显示所有者确认的当前 Codex 主目录会话，并排除确认他户。这是目录级绑定，
   不是逐行 `account_id` 机器核验。若运行时 App 身份后来改变，不会把旧历史改绑到新身份。
 - 不读取或保存 prompt、response、浏览器 Cookie 仓库；不把凭据写入 HUD 数据库、日志或界面。
@@ -138,8 +148,10 @@ Codex Usage HUD is an unofficial, privacy-first Windows companion for local Code
 It shows official quota windows, APP/CLI session hierarchy, raw-token metadata, running
 state, and explainable continuation-risk guidance. It runs locally. Primary Codex quota uses
 the local App Server; the second Codex slot may read PI's existing ChatGPT/Codex
-(`openai-codex`) login against its usage endpoint. Opted-in Cursor/Grok/Grok Bot slots may
-use existing logins against their own quota endpoints. When a Grok access key is expired
+(`openai-codex`) login against its usage endpoint. Opted-in Cursor/Grok/Grok Bot/Claude slots may
+use existing logins against their own quota endpoints. Claude is subscription quota only:
+five-hour and weekly utilization when the usage endpoint returns them, with no session analysis
+and no token-to-quota conversion. When a Grok access key is expired
 but still renewable, the HUD asks the official `grok models` CLI to refresh it instead of
 treating the file timestamp as a logout. Prompts, responses, and credential
 values are never collected, logged, or shown.
@@ -171,16 +183,17 @@ the source with the project-local scripts below.
 7. 发布包是便携版，不需要安装；移动 EXE 后重新运行一次即可修复已启用的开机启动路径。
 8. 额度槽：当前 Codex 使用本机已安装的 Codex CLI App Server。第二 Codex 读取本机 PI
    已登录的 `openai-codex` 订阅；没有该登录时显示未连接，不要求第二套 Codex 主目录。
-   在设置中勾选 Cursor、Grok 或 Grok Bot 后，HUD 才使用对应本机已有登录。Grok 需要已安装
+   在设置中勾选 Cursor、Grok、Grok Bot 或 Claude 后，HUD 才使用对应本机已有登录。Grok 需要已安装
    并登录的 Grok CLI；到期时由官方 `grok models` 续期。Grok Bot 走 Cursor 登录中的独立额度。
-   公开包默认不启用 Cursor/Grok/Grok Bot，也不会写入任何人的启用勾选。
+   Claude 读取本机 Claude Code 已有 OAuth 登录的订阅用量（5 小时与每周窗口），不启动或更新 Claude，
+   也不把 raw token 当成订阅额度。公开包默认不启用 Cursor/Grok/Grok Bot/Claude，也不会写入任何人的启用勾选。
 9. 双击发布包中的 EXE 使用 `%LOCALAPPDATA%\CodexUsageHUD` 与默认 Codex 主目录。
    公开 ZIP 不含 `ISOLATED_PREVIEW.marker`。`--data-dir` / `--codex-home` 仅用于隔离预览或
    包装自检，不会在普通启动时改到开发机目录。
 
 竖向和顶部紧凑卡都显示官方剩余额度、运行中会话数、本机当前额度周期 raw token 和重置倒计时，
-并都提供窗口置顶按钮。默认收起形态是五账户细边栏（约 156×508，顶部约 980×96）；设置里可切回
-原 224×324 竖向卡 / 660×80 顶栏。置顶后，自动隐藏留下的 9 像素把手仍位于网页等普通前台窗口之上。
+并都提供窗口置顶按钮。默认收起形态是六账户细边栏（竖向宽 252，高度随槽数测量，短屏幕可滚动；
+顶部最宽约 1100）；设置里可切回原 224×324 竖向卡 / 660×80 顶栏。置顶后，自动隐藏留下的 9 像素把手仍位于网页等普通前台窗口之上。
 展开面板默认显示“最近会话”，并提供“运行中 / 全部 / 未归属”导航、按活动或 token 排序、
 APP/CLI 来源标记、可展开的子任务层级，以及最近一轮与会话累计明细。父会话同时显示
 自身 token、所辖子任务 token 与工作合计；全局和本额度周期总量仍按每个 thread 只计一次。
@@ -359,12 +372,17 @@ model-catalog inference is `catalog-default`; otherwise it is unavailable.
 Precedence is rollout-explicit, legacy-preserved, catalog-default, then
 unavailable. The HUD observes this value and never changes runtime service.
 
-Cursor, Grok and Grok Bot quota reads run only after the user enables that slot.
+Cursor, Grok, Grok Bot and Claude quota reads run only after the user enables that slot.
 They use existing local logins against fixed HTTPS allowlists. Grok may spawn
 the official `grok models` CLI to renew an expired access key that still has a
 refresh grant, then re-read the login file. The HUD does not write Grok
 `auth.json`. The PI second Codex slot reads `openai-codex` against
 `chatgpt.com/backend-api/wham/usage` without a second `CODEX_HOME`.
+Claude reads `claudeAiOauth.accessToken` from the existing Claude Code credential
+file and GETs `https://api.anthropic.com/api/oauth/usage`. Remaining percent is
+100 minus the returned utilization. Missing windows and missing reset times are
+left blank. The endpoint is undocumented and may return 429; the HUD then shows
+unavailable and backs off. It does not refresh Claude credentials or launch the CLI.
 
 ## Controls
 

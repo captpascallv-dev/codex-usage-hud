@@ -10,10 +10,11 @@ public static class ProviderSlotIds
     public const string Cursor = "cursor";
     public const string Grok = "grok";
     public const string GrokBot = "grok-bot";
+    public const string Claude = "claude";
 
     public static readonly IReadOnlyList<string> All = new[]
     {
-        CodexPrimary, CodexSecondary, Cursor, Grok, GrokBot,
+        CodexPrimary, CodexSecondary, Cursor, Grok, GrokBot, Claude,
     };
 }
 
@@ -23,6 +24,7 @@ public static class ProviderIds
     public const string Cursor = "cursor";
     public const string Grok = "grok";
     public const string GrokBot = "grok-bot";
+    public const string Claude = "claude";
 }
 
 public enum QuotaSlotStatus
@@ -83,6 +85,7 @@ public sealed record ProviderSlotSnapshot(
         ProviderSlotIds.Cursor => "Cursor",
         ProviderSlotIds.Grok => "Grok",
         ProviderSlotIds.GrokBot => "Bot",
+        ProviderSlotIds.Claude => "Claude",
         _ => Label,
     };
 
@@ -184,6 +187,7 @@ public sealed record ProviderAccessSettings(
             new ProviderSlotSettings(ProviderSlotIds.Cursor, "Cursor", false),
             new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", false),
             new ProviderSlotSettings(ProviderSlotIds.GrokBot, "Grok Bot", false),
+            new ProviderSlotSettings(ProviderSlotIds.Claude, "Claude 订阅", false),
         },
         CompactLayoutModes.Rail,
         false);
@@ -328,6 +332,7 @@ public static class ProviderQuotaPresentation
         ProviderSlotIds.Cursor => ProviderIds.Cursor,
         ProviderSlotIds.Grok => ProviderIds.Grok,
         ProviderSlotIds.GrokBot => ProviderIds.GrokBot,
+        ProviderSlotIds.Claude => ProviderIds.Claude,
         _ => slotId,
     };
 

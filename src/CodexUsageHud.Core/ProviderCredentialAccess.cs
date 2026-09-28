@@ -50,6 +50,15 @@ public static class WindowsLoginPresence
         return InspectFile(ProviderIds.Codex, path, @"%USERPROFILE%\.pi\agent\auth-file");
     }
 
+    public static LoginPresence ClaudeCredentialsFile(string? userProfile = null, string? configDir = null)
+    {
+        var configured = configDir ?? Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR");
+        var hint = string.IsNullOrWhiteSpace(configured)
+            ? @"%USERPROFILE%\.claude\.credentials.json"
+            : @"%CLAUDE_CONFIG_DIR%\.credentials.json";
+        return InspectFile(ProviderIds.Claude, ClaudeCredentialPaths.Resolve(userProfile, configured), hint);
+    }
+
     private static LoginPresence InspectFile(string providerId, string path, string hint)
     {
         try
@@ -105,6 +114,48 @@ public interface IPiCodexTokenSource
     PiCodexCredential? ReadCredential();
     PiCodexLoginInspection InspectLogin();
     string ConfigurationFingerprint();
+}
+
+public interface IClaudeTokenSource
+{
+    string? ReadAccessToken();
+    ClaudeLoginInspection InspectLogin();
+}
+
+public static class ClaudeCredentialPaths
+{
+    public static string Resolve(string? userProfile = null, string? configDir = null)
+    {
+        if (!string.IsNullOrWhiteSpace(configDir))
+            return Path.Combine(configDir.Trim(), ".credentials.json");
+        userProfile ??= Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        return Path.Combine(userProfile, ".claude", ".credentials.json");
+    }
+}
+
+public sealed record ClaudeLoginInspection(
+    bool FilePresent,
+    bool Recognized,
+    bool HasAccess,
+    bool HasExpiryField,
+    bool Expired,
+    bool Usable,
+    string FormatKind)
+{
+    public static ClaudeLoginInspection Missing { get; } =
+        new(false, false, false, false, false, false, "absent");
+
+    public static ClaudeLoginInspection Injected(bool usable) =>
+        new(true, usable, usable, false, false, usable, usable ? "injected" : "absent");
+
+    public string Format() =>
+        "file_present=" + (FilePresent ? "1" : "0") +
+        " recognized=" + (Recognized ? "1" : "0") +
+        " has_access=" + (HasAccess ? "1" : "0") +
+        " has_expiry=" + (HasExpiryField ? "1" : "0") +
+        " expired=" + (Expired ? "1" : "0") +
+        " usable=" + (Usable ? "1" : "0") +
+        " format_kind=" + FormatKind;
 }
 
 public sealed class InjectedTokenSource : ICursorTokenSource, IGrokTokenSource
@@ -349,6 +400,86 @@ public static class DefaultTokenSources
     {
         userProfile ??= Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         return new PiCodexAuthFileTokenSource(Path.Combine(userProfile, ".pi", "agent", "auth.json"));
+    }
+
+    public static IClaudeTokenSource Claude(string? userProfile = null, string? configDir = null) =>
+        new ClaudeCodeCredentialTokenSource(ClaudeCredentialPaths.Resolve(userProfile,
+            configDir ?? Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR")));
+}
+
+public sealed class InjectedClaudeTokenSource : IClaudeTokenSource
+{
+    private readonly string? _token;
+    private readonly ClaudeLoginInspection _inspection;
+    public int ReadCalls;
+    public int InspectCalls;
+
+    public InjectedClaudeTokenSource(string? token, ClaudeLoginInspection? inspection = null)
+    {
+        _token = token;
+        _inspection = inspection ?? ClaudeLoginInspection.Injected(!string.IsNullOrWhiteSpace(token));
+    }
+
+    public string? ReadAccessToken()
+    {
+        ReadCalls++;
+        return _token;
+    }
+
+    public ClaudeLoginInspection InspectLogin()
+    {
+        InspectCalls++;
+        return _inspection;
+    }
+}
+
+public sealed class ClaudeCodeCredentialTokenSource : IClaudeTokenSource
+{
+    private readonly string _path;
+
+    public ClaudeCodeCredentialTokenSource(string path)
+    {
+        _path = path;
+    }
+
+    public string? ReadAccessToken()
+    {
+        var inspection = InspectLogin();
+        if (!inspection.Usable) return null;
+        if (!File.Exists(_path)) return null;
+        try
+        {
+            var json = File.ReadAllText(_path, Encoding.UTF8);
+            return ClaudeOAuthParser.ExtractAccessToken(json);
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    public ClaudeLoginInspection InspectLogin()
+    {
+        if (!File.Exists(_path)) return ClaudeLoginInspection.Missing;
+        try
+        {
+            var json = File.ReadAllText(_path, Encoding.UTF8);
+            var parsed = ClaudeOAuthParser.Inspect(json);
+            return new ClaudeLoginInspection(true, parsed.Recognized, parsed.HasAccess, parsed.HasExpiryField,
+                parsed.Expired, parsed.Usable, parsed.FormatKind);
+        }
+        catch (IOException)
+        {
+            return new ClaudeLoginInspection(true, false, false, false, false, false, "unreadable");
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return new ClaudeLoginInspection(true, false, false, false, false, false, "unreadable");
+        }
     }
 }
 

@@ -27,11 +27,13 @@ public static class ProviderHttpAllowlist
     public const string CursorHost = "cursor.com";
     public const string GrokHost = "cli-chat-proxy.grok.com";
     public const string ChatgptHost = "chatgpt.com";
+    public const string AnthropicHost = "api.anthropic.com";
     public static readonly Uri CursorUsageSummary = new("https://cursor.com/api/usage-summary");
     public static readonly Uri CursorSandUsage = new("https://cursor.com/api/dashboard/get-sand-usage-status");
     public static readonly Uri GrokBilling = new("https://cli-chat-proxy.grok.com/v1/billing?format=credits");
     public static readonly Uri GrokSettings = new("https://cli-chat-proxy.grok.com/v1/settings");
     public static readonly Uri PiCodexUsage = new("https://chatgpt.com/backend-api/wham/usage");
+    public static readonly Uri ClaudeOAuthUsage = new("https://api.anthropic.com/api/oauth/usage");
 
     public static bool IsAllowed(Uri url)
     {
@@ -51,6 +53,14 @@ public static class ProviderHttpAllowlist
 
         if (url.Host.Equals(ChatgptHost, StringComparison.OrdinalIgnoreCase))
             return url.AbsolutePath.Equals(PiCodexUsage.AbsolutePath, StringComparison.Ordinal);
+
+        if (url.Host.Equals(AnthropicHost, StringComparison.OrdinalIgnoreCase))
+        {
+            return url.IsDefaultPort &&
+                   string.IsNullOrEmpty(url.UserInfo) &&
+                   string.IsNullOrEmpty(url.Query) &&
+                   url.AbsolutePath.Equals(ClaudeOAuthUsage.AbsolutePath, StringComparison.Ordinal);
+        }
 
         return false;
     }

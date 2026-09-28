@@ -158,6 +158,7 @@ internal static class Program
             ("provider_identity_does_not_masquerade", ProviderIdentityCollision),
             ("primary_binding_unknown_history", PrimaryBindingUnknownHistory),
             ("provider_missing_fields_no_allowance_stale_reset", ProviderParserTruthfulness),
+            ("claude_subscription_quota_slot", () => ClaudeSubscriptionQuotaSlot().GetAwaiter().GetResult()),
             ("failed_provider_does_not_block_ui", () => FailedProviderDoesNotBlock(runRoot).GetAwaiter().GetResult()),
             ("codex_home_child_environment_isolation", CodexHomeChildEnvironmentIsolation),
             ("hud_rail_dock_rapid_click", () => HudRailDockRapidClick(runRoot)),
@@ -820,7 +821,7 @@ internal static class Program
         var list = (System.Windows.Controls.ItemsControl)(window.FindName("RailSlotList")
             ?? throw new InvalidOperationException("rail_slot_list_missing"));
         list.UpdateLayout();
-        Assert.Equal(5, list.Items.Count);
+        Assert.Equal(6, list.Items.Count);
         var scroller = (System.Windows.Controls.ScrollViewer)(window.FindName("RailSlotScroller")
             ?? throw new InvalidOperationException("rail_scroller_missing"));
         if (expectScroll)
@@ -832,29 +833,39 @@ internal static class Program
         else
         {
             Assert.True(scroller.ScrollableHeight < 8, $"unexpected_scroll:{scroller.ScrollableHeight}");
+            AssertRailSlotInside(window, FindRailSlotButton(list, 4), "fifth");
+            var fifthAlias = FindVisualChildren<System.Windows.Controls.TextBlock>(FindRailSlotButton(list, 4))
+                .FirstOrDefault(block => block.Text == "Bot");
+            Assert.True(fifthAlias is not null, "fifth_slot_alias_missing");
+            Assert.True(fifthAlias!.ActualHeight > 8, "fifth_slot_alias_not_rendered");
         }
 
-        var button = FindRailSlotButton(list, 4);
+        var button = FindRailSlotButton(list, 5);
+        AssertRailSlotInside(window, button, "sixth");
+        var alias = FindVisualChildren<System.Windows.Controls.TextBlock>(button)
+            .FirstOrDefault(block => block.Text == "Claude");
+        Assert.True(alias is not null, "sixth_slot_alias_missing");
+        Assert.True(alias!.ActualHeight > 8, "sixth_slot_alias_not_rendered");
+    }
+
+    private static void AssertRailSlotInside(MainWindow window, System.Windows.Controls.Button button, string name)
+    {
         var topLeft = button.TranslatePoint(new System.Windows.Point(0, 0), window);
         var bottom = topLeft.Y + button.ActualHeight;
-        Assert.True(topLeft.Y >= -1, $"fifth_slot_above_window:{topLeft.Y}");
-        Assert.True(bottom <= window.Height + 1.5, $"fifth_slot_clipped:{bottom}>{window.Height}");
-        var alias = FindVisualChildren<System.Windows.Controls.TextBlock>(button)
-            .FirstOrDefault(block => block.Text == "Bot");
-        Assert.True(alias is not null, "fifth_slot_alias_missing");
-        Assert.True(alias!.ActualHeight > 8, "fifth_slot_alias_not_rendered");
+        Assert.True(topLeft.Y >= -1, $"{name}_slot_above_window:{topLeft.Y}");
+        Assert.True(bottom <= window.Height + 1.5, $"{name}_slot_clipped:{bottom}>{window.Height}");
     }
 
     private static void AssertRailKeyTextNotEllipsized(MainWindow window)
     {
         var list = (System.Windows.Controls.ItemsControl)(window.FindName("RailSlotList")
             ?? throw new InvalidOperationException("rail_slot_list_missing"));
-        for (var index = 0; index < 5; index++)
+        for (var index = 0; index < list.Items.Count; index++)
         {
             var button = FindRailSlotButton(list, index);
             foreach (var block in FindVisualChildren<System.Windows.Controls.TextBlock>(button))
             {
-                if (block.Text is "Codex主" or "Codex备" or "Cursor" or "Grok" or "Bot" ||
+                if (block.Text is "Codex主" or "Codex备" or "Cursor" or "Grok" or "Bot" or "Claude" ||
                     (block.Text.EndsWith('%') && block.FontSize >= 20))
                 {
                     Assert.Equal(System.Windows.TextTrimming.None, block.TextTrimming);
@@ -868,8 +879,8 @@ internal static class Program
     {
         var list = (System.Windows.Controls.ItemsControl)(window.FindName("RailSlotList")
             ?? throw new InvalidOperationException("rail_slot_list_missing"));
-        var expected = new[] { "C", "C", null, "X", "BOT" };
-        for (var index = 0; index < 5; index++)
+        var expected = new[] { "C", "C", null, "X", "BOT", "CL" };
+        for (var index = 0; index < expected.Length; index++)
         {
             var button = FindRailSlotButton(list, index);
             var mark = FindVisualChildren<System.Windows.Controls.ContentControl>(button)
@@ -890,6 +901,10 @@ internal static class Program
                 Assert.True(texts.Contains("X"), "bot_x_missing");
                 Assert.True(texts.Contains("BOT"), "bot_label_missing");
             }
+            else if (index == 5)
+            {
+                Assert.True(texts.Contains("CL"), "claude_mark_missing");
+            }
             else
             {
                 Assert.True(texts.Contains(expected[index]!), $"mark_glyph_missing:{index}");
@@ -902,8 +917,8 @@ internal static class Program
         var list = (System.Windows.Controls.ItemsControl)(window.FindName("RailTopSlotList")
             ?? throw new InvalidOperationException("top_slot_list_missing"));
         list.UpdateLayout();
-        var expected = new[] { "Codex主", "Codex备", "Cursor", "Grok", "Bot" };
-        for (var index = 0; index < 5; index++)
+        var expected = new[] { "Codex主", "Codex备", "Cursor", "Grok", "Bot", "Claude" };
+        for (var index = 0; index < expected.Length; index++)
         {
             var container = list.ItemContainerGenerator.ContainerFromIndex(index)
                 ?? throw new InvalidOperationException($"top_container_missing:{index}");
@@ -3598,6 +3613,14 @@ internal static class Program
                 "https://cursor.com/api/dashboard/get-sand-usage-status",
                 new[] { new QuotaWindowObservation("sand", "Grok Bot 周额度", 8, null, null, true, "重置时间未提供，不按 7 天推算") },
                 OpaqueIdentityHash: OpaqueIdentity.Hash("cursor|user-one")),
+            new ProviderSlotSnapshot(ProviderSlotIds.Claude, ProviderIds.Claude, "Claude 订阅", true, false,
+                QuotaSlotStatus.Live, "Claude 订阅额度", now,
+                "https://api.anthropic.com/api/oauth/usage",
+                new[]
+                {
+                    new QuotaWindowObservation("five_hour", "5 小时", 25, now.AddHours(3), 300, true),
+                    new QuotaWindowObservation("seven_day", "每周", 40, now.AddDays(4), 10080, true),
+                }),
         }, now);
     }
 
@@ -5175,7 +5198,7 @@ internal static class Program
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(70));
         var result = ProviderLiveDiagnostic.RunAsync(timeout.Token).GetAwaiter().GetResult();
-        Assert.Equal(5, result.Slots.Count);
+        Assert.Equal(6, result.Slots.Count);
         foreach (var slotId in ProviderSlotIds.All)
             Assert.True(result.Slots.Any(slot => slot.SlotId == slotId));
         Assert.Equal(0, ProviderLiveDiagnostic.SecretHits(result.Output).Count);
@@ -5265,7 +5288,7 @@ internal static class Program
             ((System.Windows.FrameworkElement)window.FindName("RailVerticalShell")!).Visibility);
         Assert.Equal(System.Windows.Visibility.Collapsed,
             ((System.Windows.FrameworkElement)window.FindName("CompactVerticalShell")!).Visibility);
-        Assert.Equal(5, viewModel.Slots.Count);
+        Assert.Equal(6, viewModel.Slots.Count);
         window.UpdateLayout();
         var railList = (System.Windows.Controls.ItemsControl)(window.FindName("RailSlotList")
             ?? throw new InvalidOperationException("rail_slot_list_missing"));
@@ -5391,14 +5414,20 @@ internal static class Program
             Status = QuotaSlotStatus.Unavailable,
             Windows = Array.Empty<QuotaWindowObservation>(),
         };
+        var unavailableSlots = snapshot.Providers.Slots.ToArray();
+        unavailableSlots[4] = emptyBot;
         var unavailableBoard = snapshot.Providers with
         {
-            Slots = snapshot.Providers.Slots.Take(4).Append(emptyBot).ToArray(),
+            Slots = unavailableSlots,
         };
         viewModel.Apply(snapshot with { Providers = unavailableBoard });
         viewModel.SelectSlot(ProviderSlotIds.GrokBot, true);
         Assert.True(viewModel.SlotDetailWindows.All(row => !row.HasLiveProgress && row.HasDashedTrack));
         Assert.True(viewModel.SlotDetailWindows.All(row => row.RemainingText == "—"));
+        viewModel.SelectSlot(ProviderSlotIds.Claude, true);
+        Assert.True(!viewModel.SelectedSlotSuppliesAnalysis);
+        Assert.True(viewModel.SlotDetailBody.Contains("不提供会话", StringComparison.Ordinal));
+        Assert.Equal("60%", viewModel.SlotDetailPercent);
 
         window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 1920, 360));
         InvokeWindowMethod(window, "ApplyExpansionState", false);
@@ -5533,7 +5562,8 @@ internal static class Program
         Assert.True(!xaml.Contains("最近统计·raw", StringComparison.Ordinal));
         foreach (var required in new[]
                  {
-                     "RailVerticalShell", "RailTopShell", "SlotDetailPopup", "五个额度槽",
+                     "RailVerticalShell", "RailTopShell", "SlotDetailPopup", "六个额度槽",
+                     "启用 Claude 订阅额度", "SlotClaudeEnabled",
                      "OnRailSlotClick", "PiCodexPresenceText", "CompactLayoutComboBox",
                  })
             Assert.True((xaml + window).Contains(required, StringComparison.Ordinal));
@@ -10499,6 +10529,239 @@ internal static class Program
     }
 
     private static string Fixture(string relative) => Path.Combine(ProjectRoot(), "tests", "fixtures", relative);
+
+    private static async Task ClaudeSubscriptionQuotaSlot()
+    {
+        var access = "synthetic-claude-access-field";
+        var refresh = "synthetic-claude-refresh-field";
+        var parsed = ClaudeQuotaParser.Parse(
+            """
+            {"five_hour":{"utilization":25,"resets_at":"2026-09-28T18:00:00Z"},"seven_day":{"utilization":40.5,"resets_at":"2026-10-05T00:00:00Z"},"seven_day_opus":{"utilization":10,"resets_at":null},"seven_day_haiku":{"utilization":7,"resets_at":"2026-10-05T01:00:00Z"},"extra_usage":{"is_enabled":true,"used_credits":500,"utilization":99}}
+            """,
+            out var parseError, out var flags);
+        Assert.True(parseError is null, "claude_parse_error");
+        Assert.Equal(4, parsed.Count);
+        Assert.Equal("five_hour", parsed[0].WindowId);
+        Assert.Equal(25d, parsed[0].UsedPercent);
+        Assert.Equal(75d, parsed[0].RemainingPercent);
+        Assert.True(parsed[0].ResetsAtUtc.HasValue, "five_hour_reset_missing");
+        Assert.Equal(40.5d, parsed[1].UsedPercent);
+        Assert.Near(59.5d, parsed[1].RemainingPercent!.Value, 0.001);
+        Assert.True(!parsed[2].ResetsAtUtc.HasValue, "opus_reset_invented");
+        Assert.Equal(90d, parsed[2].RemainingPercent);
+        Assert.Equal("seven_day_haiku", parsed[3].WindowId);
+        Assert.True(parsed.All(window => window.WindowId != "extra_usage"), "extra_usage_counted");
+        Assert.DoesNotContain(access, flags);
+
+        var missing = ClaudeQuotaParser.Parse(
+            """{"five_hour":{"resets_at":"2026-09-28T18:00:00Z"},"seven_day":null,"extra_usage":{"utilization":100}}""",
+            out var missingError, out _);
+        Assert.Equal(0, missing.Count);
+        Assert.Equal("claude_schema_unsupported", missingError);
+
+        var authoritativeZero = ClaudeQuotaParser.Parse(
+            """{"five_hour":{"utilization":140,"resets_at":"2026-09-28T18:00:00Z"},"seven_day":{"utilization":0}}""",
+            out var rangeError, out _);
+        Assert.True(rangeError is null, "zero_used_rejected");
+        Assert.Equal(1, authoritativeZero.Count);
+        Assert.Equal("seven_day", authoritativeZero[0].WindowId);
+        Assert.Equal(0d, authoritativeZero[0].UsedPercent);
+        Assert.Equal(100d, authoritativeZero[0].RemainingPercent);
+        Assert.True(!authoritativeZero[0].ResetsAtUtc.HasValue, "missing_reset_invented");
+
+        var defaults = ProviderAccessSettings.Default();
+        Assert.Equal(6, defaults.Slots.Count);
+        Assert.True(!defaults.Slot(ProviderSlotIds.Claude).Enabled, "claude_default_enabled");
+        var preserved = ProviderSettingKeys.FromStored(new Dictionary<string, string?>
+        {
+            ["slot_cursor_enabled"] = "1",
+            ["slot_grok_bot_label"] = "Bot Custom",
+        });
+        Assert.True(!preserved.Slot(ProviderSlotIds.Claude).Enabled, "existing_settings_enabled_claude");
+        Assert.Equal("Claude 订阅", preserved.Slot(ProviderSlotIds.Claude).Label);
+        Assert.True(preserved.Slot(ProviderSlotIds.Cursor).Enabled, "cursor_opt_in_lost");
+        Assert.Equal("Bot Custom", preserved.Slot(ProviderSlotIds.GrokBot).Label);
+        Assert.True(preserved.Slot(ProviderSlotIds.CodexPrimary).Enabled, "primary_default_lost");
+        Assert.True(ProviderSettingKeys.FromStored(new Dictionary<string, string?>
+        {
+            ["slot_claude_enabled"] = "1",
+        }).Slot(ProviderSlotIds.Claude).Enabled, "explicit_opt_in_ignored");
+
+        Assert.True(ProviderHttpAllowlist.IsAllowed(ProviderHttpAllowlist.ClaudeOAuthUsage), "usage_url_blocked");
+        Assert.True(!ProviderHttpAllowlist.IsAllowed(new Uri("http://api.anthropic.com/api/oauth/usage")), "http_allowed");
+        Assert.True(!ProviderHttpAllowlist.IsAllowed(new Uri("https://api.anthropic.com/api/oauth/usage?token=1")), "query_allowed");
+        Assert.True(!ProviderHttpAllowlist.IsAllowed(new Uri("https://api.anthropic.com/v1/messages")), "other_path_allowed");
+        Assert.True(!ProviderHttpAllowlist.IsAllowed(new Uri("https://files.anthropic.com/api/oauth/usage")), "other_host_allowed");
+
+        var directory = Path.Combine(Path.GetTempPath(), "cuh-claude-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var credentialPath = Path.Combine(directory, ".credentials.json");
+            var expires = DateTimeOffset.UtcNow.AddHours(2).ToUnixTimeMilliseconds();
+            File.WriteAllText(credentialPath,
+                "{\"claudeAiOauth\":{\"accessToken\":\"" + access + "\",\"refreshToken\":\"" + refresh +
+                "\",\"expiresAt\":" + expires.ToString(CultureInfo.InvariantCulture) + "}}");
+            var fileSource = new ClaudeCodeCredentialTokenSource(credentialPath);
+            var inspection = fileSource.InspectLogin();
+            Assert.True(inspection.Usable, "synthetic_login_unusable");
+            Assert.DoesNotContain(access, inspection.Format());
+            Assert.DoesNotContain(refresh, inspection.Format());
+            var read = fileSource.ReadAccessToken();
+            Assert.True(string.Equals(read, access, StringComparison.Ordinal), "access_field_not_selected");
+            Assert.True(!string.Equals(read, refresh, StringComparison.Ordinal), "refresh_field_selected");
+
+            var expiredSource = new ClaudeCodeCredentialTokenSource(Path.Combine(directory, "expired.json"));
+            File.WriteAllText(Path.Combine(directory, "expired.json"),
+                "{\"claudeAiOauth\":{\"accessToken\":\"" + access + "\",\"refreshToken\":\"" + refresh +
+                "\",\"expiresAt\":1000}}");
+            Assert.True(expiredSource.InspectLogin().Expired, "expired_login_usable");
+            Assert.True(expiredSource.ReadAccessToken() is null, "expired_token_returned");
+
+            var absent = WindowsLoginPresence.ClaudeCredentialsFile(Path.Combine(directory, "empty-home"), "");
+            Assert.True(!absent.Present, "missing_login_present");
+            Assert.True(absent.RelativeHint.Contains("%USERPROFILE%", StringComparison.Ordinal), "hint_not_relative");
+            Assert.DoesNotContain(access, absent.RelativeHint);
+        }
+        finally
+        {
+            try { Directory.Delete(directory, true); }
+            catch (IOException) { }
+        }
+
+        var calls = 0;
+        string? seenAuth = null;
+        var http = new ScriptedHttpSender((request, _) =>
+        {
+            calls++;
+            seenAuth = request.Headers["Authorization"];
+            Assert.Equal("GET", request.Method);
+            Assert.Equal(ProviderHttpAllowlist.ClaudeOAuthUsage, request.Url);
+            Assert.True(request.Body is null, "claude_get_has_body");
+            Assert.Equal(ClaudeQuotaAdapter.OauthBeta, request.Headers["anthropic-beta"]);
+            var status = calls switch
+            {
+                1 => 200,
+                2 => 401,
+                3 => 403,
+                _ => 429,
+            };
+            var body = calls == 1
+                ? """{"five_hour":{"utilization":25,"resets_at":"2026-09-28T18:00:00Z"},"seven_day":{"utilization":40,"resets_at":"2026-10-05T00:00:00Z"}}"""
+                : "{\"error\":\"" + access + "\"}";
+            return Task.FromResult(new AllowlistedHttpResponse(status, body, request.Url));
+        });
+        var tokens = new InjectedClaudeTokenSource(access);
+        var adapter = new ClaudeQuotaAdapter(http, tokens);
+        var disabled = await adapter.ReadAsync(
+            new ProviderSlotSettings(ProviderSlotIds.Claude, "Claude 订阅", false), CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.Disabled, disabled.Status);
+        Assert.Equal(0, calls);
+        Assert.Equal(0, tokens.ReadCalls);
+        Assert.Equal(0, tokens.InspectCalls);
+
+        var enabled = new ProviderSlotSettings(ProviderSlotIds.Claude, "Claude 订阅", true);
+        var live = await adapter.ReadAsync(enabled, CancellationToken.None);
+        Assert.Equal(1, calls);
+        Assert.Equal(QuotaSlotStatus.Live, live.Status);
+        Assert.Equal(60d, live.GlanceRemainingPercent);
+        Assert.Equal("每周", live.GlanceWindow!.DisplayName);
+        Assert.True(!live.SuppliesLocalAnalysis, "claude_supplies_analysis");
+        Assert.True(string.Equals(seenAuth, "Bearer " + access, StringComparison.Ordinal), "authorization_not_access_field");
+        Assert.DoesNotContain(access, ClaudePublicText(live));
+        var summary = ProviderLiveDiagnostic.SummarizeWindows(live);
+        Assert.True(summary.Contains("five_hour", StringComparison.Ordinal), "five_hour_detail_missing");
+        Assert.True(summary.Contains("remaining=75", StringComparison.Ordinal), "remaining_not_inverted");
+        Assert.True(summary.Contains("reset=2026-09-28T18:00:00Z", StringComparison.Ordinal), "reset_missing");
+        Assert.DoesNotContain(access, summary);
+
+        var unauthorized = await adapter.ReadAsync(enabled, CancellationToken.None);
+        Assert.Equal(2, calls);
+        Assert.Equal(QuotaSlotStatus.NotConnected, unauthorized.Status);
+        Assert.Equal("未连接", unauthorized.GlanceText);
+        Assert.Equal("claude_unauthorized", unauthorized.ErrorCode);
+        Assert.Equal(0, unauthorized.Windows.Count);
+        Assert.DoesNotContain(access, ClaudePublicText(unauthorized));
+
+        var forbidden = await adapter.ReadAsync(enabled, CancellationToken.None);
+        Assert.Equal(3, calls);
+        Assert.Equal(QuotaSlotStatus.NotConnected, forbidden.Status);
+        Assert.Equal("claude_unauthorized", forbidden.ErrorCode);
+        Assert.DoesNotContain(access, ClaudePublicText(forbidden));
+
+        var limited = await adapter.ReadAsync(enabled, CancellationToken.None);
+        Assert.Equal(4, calls);
+        Assert.Equal(QuotaSlotStatus.Unavailable, limited.Status);
+        Assert.Equal("claude_rate_limited", limited.ErrorCode);
+        Assert.Equal("不可用", limited.GlanceText);
+        Assert.True(limited.GlanceRemainingPercent is null, "rate_limit_fake_percent");
+        Assert.DoesNotContain(access, ClaudePublicText(limited));
+
+        var expiredAdapter = new ClaudeQuotaAdapter(http, new ClaudeCodeCredentialTokenSource(
+            Path.Combine(Path.GetTempPath(), "cuh-claude-missing-" + Guid.NewGuid().ToString("N"), ".credentials.json")));
+        var beforeExpired = calls;
+        var missingLogin = await expiredAdapter.ReadAsync(enabled, CancellationToken.None);
+        Assert.Equal(beforeExpired, calls);
+        Assert.Equal(QuotaSlotStatus.NotConnected, missingLogin.Status);
+        Assert.Equal("未连接", missingLogin.GlanceText);
+        Assert.Equal("claude_sign_in_required", missingLogin.ErrorCode);
+
+        var limitedCalls = 0;
+        var limitedHttp = new ScriptedHttpSender((_, _) =>
+        {
+            limitedCalls++;
+            return Task.FromResult(new AllowlistedHttpResponse(429, "{}", ProviderHttpAllowlist.ClaudeOAuthUsage));
+        });
+        var coordinator = new ProviderQuotaCoordinator(http: limitedHttp,
+            claudeTokens: new InjectedClaudeTokenSource(access));
+        var settings = ClaudeSettings(true);
+        var board = await coordinator.RefreshAsync(settings, null, CancellationToken.None, true);
+        Assert.Equal(1, limitedCalls);
+        Assert.Equal(QuotaSlotStatus.Unavailable, board.Find(ProviderSlotIds.Claude)!.Status);
+        Assert.True(coordinator.Cache.Load(ProviderSlotIds.Claude) is null, "claude_entered_codex_cache");
+        await coordinator.RefreshAsync(settings, null, CancellationToken.None, false);
+        Assert.Equal(1, limitedCalls);
+
+        var optInCalls = 0;
+        var optInTokens = new InjectedClaudeTokenSource(access);
+        var optIn = new ProviderQuotaCoordinator(
+            http: new ScriptedHttpSender((_, _) =>
+            {
+                optInCalls++;
+                return Task.FromResult(new AllowlistedHttpResponse(500, "{}", ProviderHttpAllowlist.ClaudeOAuthUsage));
+            }),
+            claudeTokens: optInTokens);
+        var off = await optIn.RefreshAsync(ClaudeSettings(false), null, CancellationToken.None, true);
+        Assert.Equal(0, optInCalls);
+        Assert.Equal(0, optInTokens.InspectCalls);
+        Assert.Equal(QuotaSlotStatus.Disabled, off.Find(ProviderSlotIds.Claude)!.Status);
+
+        var report = new ProviderLiveDiagnostic.LiveSlotReport(ProviderSlotIds.Claude, live.Status.ToString(),
+            live.Windows.Count, live.GlanceWindow?.DisplayName, live.GlanceRemainingPercent, true, 0, true, false,
+            live.ErrorCode, null, live.FieldPresenceFlags, summary);
+        var formatted = ProviderLiveDiagnostic.Format(new[] { report }, IdentityColumnPresence.Missing, false);
+        Assert.Equal(0, ProviderLiveDiagnostic.SecretHits(formatted).Count);
+        Assert.DoesNotContain(access, formatted);
+        Assert.True(ProviderLiveDiagnostic.SecretHits("sk-ant-oat-example").Contains("sk-ant"), "secret_marker_missed");
+    }
+
+    private static ProviderAccessSettings ClaudeSettings(bool claudeEnabled) =>
+        new(new[]
+        {
+            new ProviderSlotSettings(ProviderSlotIds.CodexPrimary, "Codex 当前", false),
+            new ProviderSlotSettings(ProviderSlotIds.CodexSecondary, "Codex 第二账户", false),
+            new ProviderSlotSettings(ProviderSlotIds.Cursor, "Cursor", false),
+            new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", false),
+            new ProviderSlotSettings(ProviderSlotIds.GrokBot, "Grok Bot", false),
+            new ProviderSlotSettings(ProviderSlotIds.Claude, "Claude 订阅", claudeEnabled),
+        }, CompactLayoutModes.Rail, true);
+
+    private static string ClaudePublicText(ProviderSlotSnapshot slot) =>
+        string.Join('\n', new[]
+        {
+            slot.StatusText, slot.SourceDescription, slot.ErrorCode, slot.FieldPresenceFlags, slot.GlanceText,
+            slot.GlancePercentText, slot.OpaqueIdentityHash, ProviderLiveDiagnostic.SummarizeWindows(slot),
+        }.Where(value => value is not null));
 
     private static class Assert
     {

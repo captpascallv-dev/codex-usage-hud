@@ -628,7 +628,7 @@ public partial class MainWindow : Window, IDisposable
 
     private double EstimatedRailHeight()
     {
-        var rows = Math.Max(_viewModel.Slots.Count, 5);
+        var rows = Math.Max(_viewModel.Slots.Count, ProviderSlotIds.All.Count);
         return Math.Max(RailHeightFallback, 36 + rows * 72 + 50);
     }
 
@@ -740,6 +740,7 @@ public partial class MainWindow : Window, IDisposable
         ApplySlotEditor(stored.Slot(ProviderSlotIds.Cursor), SlotCursorEnabled, SlotCursorLabel);
         ApplySlotEditor(stored.Slot(ProviderSlotIds.Grok), SlotGrokEnabled, SlotGrokLabel);
         ApplySlotEditor(stored.Slot(ProviderSlotIds.GrokBot), SlotGrokBotEnabled, SlotGrokBotLabel);
+        ApplySlotEditor(stored.Slot(ProviderSlotIds.Claude), SlotClaudeEnabled, SlotClaudeLabel);
         SettingsStatusText.Text = string.Empty;
         if (IsolatedPreviewLaunch.CurrentProcessIsolated)
         {
@@ -752,11 +753,13 @@ public partial class MainWindow : Window, IDisposable
         var grok = WindowsLoginPresence.Grok();
         var grokBot = WindowsLoginPresence.GrokBot();
         var piCodex = WindowsLoginPresence.PiCodexAuthFile();
+        var claude = WindowsLoginPresence.ClaudeCredentialsFile();
         PiCodexPresenceText.Text = $"PI ChatGPT/Codex 订阅登录文件：{(piCodex.Present ? "存在" : "未找到")}（{piCodex.RelativeHint}）";
         var presence =
             $"Cursor 登录文件：{(cursor.Present ? "存在" : "未找到")}（{cursor.RelativeHint}）\n" +
             $"Grok 登录目录：{(grok.Present ? "存在" : "未找到")}（{grok.RelativeHint}）\n" +
-            $"Grok Bot：{(grokBot.Present ? "Cursor 登录文件存在" : "未找到 Cursor 登录文件")}（{grokBot.RelativeHint}）";
+            $"Grok Bot：{(grokBot.Present ? "Cursor 登录文件存在" : "未找到 Cursor 登录文件")}（{grokBot.RelativeHint}）\n" +
+            $"Claude Code 登录文件：{(claude.Present ? "存在" : "未找到")}（{claude.RelativeHint}）";
         SettingsStatusText.Text = IsolatedPreviewLaunch.CurrentProcessIsolated
             ? "隔离预览：不会改写已安装 HUD 的开机启动或桌面快捷方式。\n" + presence
             : presence;
@@ -786,6 +789,8 @@ public partial class MainWindow : Window, IDisposable
                 SlotGrokEnabled.IsChecked == true),
             new ProviderSlotSettings(ProviderSlotIds.GrokBot, TextOrDefault(SlotGrokBotLabel, "Grok Bot"),
                 SlotGrokBotEnabled.IsChecked == true),
+            new ProviderSlotSettings(ProviderSlotIds.Claude, TextOrDefault(SlotClaudeLabel, "Claude 订阅"),
+                SlotClaudeEnabled.IsChecked == true),
         }, _compactLayout, true);
     }
 
@@ -1385,7 +1390,9 @@ public partial class MainWindow : Window, IDisposable
                 ProviderSettingKeys.Label(ProviderSlotIds.Grok),
                 ProviderSettingKeys.Enabled(ProviderSlotIds.Grok),
                 ProviderSettingKeys.Label(ProviderSlotIds.GrokBot),
-                ProviderSettingKeys.Enabled(ProviderSlotIds.GrokBot));
+                ProviderSettingKeys.Enabled(ProviderSlotIds.GrokBot),
+                ProviderSettingKeys.Label(ProviderSlotIds.Claude),
+                ProviderSettingKeys.Enabled(ProviderSlotIds.Claude));
         }
         catch (Exception)
         {

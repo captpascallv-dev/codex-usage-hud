@@ -14,7 +14,8 @@ public static class ProviderLiveDiagnostic
         bool IdentityEqual,
         string? ErrorCode,
         string? Dependency,
-        string? FieldFlags = null);
+        string? FieldFlags = null,
+        string? WindowDetail = null);
 
     public sealed record LiveRunResult(
         IReadOnlyList<LiveSlotReport> Slots,
@@ -38,6 +39,7 @@ public static class ProviderLiveDiagnostic
         var cursor = new CursorQuotaAdapter(http, cursorTokens);
         var grok = new GrokQuotaAdapter(http, grokTokens);
         var grokBot = new GrokBotQuotaAdapter(http, cursorTokens);
+        var claude = new ClaudeQuotaAdapter(http, DefaultTokenSources.Claude());
         var defaults = ProviderAccessSettings.Default();
         var enabled = new ProviderAccessSettings(defaults.Slots.Select(slot => slot with { Enabled = true }).ToArray(),
             CompactLayoutModes.Rail, true);
@@ -77,6 +79,8 @@ public static class ProviderLiveDiagnostic
                         await grok.ReadAsync(slot, timeout.Token).ConfigureAwait(false),
                     ProviderSlotIds.GrokBot =>
                         await grokBot.ReadAsync(slot, timeout.Token).ConfigureAwait(false),
+                    ProviderSlotIds.Claude =>
+                        await claude.ReadAsync(slot, timeout.Token).ConfigureAwait(false),
                     _ => ProviderQuotaPresentation.Placeholder(slot, false, QuotaSlotStatus.Unavailable,
                         "未知槽", "slot_unknown", "slot_unknown"),
                 };
@@ -101,6 +105,11 @@ public static class ProviderLiveDiagnostic
             {
                 var grokFile = WindowsLoginPresence.GrokAuthFile();
                 dependency ??= grokFile.Present ? null : "grok_auth_file_absent";
+            }
+            if (slot.SlotId == ProviderSlotIds.Claude)
+            {
+                var claudeFile = WindowsLoginPresence.ClaudeCredentialsFile();
+                dependency ??= claudeFile.Present ? null : "claude_credentials_absent";
             }
             if (slot.SlotId == ProviderSlotIds.Cursor) cursorIdentity = snapshot.OpaqueIdentityHash;
             if (slot.SlotId == ProviderSlotIds.GrokBot) grokBotIdentity = snapshot.OpaqueIdentityHash;
@@ -166,7 +175,8 @@ public static class ProviderLiveDiagnostic
                       " identity_equal=" + Flag(slot.IdentityEqual) +
                       " error=" + SanitizeToken(slot.ErrorCode) +
                       " dependency=" + SanitizeToken(slot.Dependency) +
-                      " fields=" + SanitizeToken(slot.FieldFlags));
+                      " fields=" + SanitizeToken(slot.FieldFlags) +
+                      " windows_detail=" + SanitizeDetail(slot.WindowDetail));
         }
 
         return string.Join('\n', lines);
@@ -242,8 +252,9 @@ public static class ProviderLiveDiagnostic
         var hits = new List<string>();
         foreach (var marker in new[]
                  {
-                     "eyJ", "Bearer", "access_token", "accessToken", "WorkosCursorSessionToken",
-                     "auth.json", "Exception:", "   at ",
+                     "eyJ", "Bearer", "access_token", "accessToken", "refreshToken", "refresh_token",
+                     "claudeAiOauth", "sk-ant", "WorkosCursorSessionToken",
+                     "auth.json", ".credentials.json", "Exception:", "   at ",
                  })
         {
             if (text.Contains(marker, StringComparison.Ordinal))
@@ -263,7 +274,27 @@ public static class ProviderLiveDiagnostic
             snapshot.GlanceWindow?.DisplayName, snapshot.GlanceRemainingPercent,
             snapshot.Windows.Any(window => window.ResetsAtUtc.HasValue), age,
             !string.IsNullOrWhiteSpace(snapshot.OpaqueIdentityHash), false, error, dependency,
-            snapshot.FieldPresenceFlags);
+            snapshot.FieldPresenceFlags, SummarizeWindows(snapshot));
+    }
+
+    public static string SummarizeWindows(ProviderSlotSnapshot snapshot)
+    {
+        if (snapshot.Windows.Count == 0) return "none";
+        return string.Join("; ", snapshot.Windows.Select(window =>
+        {
+            var used = window.UsedPercent.HasValue
+                ? window.UsedPercent.Value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)
+                : "none";
+            var remaining = window.RemainingPercent.HasValue
+                ? window.RemainingPercent.Value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)
+                : "none";
+            var reset = window.ResetsAtUtc.HasValue
+                ? window.ResetsAtUtc.Value.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ",
+                    System.Globalization.CultureInfo.InvariantCulture)
+                : "none";
+            return window.WindowId + " name=" + window.DisplayName + " used=" + used +
+                   " remaining=" + remaining + " reset=" + reset;
+        }));
     }
 
     private static string Flag(bool value) => value ? "1" : "0";
@@ -275,5 +306,23 @@ public static class ProviderLiveDiagnostic
             character is '_' or '-' or ' ' or '=' || char.IsLetterOrDigit(character) || character > 127)
             ? value.Replace('\n', ' ').Replace('\r', ' ')
             : "redacted";
+    }
+
+    private static string SanitizeDetail(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return "none";
+        var builder = new System.Text.StringBuilder(value.Length);
+        foreach (var character in value.Replace('\n', ' ').Replace('\r', ' '))
+        {
+            if (character is '_' or '-' or ' ' or '=' or ':' or '.' or ';' or '%' or ',')
+                builder.Append(character);
+            else if (char.IsLetterOrDigit(character) || character > 127)
+                builder.Append(character);
+            else
+                builder.Append('_');
+        }
+
+        var text = builder.ToString();
+        return SecretHits(text).Count == 0 ? text : "redacted";
     }
 }

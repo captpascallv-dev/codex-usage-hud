@@ -32,6 +32,7 @@
         <SolidColorBrush x:Key="HudMarkCodexSecondary" Color="#FF4C7A5A" />
         <SolidColorBrush x:Key="HudMarkCursor" Color="#FF46536A" />
         <SolidColorBrush x:Key="HudMarkGrok" Color="#FF26282D" />
+        <SolidColorBrush x:Key="HudMarkClaude" Color="#FFB85C38" />
         <FontFamily x:Key="HudFont">Microsoft YaHei UI</FontFamily>
         <FontFamily x:Key="HudIconFont">Segoe MDL2 Assets</FontFamily>
         <system:Double x:Key="HudBodyFontSize">14</system:Double>

@@ -32,6 +32,11 @@ Bot). Runtime may use existing local logins for those opted-in slots against
 each provider's own quota endpoint. Agents still must not open credential
 files or receive secret values. Direct Codex HTTP remains disabled.
 
+Pascal 2026-09-28 adds one Claude subscription quota slot beside those five.
+It is quota-only, default off, and not aggregated with Codex or any other
+provider. It does not add Claude session, context, or token analysis, and it
+does not open a general provider catalogue. Direct Codex HTTP remains disabled.
+
 ## 3. Solution shape
 
 Create this structure unless a small naming adjustment is needed by tooling:
@@ -87,6 +92,16 @@ in memory, and GET `https://chatgpt.com/backend-api/wham/usage` on the HTTPS
 allowlist with redirects refused. Agents must not open that file. Do not copy
 PI credentials into Codex `auth.json`, refresh the PI store, or scan unrelated
 PI providers.
+
+Pascal 2026-09-28: the opted-in Claude slot may read only `claudeAiOauth.accessToken`
+and `expiresAt` from the existing Claude Code credential file
+`%USERPROFILE%\.claude\.credentials.json`, or `%CLAUDE_CONFIG_DIR%\.credentials.json`
+when that variable is set. The access value stays in memory for one GET
+`https://api.anthropic.com/api/oauth/usage` with the `anthropic-beta: oauth-2025-04-20`
+header. The host and path are fixed, redirects are refused, and the body is
+bounded. There is no token refresh, no credential rewrite, no browser-cookie
+scrape, no API-key billing, and no transcript or raw-token quota. An expired
+local access token is `未连接`. Agents must not open that file.
 
 For `state_5.sqlite`, inspect `PRAGMA table_info(threads)` and select only the
 intersection of these columns: `id`, `rollout_path`, `created_at`,
@@ -348,6 +363,19 @@ official CLI refresh succeeds, `grok_login_revoked` when the grant is gone, and
 `grok_login_expired` only when no refresh grant exists. The Grok slot may wait
 up to 35s for that CLI refresh; the 500ms board publish budget is unchanged.
 
+Claude subscription quota is a separate allowlisted GET, not a Codex or
+Cursor pool. `utilization` is an authoritative used percent; remaining is
+`100 - utilization`. The five-hour session and weekly all-models windows are
+shown when that object contains a finite utilization in `[0, 100]`. Additional
+`seven_day_*` objects are shown only when they likewise contain that field.
+A missing or non-numeric window is omitted, never rendered as 0% or 100%.
+A missing or unparseable `resets_at` is not invented from a duration.
+`extra_usage` credit fields are not subscription quota. HTTP 401/403 is
+`未连接` and is not retried inside the read. HTTP 429, transport failure, and
+an unsupported body are unavailable. The existing per-slot backoff starts at
+15 seconds, doubles, and caps at 2 minutes, and the quota cadence remains
+60 seconds. No Claude Code process is launched and no model call is made.
+
 Do not pass a service-tier override. Use JSON-RPC over stdin/stdout:
 
 1. `initialize` with the HUD name/version
@@ -466,10 +494,13 @@ Collapsed form shows one line equivalent to:
 
 The compact visual uses an opaque light card, deep-green normal state,
 readable Chinese typography and a horizontal remaining-quota bar. The default
-collapsed rail is 156 by 508 logical pixels (top 980 by 96) with five labelled
-slots. The previous compact card (224 by 324; top 660 by 80) remains a settings
-option. Both retain quota, reset, settings, window-topmost, tray and expand
-controls. Iconography uses Windows system assets, not copied third-party icons.
+collapsed rail is 252 logical pixels wide, with six labelled slots. Its height
+follows the measured slot list and scrolls when the work area is shorter. The
+top rail is one row of those six slots, up to 1100 logical pixels wide. Claude
+is labelled distinctly and does not feed Codex session analysis. The previous
+compact card (224 by 324; top 660 by 80) remains a settings option. Both retain
+quota, reset, settings, window-topmost, tray and expand controls. Iconography
+uses original letter marks and Windows system assets, not copied third-party icons.
 
 Expanded form contains:
 

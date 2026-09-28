@@ -102,6 +102,10 @@
                                        HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,3" />
                         </Grid>
                     </Border>
+                    <Border x:Name="ClaudeMark" CornerRadius="8" Background="{StaticResource HudMarkClaude}" Visibility="Collapsed">
+                        <TextBlock Text="CL" FontSize="13" FontWeight="Bold" Foreground="White"
+                                   HorizontalAlignment="Center" VerticalAlignment="Center" />
+                    </Border>
                 </Grid>
             </Viewbox>
             <DataTemplate.Triggers>
@@ -120,6 +124,10 @@
                 <DataTrigger Binding="{Binding SlotId}" Value="grok-bot">
                     <Setter TargetName="CodexPrimaryMark" Property="Visibility" Value="Collapsed" />
                     <Setter TargetName="BotMark" Property="Visibility" Value="Visible" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding SlotId}" Value="claude">
+                    <Setter TargetName="CodexPrimaryMark" Property="Visibility" Value="Collapsed" />
+                    <Setter TargetName="ClaudeMark" Property="Visibility" Value="Visible" />
                 </DataTrigger>
             </DataTemplate.Triggers>
         </DataTemplate>
@@ -549,12 +557,12 @@
                                     </ComboBox>
                                     <TextBlock Text="收起形态" Style="{StaticResource Caption}" Margin="0,18,0,8" />
                                     <ComboBox x:Name="CompactLayoutComboBox" Height="40" SelectionChanged="OnCompactLayoutChanged">
-                                        <ComboBoxItem Content="五账户细边栏（推荐）" Tag="rail" />
+                                        <ComboBoxItem Content="六账户细边栏（推荐）" Tag="rail" />
                                         <ComboBoxItem Content="原竖向紧凑卡" Tag="card" />
                                     </ComboBox>
                                     <Border Height="1" Background="{StaticResource HudLine}" Margin="0,24" />
-                                    <TextBlock Text="五个额度槽" Style="{StaticResource SectionTitle}" />
-                                    <TextBlock Text="启用后仅用该服务自己的本机登录读取额度。不会改写或复制登录文件。Cursor / Grok / Grok Bot 默认关闭，需在此勾选。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,12" />
+                                    <TextBlock Text="六个额度槽" Style="{StaticResource SectionTitle}" />
+                                    <TextBlock Text="启用后仅用该服务自己的本机登录读取额度。不会改写或复制登录文件。Cursor、Grok、Grok Bot 和 Claude 默认关闭，需在此勾选。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,12" />
                                     <CheckBox x:Name="SlotCodexPrimaryEnabled" Content="Codex 当前（可进会话分析）" IsChecked="True" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,6" Click="OnProviderSettingsChanged" />
                                     <TextBox x:Name="SlotCodexPrimaryLabel" Height="34" Margin="0,0,0,8" Padding="8,6" LostFocus="OnProviderSettingsChanged" />
                                     <CheckBox x:Name="SlotCodexSecondaryEnabled" Content="Codex 第二账户（仅额度）" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,6" Click="OnProviderSettingsChanged" />
@@ -568,6 +576,9 @@
                                     <CheckBox x:Name="SlotGrokBotEnabled" Content="启用 Grok Bot 额度" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,6" Click="OnProviderSettingsChanged" />
                                     <TextBox x:Name="SlotGrokBotLabel" Height="34" Margin="0,0,0,8" Padding="8,6" LostFocus="OnProviderSettingsChanged" />
                                     <TextBlock Text="Grok Bot 走 Cursor 登录，与 Grok 周池、Cursor 月度池分开。缺少重置时间时不会按 7 天推算。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                                    <CheckBox x:Name="SlotClaudeEnabled" Content="启用 Claude 订阅额度（仅额度）" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,6" Click="OnProviderSettingsChanged" />
+                                    <TextBox x:Name="SlotClaudeLabel" Height="34" Margin="0,0,0,8" Padding="8,6" LostFocus="OnProviderSettingsChanged" />
+                                    <TextBlock Text="Claude 只读本机 Claude Code 已有 OAuth 登录，请求订阅用量。显示 5 小时和每周全部模型的剩余百分比，以及接口实际返回的模型窗口和重置时间。不分析会话，不从 raw token 或 API key 账单推算。未登录显示未连接；限流或格式不支持时显示不可用。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,8" />
                                     <Border Height="1" Background="{StaticResource HudLine}" Margin="0,24" />
                                     <TextBlock Text="桌面快捷方式" Style="{StaticResource SectionTitle}" />
                                     <TextBlock Text="窗口关闭后，也能从桌面重新打开 HUD。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,14" />
@@ -827,7 +838,7 @@
                 <ItemsControl x:Name="RailTopSlotList" ItemsSource="{Binding Slots}">
                     <ItemsControl.ItemsPanel>
                         <ItemsPanelTemplate>
-                            <UniformGrid Rows="1" Columns="5" />
+                            <UniformGrid Rows="1" Columns="6" />
                         </ItemsPanelTemplate>
                     </ItemsControl.ItemsPanel>
                     <ItemsControl.ItemTemplate>

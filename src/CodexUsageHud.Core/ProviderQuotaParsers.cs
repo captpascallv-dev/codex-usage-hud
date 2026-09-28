@@ -1133,3 +1133,208 @@ public static class PiCodexQuotaParser
         return new QuotaWindowObservation(name, displayName, used, resetsAt, null, used.HasValue, missingReset);
     }
 }
+
+public sealed record ClaudeOAuthInspection(
+    bool Recognized,
+    bool HasAccess,
+    bool HasExpiryField,
+    bool Expired,
+    bool Usable,
+    string FormatKind)
+{
+    public static ClaudeOAuthInspection Unsupported { get; } = new(false, false, false, false, false, "unsupported");
+    public static ClaudeOAuthInspection Unreadable { get; } = new(false, false, false, false, false, "unreadable");
+
+    public string Format() =>
+        "recognized=" + (Recognized ? "1" : "0") +
+        " has_access=" + (HasAccess ? "1" : "0") +
+        " has_expiry=" + (HasExpiryField ? "1" : "0") +
+        " expired=" + (Expired ? "1" : "0") +
+        " usable=" + (Usable ? "1" : "0") +
+        " format_kind=" + FormatKind;
+}
+
+public static class ClaudeOAuthParser
+{
+    public const int MaxAccessTokenChars = 16384;
+
+    public static ClaudeOAuthInspection Inspect(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (!TryGetOAuth(document.RootElement, out var oauth))
+                return ClaudeOAuthInspection.Unsupported;
+            var token = ReadAccessToken(oauth);
+            var hasAccess = token is not null;
+            var hasExpiry = oauth.TryGetProperty("expiresAt", out var expiry) &&
+                            expiry.ValueKind is JsonValueKind.Number or JsonValueKind.String;
+            var expired = false;
+            if (hasExpiry)
+            {
+                var expiresAt = JsonQuotaFields.ReadDate(expiry);
+                expired = expiresAt.HasValue && expiresAt.Value <= DateTimeOffset.UtcNow;
+            }
+
+            return new ClaudeOAuthInspection(true, hasAccess, hasExpiry, expired, hasAccess && !expired,
+                "claude_ai_oauth");
+        }
+        catch (JsonException)
+        {
+            return ClaudeOAuthInspection.Unreadable;
+        }
+    }
+
+    public static string? ExtractAccessToken(string json)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            if (!TryGetOAuth(document.RootElement, out var oauth)) return null;
+            return ReadAccessToken(oauth);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool TryGetOAuth(JsonElement root, out JsonElement oauth)
+    {
+        oauth = default;
+        if (root.ValueKind != JsonValueKind.Object) return false;
+        if (!root.TryGetProperty("claudeAiOauth", out oauth) || oauth.ValueKind != JsonValueKind.Object)
+            return false;
+        return true;
+    }
+
+    private static string? ReadAccessToken(JsonElement oauth)
+    {
+        if (!oauth.TryGetProperty("accessToken", out var token) || token.ValueKind != JsonValueKind.String)
+            return null;
+        var value = token.GetString();
+        if (string.IsNullOrWhiteSpace(value) || value.Length > MaxAccessTokenChars) return null;
+        return value;
+    }
+}
+
+public static class ClaudeQuotaParser
+{
+    private static readonly (string Id, string DisplayName, int Minutes)[] KnownWindows =
+    {
+        ("five_hour", "5 小时", 300),
+        ("seven_day", "每周", 10080),
+        ("seven_day_sonnet", "每周 Sonnet", 10080),
+        ("seven_day_opus", "每周 Opus", 10080),
+    };
+
+    public static IReadOnlyList<QuotaWindowObservation> Parse(string json, out string? error, out string flags)
+    {
+        error = null;
+        flags = "parse=0";
+        try
+        {
+            using var document = JsonDocument.Parse(json);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                error = "claude_schema_unsupported";
+                flags = "parse=1 root=not_object keys=none";
+                return Array.Empty<QuotaWindowObservation>();
+            }
+
+            var windows = new List<QuotaWindowObservation>(4);
+            var parts = new List<string> { "parse=1" };
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var known in KnownWindows)
+            {
+                seen.Add(known.Id);
+                if (TryReadWindow(root, known.Id, known.DisplayName, known.Minutes, out var window, out var presence))
+                    windows.Add(window!);
+                parts.Add(presence);
+            }
+
+            foreach (var property in root.EnumerateObject())
+            {
+                if (seen.Contains(property.Name)) continue;
+                if (!IsAdditionalModelWindow(property.Name)) continue;
+                var suffix = property.Name["seven_day_".Length..];
+                if (TryReadWindow(root, property.Name, "每周 " + suffix, 10080, out var window, out var presence))
+                    windows.Add(window!);
+                parts.Add(presence);
+            }
+
+            parts.Add("keys=" + SafeKeyNames(root));
+            flags = string.Join(" ", parts);
+            if (windows.Count == 0)
+            {
+                error = "claude_schema_unsupported";
+                return Array.Empty<QuotaWindowObservation>();
+            }
+
+            return windows;
+        }
+        catch (JsonException)
+        {
+            error = "claude_schema_unsupported";
+            flags = "parse=0";
+            return Array.Empty<QuotaWindowObservation>();
+        }
+    }
+
+    private static bool TryReadWindow(JsonElement root, string id, string displayName, int minutes,
+        out QuotaWindowObservation? window, out string presence)
+    {
+        window = null;
+        if (!root.TryGetProperty(id, out var element) ||
+            element.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            presence = id + ":absent";
+            return false;
+        }
+
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            presence = id + ":unsupported";
+            return false;
+        }
+
+        var used = JsonQuotaFields.GetDouble(element, "utilization");
+        var hasUsed = used.HasValue && double.IsFinite(used.Value) && used.Value >= 0d && used.Value <= 100d;
+        var reset = JsonQuotaFields.GetDate(element, "resets_at");
+        presence = id + ":used=" + (hasUsed ? "1" : "0") + ",reset=" + (reset.HasValue ? "1" : "0");
+        if (!hasUsed) return false;
+        window = new QuotaWindowObservation(id, displayName, used, reset, minutes, true,
+            reset.HasValue ? null : "重置时间未提供，不推算");
+        return true;
+    }
+
+    private static bool IsAdditionalModelWindow(string name)
+    {
+        const string prefix = "seven_day_";
+        if (!name.StartsWith(prefix, StringComparison.Ordinal) || name.Length <= prefix.Length || name.Length > 40)
+            return false;
+        for (var index = prefix.Length; index < name.Length; index++)
+        {
+            var character = name[index];
+            if (character is not '_' && !char.IsAsciiLetterOrDigit(character)) return false;
+        }
+
+        return true;
+    }
+
+    private static string SafeKeyNames(JsonElement root)
+    {
+        var names = new List<string>();
+        foreach (var property in root.EnumerateObject())
+        {
+            if (names.Count >= 8) break;
+            var name = property.Name;
+            if (name.Length is 0 or > 40) continue;
+            if (!name.All(character => character is '_' or '-' || char.IsAsciiLetterOrDigit(character))) continue;
+            names.Add(name);
+        }
+
+        return names.Count == 0 ? "none" : string.Join(",", names);
+    }
+}

@@ -54,6 +54,7 @@ public sealed class ProviderQuotaCoordinator
     private readonly CursorQuotaAdapter _cursor;
     private readonly GrokQuotaAdapter _grok;
     private readonly GrokBotQuotaAdapter _grokBot;
+    private readonly ClaudeQuotaAdapter _claude;
     private readonly IPiCodexTokenSource _piTokens;
     private readonly IsolatedQuotaCache _cache = new();
     private readonly ConcurrentDictionary<string, ProviderRefreshBackoff> _backoff = new(StringComparer.Ordinal);
@@ -69,7 +70,8 @@ public sealed class ProviderQuotaCoordinator
         GrokQuotaAdapter? grok = null, GrokBotQuotaAdapter? grokBot = null,
         IAllowlistedHttpSender? http = null, ICursorTokenSource? cursorTokens = null,
         IGrokTokenSource? grokTokens = null, PiCodexQuotaAdapter? piCodex = null,
-        IPiCodexTokenSource? piTokens = null)
+        IPiCodexTokenSource? piTokens = null, ClaudeQuotaAdapter? claude = null,
+        IClaudeTokenSource? claudeTokens = null)
     {
         http ??= new AllowlistedHttpsSender(TimeSpan.FromSeconds(8));
         cursorTokens ??= DefaultTokenSources.Cursor();
@@ -80,6 +82,7 @@ public sealed class ProviderQuotaCoordinator
         _cursor = cursor ?? new CursorQuotaAdapter(http, cursorTokens);
         _grok = grok ?? new GrokQuotaAdapter(http, grokTokens);
         _grokBot = grokBot ?? new GrokBotQuotaAdapter(http, cursorTokens);
+        _claude = claude ?? new ClaudeQuotaAdapter(http, claudeTokens ?? DefaultTokenSources.Claude());
     }
 
     public IsolatedQuotaCache Cache => _cache;
@@ -300,6 +303,8 @@ public sealed class ProviderQuotaCoordinator
                 return await _grok.ReadAsync(slot, cancellationToken).ConfigureAwait(false);
             case ProviderSlotIds.GrokBot:
                 return await _grokBot.ReadAsync(slot, cancellationToken).ConfigureAwait(false);
+            case ProviderSlotIds.Claude:
+                return await _claude.ReadAsync(slot, cancellationToken).ConfigureAwait(false);
             default:
                 return ProviderQuotaPresentation.Placeholder(slot, false, QuotaSlotStatus.Unavailable,
                     "未知槽", "slot_unknown", "slot_unknown");
@@ -379,6 +384,8 @@ public sealed class ProviderQuotaCoordinator
                 WindowsLoginPresence.Cursor().LastWriteUtc?.UtcTicks.ToString() ?? "0",
             ProviderSlotIds.Grok =>
                 GrokLoginStampOverride?.Invoke() ?? FormatLoginStamp(WindowsLoginPresence.GrokAuthFile()),
+            ProviderSlotIds.Claude =>
+                FormatLoginStamp(WindowsLoginPresence.ClaudeCredentialsFile()),
             ProviderSlotIds.CodexSecondary =>
                 _piTokens.ConfigurationFingerprint() + "|" + (slot.CodexHome ?? string.Empty),
             _ => slot.CodexHome ?? string.Empty,

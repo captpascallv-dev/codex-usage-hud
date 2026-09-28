@@ -812,3 +812,139 @@ public class PiCodexQuotaAdapter
         };
     }
 }
+
+public sealed class ClaudeQuotaAdapter
+{
+    public const string SourceDescription = "https://api.anthropic.com/api/oauth/usage";
+    public const string OauthBeta = "oauth-2025-04-20";
+
+    private readonly IAllowlistedHttpSender _http;
+    private readonly IClaudeTokenSource _tokens;
+
+    public ClaudeQuotaAdapter(IAllowlistedHttpSender http, IClaudeTokenSource tokens)
+    {
+        _http = http;
+        _tokens = tokens;
+    }
+
+    public async Task<ProviderSlotSnapshot> ReadAsync(ProviderSlotSettings settings,
+        CancellationToken cancellationToken)
+    {
+        if (!settings.Enabled)
+            return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.Disabled, "未启用",
+                "用户关闭了 Claude 槽", "slot_disabled");
+
+        ClaudeLoginInspection inspection;
+        try { inspection = _tokens.InspectLogin(); }
+        catch (Exception)
+        {
+            return Disconnected(settings, "无法读取本机 Claude Code 登录", "仅检查 claudeAiOauth.accessToken",
+                "claude_token_unavailable", null);
+        }
+
+        if (!inspection.Usable)
+        {
+            if (!inspection.FilePresent)
+            {
+                return Disconnected(settings, "未连接：本机没有可用的 Claude Code 登录",
+                    "需要 Claude Code 已登录", "claude_sign_in_required", inspection);
+            }
+
+            if (inspection.Expired)
+            {
+                return Disconnected(settings, "未连接：Claude Code 登录已过期",
+                    "不刷新、不重写凭据", "claude_login_expired", inspection);
+            }
+
+            return Disconnected(settings, "未连接：本机 Claude Code 登录当前无法用于订阅额度",
+                "仅接受 claudeAiOauth.accessToken", "claude_login_unsupported", inspection);
+        }
+
+        string? token;
+        try { token = _tokens.ReadAccessToken(); }
+        catch (Exception)
+        {
+            return Disconnected(settings, "无法读取本机 Claude Code 登录", "仅读取 claudeAiOauth.accessToken",
+                "claude_token_unavailable", inspection);
+        }
+
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return Disconnected(settings, "未连接：本机没有可用的 Claude Code 登录",
+                "需要 Claude Code 已登录", "claude_sign_in_required", inspection);
+        }
+
+        var identity = OpaqueIdentity.Hash("claude-oauth|" + token);
+        try
+        {
+            var response = await _http.SendAsync(new AllowlistedHttpRequest("GET",
+                ProviderHttpAllowlist.ClaudeOAuthUsage,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["Authorization"] = "Bearer " + token,
+                    ["Accept"] = "application/json",
+                    ["anthropic-beta"] = OauthBeta,
+                }), cancellationToken).ConfigureAwait(false);
+            if (response.StatusCode is 401 or 403)
+            {
+                return Disconnected(settings, "未连接：Claude 订阅登录被拒绝",
+                    "oauth/usage 拒绝", "claude_unauthorized", inspection);
+            }
+
+            if (response.StatusCode == 429)
+            {
+                return Unavailable(settings, "Claude 订阅额度接口限流，不显示猜测百分比",
+                    "oauth/usage HTTP 429", "claude_rate_limited", inspection);
+            }
+
+            if (response.StatusCode < 200 || response.StatusCode >= 300)
+            {
+                return Unavailable(settings, "Claude 订阅额度接口不可用",
+                    "oauth/usage HTTP " + response.StatusCode, "claude_http_" + response.StatusCode, inspection);
+            }
+
+            var windows = ClaudeQuotaParser.Parse(response.Body, out var error, out var flags);
+            if (windows.Count == 0)
+            {
+                return Unavailable(settings, "Claude 订阅额度格式暂不支持，不显示 0% 或 100%",
+                    "缺少可用的 utilization 窗口", error ?? "claude_schema_unsupported", inspection, flags);
+            }
+
+            var now = DateTimeOffset.UtcNow;
+            var current = windows.Any(window => !window.ResetsAtUtc.HasValue || window.ResetsAtUtc.Value > now);
+            return new ProviderSlotSnapshot(settings.SlotId, ProviderIds.Claude, settings.Label, true, false,
+                current ? QuotaSlotStatus.Live : QuotaSlotStatus.Stale,
+                current ? "Claude 订阅额度" : "窗口已到期，不作为当前额度", now, SourceDescription, windows,
+                identity, error, FieldPresenceFlags: inspection.Format() + " " + flags);
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return Unavailable(settings, "Claude 订阅额度请求超时", "独立超时", "claude_timeout", inspection);
+        }
+        catch (InvalidOperationException exception)
+        {
+            var code = ProviderHttpErrors.Sanitize(exception);
+            return Unavailable(settings, "Claude 订阅额度请求被拒绝", code, code, inspection);
+        }
+        catch (HttpRequestException)
+        {
+            return Unavailable(settings, "Claude 订阅额度网络不可用", "独立失败", "claude_network", inspection);
+        }
+    }
+
+    private static ProviderSlotSnapshot Disconnected(ProviderSlotSettings settings, string statusText,
+        string source, string code, ClaudeLoginInspection? inspection) =>
+        ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.NotConnected, statusText, source,
+            code) with
+        {
+            FieldPresenceFlags = inspection?.Format(),
+        };
+
+    private static ProviderSlotSnapshot Unavailable(ProviderSlotSettings settings, string statusText, string source,
+        string code, ClaudeLoginInspection inspection, string? flags = null) =>
+        ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.Unavailable, statusText, source,
+            code) with
+        {
+            FieldPresenceFlags = flags is null ? inspection.Format() : inspection.Format() + " " + flags,
+        };
+}

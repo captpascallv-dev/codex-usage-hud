@@ -34,8 +34,9 @@ SHA-256 校验文件，用于确认下载内容没有发生变化。
 勾选后优先读取本机 Claude Code 已有 OAuth 登录里的访问字段。该文件没有可用访问令牌时，
 才回退到当前 Windows Claude Desktop 配置里的一个未过期访问令牌（`%APPDATA%\Claude`，
 必要时才看唯一的 MSIX 重定向）。多个 Desktop 账户无法证明当前账户时显示不可用，不选用任意缓存。
-向 `https://api.anthropic.com/api/oauth/usage` 查询订阅用量。界面显示 5 小时会话、每周全部模型，
-以及接口 `limits` 数组里实际返回的模型窗口；旧的顶层字段只在数组没有可用窗口时使用。
+向 `https://api.anthropic.com/api/oauth/usage` 查询订阅用量。界面同时显示 5 小时会话、每周全部模型，
+以及接口 `limits` 数组里实际返回的模型窗口。`is_active` 为 false 只表示该窗口当前不是绑定限制，
+有效百分比和重置时间仍分别显示，不当成没有额度。旧的顶层字段只在数组没有可用窗口时使用。
 剩余百分比是 100 减去接口给出的已用百分比。缺少的窗口不是 0% 或 100%，缺少的重置时间不会推算。
 不分析 Claude 会话或上下文，不与 Codex 或其他槽合并，也不从 raw token、本地对话或 API key 账单换算额度。
 没有可用登录时显示未连接；接口限流、暂时失败、无法解密或格式不支持时显示不可用，并按有界退避重试。
@@ -391,8 +392,10 @@ access token from the current Windows Claude Desktop profile
 (`%APPDATA%\Claude`, or the single standard MSIX redirection). Multiple Desktop
 accounts stay unavailable. It GETs `https://api.anthropic.com/api/oauth/usage`.
 Remaining percent is 100 minus the returned used percent. A `limits` array is
-preferred, with the legacy top-level windows as fallback. Missing windows and
-missing reset times are left blank. The endpoint is undocumented and may return
+preferred, with the legacy top-level windows as fallback. Valid five-hour,
+weekly, and named model windows in that array are shown together even when
+`is_active` is false; that flag is not treated as no allowance. Missing windows
+and missing reset times are left blank. The endpoint is undocumented and may return
 429; the HUD then shows unavailable and backs off. It does not refresh Claude
 credentials, modify Desktop files, or launch the CLI.
 

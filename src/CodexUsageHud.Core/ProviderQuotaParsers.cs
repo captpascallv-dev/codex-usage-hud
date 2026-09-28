@@ -1369,12 +1369,9 @@ public static class ClaudeQuotaParser
         skip = "shape";
         if (item.ValueKind != JsonValueKind.Object)
             return false;
-        if (JsonQuotaFields.GetBoolean(item, "is_active", "isActive") == false)
-        {
-            skip = "inactive";
-            return false;
-        }
 
+        // is_active false marks the window that is not currently binding the
+        // request. A valid session, weekly, or named model window still counts.
         var kind = JsonQuotaFields.GetString(item, "kind");
         if (!TryMapLimit(item, kind, out var id, out var displayName, out var minutes))
         {

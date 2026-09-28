@@ -380,8 +380,13 @@ current reading: `session` / `five_hour` is the five-hour window, `weekly_all`
 / `weekly` / `seven_day` is the overall weekly window, and `weekly_scoped`
 entries are shown only when `scope.model.display_name` is present. `percent`
 and legacy `utilization` are the same used-percent unit; remaining is
-`100 - used`. Entries with `is_active: false`, an unknown kind, or a used
-percent outside `[0, 100]` are omitted. If the array yields no usable window,
+`100 - used`. `is_active: false` means the window is not the one currently
+binding the request. A valid `session` / `five_hour`, overall weekly, or named
+`weekly_scoped` entry is still shown as its own window, using only the server
+percent and reset. It is not labeled as no allowance, and a weekly value is
+not inferred from the five-hour window. An unknown kind, an unnamed scope,
+conflicting values for the same window, or a used percent outside `[0, 100]`
+is omitted. If the array yields no usable window,
 the reader falls back to the legacy top-level `five_hour`, `seven_day`, and
 `seven_day_*` objects. A missing or non-numeric window is omitted, never
 rendered as 0% or 100%. A missing or unparseable reset is not invented from a

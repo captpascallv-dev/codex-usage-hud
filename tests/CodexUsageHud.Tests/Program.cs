@@ -10742,30 +10742,52 @@ internal static class Program
             """,
             out var limitsError, out var limitsFlags);
         Assert.True(limitsError is null, "limits_parse_error");
-        Assert.Equal(3, limitsParsed.Count);
+        Assert.Equal(4, limitsParsed.Count);
         Assert.Equal("five_hour", limitsParsed[0].WindowId);
         Assert.Equal(25d, limitsParsed[0].UsedPercent);
         Assert.Equal(75d, limitsParsed[0].RemainingPercent);
         Assert.True(limitsParsed[0].ResetsAtUtc.HasValue, "limits_session_reset_missing");
         Assert.Equal("seven_day", limitsParsed[1].WindowId);
         Assert.Equal(40d, limitsParsed[1].UsedPercent);
-        Assert.Equal("seven_day_opus", limitsParsed[2].WindowId);
-        Assert.Equal("每周 Opus", limitsParsed[2].DisplayName);
-        Assert.Equal(90d, limitsParsed[2].RemainingPercent);
+        Assert.Equal("seven_day_fable", limitsParsed[2].WindowId);
+        Assert.Equal("每周 Fable", limitsParsed[2].DisplayName);
+        Assert.Equal(0d, limitsParsed[2].UsedPercent);
+        Assert.True(limitsParsed[2].HasAllowance, "inactive_scoped_labeled_no_allowance");
+        Assert.True(!limitsParsed[2].ResetsAtUtc.HasValue, "inactive_scoped_reset_invented");
+        Assert.Equal("seven_day_opus", limitsParsed[3].WindowId);
+        Assert.Equal("每周 Opus", limitsParsed[3].DisplayName);
+        Assert.Equal(90d, limitsParsed[3].RemainingPercent);
         Assert.True(limitsParsed.All(window => window.WindowId != "extra_usage"), "limits_extra_usage_counted");
         Assert.DoesNotContain(access, limitsFlags);
-        Assert.True(limitsFlags.Contains("limits_inactive=1", StringComparison.Ordinal), "inactive_not_counted");
+        Assert.True(limitsFlags.Contains("limits_kept=4", StringComparison.Ordinal), "inactive_valid_not_kept");
+        Assert.True(limitsFlags.Contains("limits_inactive=0", StringComparison.Ordinal), "inactive_valid_still_filtered");
         Assert.True(limitsFlags.Contains("limits_unknown=1", StringComparison.Ordinal), "unknown_not_counted");
         Assert.True(limitsFlags.Contains("limits_scope=1", StringComparison.Ordinal), "scope_not_counted");
-        Assert.DoesNotContain("Fable", ClaudeWindowText(limitsParsed));
+        Assert.True(ClaudeWindowText(limitsParsed).Contains("Fable", StringComparison.Ordinal), "inactive_scoped_hidden");
         Assert.DoesNotContain("99", limitsParsed[0].UsedPercent!.Value.ToString(CultureInfo.InvariantCulture));
 
-        var inactiveOnly = ClaudeQuotaParser.Parse(
+        var inactiveSession = ClaudeQuotaParser.Parse(
             """{"limits":[{"kind":"session","percent":2,"is_active":false}],"five_hour":{"utilization":25,"resets_at":"2026-09-28T18:00:00Z"}}""",
-            out var inactiveError, out _);
-        Assert.True(inactiveError is null, "inactive_limits_blocked_legacy");
-        Assert.Equal(1, inactiveOnly.Count);
-        Assert.Equal(25d, inactiveOnly[0].UsedPercent);
+            out var inactiveError, out var inactiveFlags);
+        Assert.True(inactiveError is null, "inactive_valid_session_rejected");
+        Assert.Equal(1, inactiveSession.Count);
+        Assert.Equal("five_hour", inactiveSession[0].WindowId);
+        Assert.Equal(2d, inactiveSession[0].UsedPercent);
+        Assert.True(!inactiveSession[0].ResetsAtUtc.HasValue, "inactive_session_reset_invented");
+        Assert.True(inactiveSession[0].HasAllowance, "inactive_session_labeled_no_allowance");
+        Assert.True(inactiveFlags.Contains("legacy=0", StringComparison.Ordinal), "inactive_valid_used_legacy");
+
+        var inactiveInvalid = ClaudeQuotaParser.Parse(
+            """{"limits":[{"kind":"session","percent":140,"is_active":false},{"kind":"credit","percent":1,"is_active":false}],"five_hour":{"utilization":25,"resets_at":"2026-09-28T18:00:00Z"}}""",
+            out var inactiveInvalidError, out var inactiveInvalidFlags);
+        Assert.True(inactiveInvalidError is null, "invalid_inactive_blocked_legacy");
+        Assert.Equal(1, inactiveInvalid.Count);
+        Assert.Equal("five_hour", inactiveInvalid[0].WindowId);
+        Assert.Equal(25d, inactiveInvalid[0].UsedPercent);
+        Assert.True(inactiveInvalidFlags.Contains("legacy=1", StringComparison.Ordinal), "invalid_inactive_skipped_legacy");
+        Assert.True(inactiveInvalidFlags.Contains("limits_inactive=0", StringComparison.Ordinal), "invalid_inactive_misclassified");
+        Assert.True(inactiveInvalidFlags.Contains("limits_range=1", StringComparison.Ordinal), "inactive_out_of_range_not_counted");
+        Assert.True(inactiveInvalidFlags.Contains("limits_unknown=1", StringComparison.Ordinal), "inactive_unknown_not_counted");
 
         var rangedLimits = ClaudeQuotaParser.Parse(
             """{"limits":[{"kind":"session","percent":140,"resets_at":"2026-09-28T18:00:00Z"},{"kind":"weekly_all","percent":0},{"kind":"weekly_scoped","percent":4,"scope":{"model":{"display_name":"sk-ant Opus"}}}]}""",
@@ -10793,6 +10815,121 @@ internal static class Program
         Assert.Equal(1, conflicting.Count);
         Assert.Equal("seven_day", conflicting[0].WindowId);
         Assert.Equal(8d, conflicting[0].UsedPercent);
+
+        var boundInactive = ClaudeQuotaParser.Parse(
+            """
+            {"limits":[{"kind":"session","percent":25,"resets_at":"2026-10-06T18:00:00Z","is_active":true},{"kind":"weekly_all","percent":14,"resets_at":"2026-10-12T00:00:00Z","is_active":false},{"kind":"weekly_scoped","percent":16,"resets_at":"2026-10-12T00:00:01Z","is_active":false,"scope":{"model":{"display_name":"Fable"}}},{"kind":"weekly_scoped","percent":4,"is_active":false,"scope":{"model":{"display_name":"sk-ant Opus"}}}],"five_hour":{"utilization":99,"resets_at":"2026-10-06T18:00:00Z"}}
+            """,
+            out var boundError, out var boundFlags);
+        Assert.True(boundError is null, "bound_inactive_parse_error");
+        Assert.Equal(3, boundInactive.Count);
+        Assert.Equal("five_hour", boundInactive[0].WindowId);
+        Assert.Equal(25d, boundInactive[0].UsedPercent);
+        Assert.Equal(75d, boundInactive[0].RemainingPercent);
+        Assert.Equal("seven_day", boundInactive[1].WindowId);
+        Assert.Equal("每周", boundInactive[1].DisplayName);
+        Assert.Equal(14d, boundInactive[1].UsedPercent);
+        Assert.Equal(86d, boundInactive[1].RemainingPercent);
+        Assert.True(boundInactive[1].HasAllowance, "inactive_weekly_labeled_no_allowance");
+        Assert.Equal("2026-10-12T00:00:00Z", boundInactive[1].ResetsAtUtc!.Value.ToUniversalTime()
+            .ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture));
+        Assert.Equal("seven_day_fable", boundInactive[2].WindowId);
+        Assert.Equal(16d, boundInactive[2].UsedPercent);
+        Assert.True(boundInactive[2].HasAllowance, "inactive_model_labeled_no_allowance");
+        Assert.True(boundInactive[2].ResetsAtUtc.HasValue, "inactive_model_reset_dropped");
+        Assert.True(boundFlags.Contains("legacy=0", StringComparison.Ordinal), "bound_inactive_used_legacy");
+        Assert.True(boundFlags.Contains("limits_inactive=0", StringComparison.Ordinal), "bound_inactive_filtered");
+        Assert.True(boundFlags.Contains("limits_scope=1", StringComparison.Ordinal), "bound_secret_scope_kept");
+        Assert.DoesNotContain("sk-ant", boundFlags);
+        Assert.DoesNotContain("sk-ant", ClaudeWindowText(boundInactive));
+        Assert.DoesNotContain("99", boundInactive[0].UsedPercent!.Value.ToString(CultureInfo.InvariantCulture));
+
+        var mixedConflict = ClaudeQuotaParser.Parse(
+            """{"limits":[{"kind":"session","percent":10,"resets_at":"2026-10-06T18:00:00Z","is_active":true},{"kind":"five_hour","percent":12,"resets_at":"2026-10-06T18:00:00Z","is_active":false},{"kind":"weekly_all","percent":8,"resets_at":"2026-10-12T00:00:00Z","is_active":false}]}""",
+            out var mixedError, out _);
+        Assert.True(mixedError is null, "inactive_conflict_rejected");
+        Assert.Equal(1, mixedConflict.Count);
+        Assert.Equal("seven_day", mixedConflict[0].WindowId);
+        Assert.Equal(8d, mixedConflict[0].UsedPercent);
+
+        var duplicateWeekly = ClaudeQuotaParser.Parse(
+            """{"limits":[{"kind":"weekly_all","percent":14,"resets_at":"2026-10-12T00:00:00Z","is_active":false},{"kind":"weekly","percent":14,"resets_at":"2026-10-12T00:00:00Z","is_active":true}]}""",
+            out var duplicateError, out _);
+        Assert.True(duplicateError is null, "inactive_duplicate_rejected");
+        Assert.Equal(1, duplicateWeekly.Count);
+        Assert.Equal(14d, duplicateWeekly[0].UsedPercent);
+        Assert.Equal(86d, duplicateWeekly[0].RemainingPercent);
+
+        var inactiveAccess = "synthetic-inactive-weekly-access";
+        var inactiveCalls = 0;
+        var sessionReset = DateTimeOffset.UtcNow.AddHours(3);
+        var weeklyReset = DateTimeOffset.UtcNow.AddDays(4);
+        var scopedReset = weeklyReset.AddMinutes(1);
+        string Stamp(DateTimeOffset value) =>
+            value.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+        string InactiveBody(int sessionUsed, int weeklyUsed) =>
+            "{\"limits\":[" +
+            "{\"kind\":\"session\",\"percent\":" + sessionUsed.ToString(CultureInfo.InvariantCulture) +
+            ",\"resets_at\":\"" + Stamp(sessionReset) + "\",\"is_active\":true}," +
+            "{\"kind\":\"weekly_all\",\"percent\":" + weeklyUsed.ToString(CultureInfo.InvariantCulture) +
+            ",\"resets_at\":\"" + Stamp(weeklyReset) + "\",\"is_active\":false}," +
+            "{\"kind\":\"weekly_scoped\",\"percent\":16,\"resets_at\":\"" + Stamp(scopedReset) +
+            "\",\"is_active\":false,\"scope\":{\"model\":{\"display_name\":\"Fable\"}}}" +
+            "]}";
+        var inactiveHttp = new ScriptedHttpSender((_, _) =>
+        {
+            inactiveCalls++;
+            var body = inactiveCalls == 1 ? InactiveBody(25, 14) : InactiveBody(30, 41);
+            return Task.FromResult(new AllowlistedHttpResponse(200, body, ProviderHttpAllowlist.ClaudeOAuthUsage));
+        });
+        var inactiveAdapter = new ClaudeQuotaAdapter(inactiveHttp, new InjectedClaudeTokenSource(inactiveAccess));
+        var firstObservation = await inactiveAdapter.ReadAsync(enabled, CancellationToken.None);
+        Assert.Equal(1, inactiveCalls);
+        Assert.Equal(QuotaSlotStatus.Live, firstObservation.Status);
+        Assert.Equal(3, firstObservation.Windows.Count);
+        Assert.Equal("five_hour", firstObservation.Windows[0].WindowId);
+        Assert.Equal("seven_day", firstObservation.Windows[1].WindowId);
+        Assert.Equal(14d, firstObservation.Windows[1].UsedPercent);
+        Assert.Equal(86d, firstObservation.Windows[1].RemainingPercent);
+        Assert.True(firstObservation.Windows[1].HasAllowance, "service_inactive_weekly_no_allowance");
+        Assert.Equal("seven_day_fable", firstObservation.Windows[2].WindowId);
+        Assert.True((firstObservation.FieldPresenceFlags ?? "").Contains("limits_inactive=0", StringComparison.Ordinal),
+            "service_inactive_filtered");
+        Assert.True((firstObservation.FieldPresenceFlags ?? "").Contains("legacy=0", StringComparison.Ordinal),
+            "service_inactive_legacy");
+        Assert.DoesNotContain(inactiveAccess, ClaudePublicText(firstObservation));
+
+        var detailNow = firstObservation.ObservedAtUtc;
+        var detailModel = new MainViewModel();
+        detailModel.Apply(new HudSnapshot(
+            new QuotaObservation(new QuotaBucket("primary", "Codex 5h", 15, 300, detailNow.AddHours(1)),
+                Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, detailNow, false),
+            Array.Empty<SessionAggregate>(), null, detailNow, false, "synthetic", Array.Empty<string>(),
+            Providers: new ProviderQuotaBoard(new[] { firstObservation }, detailNow)));
+        detailModel.SelectSlot(ProviderSlotIds.Claude, true);
+        Assert.Equal(3, detailModel.SlotDetailWindows.Count);
+        Assert.Equal("5 小时 · 剩余", detailModel.SlotDetailWindows[0].Name);
+        Assert.Equal("75%", detailModel.SlotDetailWindows[0].RemainingText);
+        Assert.Equal("每周 · 剩余", detailModel.SlotDetailWindows[1].Name);
+        Assert.Equal("86%", detailModel.SlotDetailWindows[1].RemainingText);
+        Assert.True(detailModel.SlotDetailWindows[1].HasLiveProgress, "weekly_detail_not_live");
+        Assert.Equal("每周 Fable · 剩余", detailModel.SlotDetailWindows[2].Name);
+        Assert.Equal("84%", detailModel.SlotDetailWindows[2].RemainingText);
+        Assert.True(detailModel.SlotDetailBody.Contains("5 小时", StringComparison.Ordinal), "detail_body_session");
+        Assert.True(detailModel.SlotDetailBody.Contains("每周：剩余 86%", StringComparison.Ordinal), "detail_body_weekly");
+        Assert.DoesNotContain(inactiveAccess, detailModel.SlotDetailBody);
+
+        var secondObservation = await inactiveAdapter.ReadAsync(enabled, CancellationToken.None);
+        Assert.Equal(2, inactiveCalls);
+        Assert.Equal(41d, secondObservation.Windows[1].UsedPercent);
+        Assert.True(secondObservation.ObservedAtUtc >= firstObservation.ObservedAtUtc, "observation_not_refreshed");
+        detailModel.ApplyProviders(new ProviderQuotaBoard(new[] { secondObservation }, secondObservation.ObservedAtUtc));
+        Assert.Equal(3, detailModel.SlotDetailWindows.Count);
+        Assert.Equal("70%", detailModel.SlotDetailWindows[0].RemainingText);
+        Assert.Equal("每周 · 剩余", detailModel.SlotDetailWindows[1].Name);
+        Assert.Equal("59%", detailModel.SlotDetailWindows[1].RemainingText);
+        Assert.Equal("84%", detailModel.SlotDetailWindows[2].RemainingText);
+        Assert.True(detailModel.SlotDetailBody.Contains("每周：剩余 59%", StringComparison.Ordinal), "detail_body_not_refreshed");
 
         var desktopAccess = "synthetic-desktop-access";
         var desktopRefresh = "synthetic-desktop-refresh";

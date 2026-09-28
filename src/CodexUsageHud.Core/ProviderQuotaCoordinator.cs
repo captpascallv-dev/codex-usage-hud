@@ -385,7 +385,8 @@ public sealed class ProviderQuotaCoordinator
             ProviderSlotIds.Grok =>
                 GrokLoginStampOverride?.Invoke() ?? FormatLoginStamp(WindowsLoginPresence.GrokAuthFile()),
             ProviderSlotIds.Claude =>
-                FormatLoginStamp(WindowsLoginPresence.ClaudeCredentialsFile()),
+                FormatLoginStamp(WindowsLoginPresence.ClaudeCredentialsFile()) + ":" +
+                FormatLoginStamp(WindowsLoginPresence.ClaudeDesktopProfile()),
             ProviderSlotIds.CodexSecondary =>
                 _piTokens.ConfigurationFingerprint() + "|" + (slot.CodexHome ?? string.Empty),
             _ => slot.CodexHome ?? string.Empty,

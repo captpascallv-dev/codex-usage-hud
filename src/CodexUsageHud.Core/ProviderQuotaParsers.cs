@@ -1245,6 +1245,15 @@ public static class ClaudeQuotaParser
 
             var windows = new List<QuotaWindowObservation>(4);
             var parts = new List<string> { "parse=1" };
+            if (TryConsumeLimits(root, windows, parts))
+            {
+                parts.Add("legacy=0");
+                parts.Add("keys=" + SafeKeyNames(root));
+                flags = string.Join(" ", parts);
+                return windows;
+            }
+
+            parts.Add("legacy=1");
             var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var known in KnownWindows)
             {
@@ -1280,6 +1289,233 @@ public static class ClaudeQuotaParser
             flags = "parse=0";
             return Array.Empty<QuotaWindowObservation>();
         }
+    }
+
+    private static bool TryConsumeLimits(JsonElement root, List<QuotaWindowObservation> windows, List<string> parts)
+    {
+        if (!root.TryGetProperty("limits", out var limits))
+        {
+            parts.Add("limits=absent");
+            return false;
+        }
+
+        if (limits.ValueKind != JsonValueKind.Array)
+        {
+            parts.Add("limits=unsupported");
+            return false;
+        }
+
+        var accepted = new Dictionary<string, QuotaWindowObservation>(StringComparer.Ordinal);
+        var rejected = new HashSet<string>(StringComparer.Ordinal);
+        var kept = 0;
+        var examined = 0;
+        var inactive = 0;
+        var unknown = 0;
+        var range = 0;
+        var unnamed = 0;
+        foreach (var item in limits.EnumerateArray())
+        {
+            examined++;
+            if (examined > 16)
+                break;
+            if (!TryReadLimit(item, out var window, out var skip) || window is null)
+            {
+                if (skip == "inactive") inactive++;
+                else if (skip == "unknown") unknown++;
+                else if (skip == "range") range++;
+                else if (skip == "scope") unnamed++;
+                continue;
+            }
+            if (rejected.Contains(window.WindowId))
+                continue;
+            if (accepted.TryGetValue(window.WindowId, out var existing))
+            {
+                if (existing.UsedPercent != window.UsedPercent || existing.ResetsAtUtc != window.ResetsAtUtc)
+                {
+                    accepted.Remove(window.WindowId);
+                    rejected.Add(window.WindowId);
+                }
+
+                continue;
+            }
+
+            accepted[window.WindowId] = window;
+            kept++;
+        }
+
+        parts.Add("limits=" + examined.ToString(CultureInfo.InvariantCulture));
+        parts.Add("limits_kept=" + accepted.Count.ToString(CultureInfo.InvariantCulture));
+        parts.Add("limits_inactive=" + inactive.ToString(CultureInfo.InvariantCulture));
+        parts.Add("limits_unknown=" + unknown.ToString(CultureInfo.InvariantCulture));
+        parts.Add("limits_range=" + range.ToString(CultureInfo.InvariantCulture));
+        parts.Add("limits_scope=" + unnamed.ToString(CultureInfo.InvariantCulture));
+        if (accepted.Count == 0)
+            return false;
+
+        foreach (var id in new[] { "five_hour", "seven_day" })
+        {
+            if (accepted.Remove(id, out var known))
+                windows.Add(known);
+        }
+
+        foreach (var extra in accepted.Values.OrderBy(window => window.WindowId, StringComparer.Ordinal))
+            windows.Add(extra);
+        return kept > 0 || windows.Count > 0;
+    }
+
+    private static bool TryReadLimit(JsonElement item, out QuotaWindowObservation? window, out string skip)
+    {
+        window = null;
+        skip = "shape";
+        if (item.ValueKind != JsonValueKind.Object)
+            return false;
+        if (JsonQuotaFields.GetBoolean(item, "is_active", "isActive") == false)
+        {
+            skip = "inactive";
+            return false;
+        }
+
+        var kind = JsonQuotaFields.GetString(item, "kind");
+        if (!TryMapLimit(item, kind, out var id, out var displayName, out var minutes))
+        {
+            skip = kind == "weekly_scoped" ? "scope" : "unknown";
+            return false;
+        }
+
+        if (!TryReadUsedPercent(item, out var used))
+        {
+            skip = "range";
+            return false;
+        }
+
+        skip = "";
+        var reset = JsonQuotaFields.GetDate(item, "resets_at", "resetsAt");
+        window = new QuotaWindowObservation(id, displayName, used, reset, minutes, true,
+            reset.HasValue ? null : "重置时间未提供，不推算");
+        return true;
+    }
+
+    private static bool TryMapLimit(JsonElement item, string? kind, out string id, out string displayName, out int minutes)
+    {
+        id = "";
+        displayName = "";
+        minutes = 0;
+        if (kind is "session" or "five_hour")
+        {
+            id = "five_hour";
+            displayName = "5 小时";
+            minutes = 300;
+            return true;
+        }
+
+        if (kind is "weekly_all" or "weekly" or "seven_day")
+        {
+            id = "seven_day";
+            displayName = "每周";
+            minutes = 10080;
+            return true;
+        }
+
+        if (kind != "weekly_scoped")
+            return false;
+        if (!TryModelLabel(item, out var model))
+            return false;
+        var slug = ModelWindowId(model);
+        if (slug is null)
+            return false;
+        id = slug;
+        displayName = "每周 " + model;
+        minutes = 10080;
+        return true;
+    }
+
+    private static bool TryReadUsedPercent(JsonElement item, out double used)
+    {
+        used = 0;
+        var hasPercent = TryFiniteNumber(item, "percent", out var percent);
+        var hasUtilization = TryFiniteNumber(item, "utilization", out var utilization);
+        if (item.TryGetProperty("percent", out var percentValue) &&
+            percentValue.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined) &&
+            !hasPercent)
+        {
+            return false;
+        }
+
+        if (item.TryGetProperty("utilization", out var utilizationValue) &&
+            utilizationValue.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined) &&
+            !hasUtilization)
+        {
+            return false;
+        }
+
+        if (hasPercent && hasUtilization && Math.Abs(percent - utilization) > 0.001d)
+            return false;
+        if (!hasPercent && !hasUtilization)
+            return false;
+        used = hasPercent ? percent : utilization;
+        return used >= 0d && used <= 100d;
+    }
+
+    private static bool TryFiniteNumber(JsonElement item, string name, out double number)
+    {
+        number = 0;
+        var value = JsonQuotaFields.GetDouble(item, name);
+        if (!value.HasValue || !double.IsFinite(value.Value))
+            return false;
+        number = value.Value;
+        return true;
+    }
+
+    private static bool TryModelLabel(JsonElement item, out string model)
+    {
+        model = "";
+        if (!item.TryGetProperty("scope", out var scope) || scope.ValueKind != JsonValueKind.Object)
+            return false;
+        if (!scope.TryGetProperty("model", out var modelElement) || modelElement.ValueKind != JsonValueKind.Object)
+            return false;
+        var raw = JsonQuotaFields.GetString(modelElement, "display_name", "displayName");
+        if (string.IsNullOrWhiteSpace(raw))
+            return false;
+        var trimmed = raw.Trim();
+        if (trimmed.Length is < 1 or > 24)
+            return false;
+        foreach (var character in trimmed)
+        {
+            if (character is not (' ' or '+' or '.' or '-' or '_') && !char.IsAsciiLetterOrDigit(character))
+                return false;
+        }
+
+        if (ProviderLiveDiagnostic.SecretHits(trimmed).Count > 0)
+            return false;
+        model = trimmed;
+        return true;
+    }
+
+    private static string? ModelWindowId(string model)
+    {
+        var builder = new StringBuilder("seven_day_");
+        var pendingBreak = false;
+        var wrote = false;
+        foreach (var character in model)
+        {
+            if (char.IsAsciiLetterOrDigit(character))
+            {
+                if (pendingBreak && wrote)
+                    builder.Append('_');
+                pendingBreak = false;
+                builder.Append(char.ToLowerInvariant(character));
+                wrote = true;
+            }
+            else
+            {
+                pendingBreak = wrote;
+            }
+        }
+
+        if (!wrote || builder.Length is < 11 or > 40)
+            return null;
+        var id = builder.ToString();
+        return id == "seven_day" ? null : id;
     }
 
     private static bool TryReadWindow(JsonElement root, string id, string displayName, int minutes,
@@ -1332,6 +1568,14 @@ public static class ClaudeQuotaParser
             var name = property.Name;
             if (name.Length is 0 or > 40) continue;
             if (!name.All(character => character is '_' or '-' || char.IsAsciiLetterOrDigit(character))) continue;
+            if (name.Contains("token", StringComparison.OrdinalIgnoreCase) ||
+                name.Contains("secret", StringComparison.OrdinalIgnoreCase) ||
+                name.Contains("sk-", StringComparison.OrdinalIgnoreCase) ||
+                name.Contains("eyJ", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             names.Add(name);
         }
 

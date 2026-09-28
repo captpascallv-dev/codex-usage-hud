@@ -59,6 +59,23 @@ public static class WindowsLoginPresence
         return InspectFile(ProviderIds.Claude, ClaudeCredentialPaths.Resolve(userProfile, configured), hint);
     }
 
+    public static LoginPresence ClaudeDesktopProfile(string? roamingAppData = null, string? localAppData = null)
+    {
+        var resolution = ClaudeDesktopProfileResolution.Resolve(roamingAppData, localAppData);
+        if (resolution.AccountAmbiguous)
+        {
+            return new LoginPresence(ProviderIds.Claude, true, @"多个 Claude Desktop 配置，未选用", null, null);
+        }
+
+        if (string.IsNullOrWhiteSpace(resolution.Directory))
+            return new LoginPresence(ProviderIds.Claude, false, @"%APPDATA%\Claude", null, null);
+
+        var hint = resolution.ProfileKind == "msix"
+            ? @"%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\config.json"
+            : @"%APPDATA%\Claude\config.json";
+        return InspectFile(ProviderIds.Claude, Path.Combine(resolution.Directory, "config.json"), hint);
+    }
+
     private static LoginPresence InspectFile(string providerId, string path, string hint)
     {
         try
@@ -146,7 +163,18 @@ public sealed record ClaudeLoginInspection(
         new(false, false, false, false, false, false, "absent");
 
     public static ClaudeLoginInspection Injected(bool usable) =>
-        new(true, usable, usable, false, false, usable, usable ? "injected" : "absent");
+        new(true, usable, usable, false, false, usable, usable ? "injected" : "absent")
+        {
+            SourceKind = "injected",
+        };
+
+    public string SourceKind { get; init; } = "claude_code_file";
+
+    public bool AccountAmbiguous { get; init; }
+
+    public bool DecryptFailed { get; init; }
+
+    public string AmbiguousReason { get; init; } = "none";
 
     public string Format() =>
         "file_present=" + (FilePresent ? "1" : "0") +
@@ -155,7 +183,22 @@ public sealed record ClaudeLoginInspection(
         " has_expiry=" + (HasExpiryField ? "1" : "0") +
         " expired=" + (Expired ? "1" : "0") +
         " usable=" + (Usable ? "1" : "0") +
-        " format_kind=" + FormatKind;
+        " format_kind=" + SanitizeLabel(FormatKind) +
+        " source_kind=" + SanitizeLabel(SourceKind) +
+        " ambiguous=" + (AccountAmbiguous ? "1" : "0") +
+        " ambiguous_reason=" + SanitizeLabel(AmbiguousReason) +
+        " decrypt_failed=" + (DecryptFailed ? "1" : "0");
+
+    private static string SanitizeLabel(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 40) return "redacted";
+        foreach (var character in value)
+        {
+            if (character is not '_' && !char.IsAsciiLetterOrDigit(character)) return "redacted";
+        }
+
+        return value;
+    }
 }
 
 public sealed class InjectedTokenSource : ICursorTokenSource, IGrokTokenSource
@@ -402,9 +445,12 @@ public static class DefaultTokenSources
         return new PiCodexAuthFileTokenSource(Path.Combine(userProfile, ".pi", "agent", "auth.json"));
     }
 
-    public static IClaudeTokenSource Claude(string? userProfile = null, string? configDir = null) =>
-        new ClaudeCodeCredentialTokenSource(ClaudeCredentialPaths.Resolve(userProfile,
-            configDir ?? Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR")));
+    public static IClaudeTokenSource Claude(string? userProfile = null, string? configDir = null,
+        string? roamingAppData = null, string? localAppData = null) =>
+        new ClaudeLoginFallbackTokenSource(
+            new ClaudeCodeCredentialTokenSource(ClaudeCredentialPaths.Resolve(userProfile,
+                configDir ?? Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR"))),
+            ClaudeDesktopTokenSource.FromProfileRoots(roamingAppData, localAppData));
 }
 
 public sealed class InjectedClaudeTokenSource : IClaudeTokenSource

@@ -10736,13 +10736,357 @@ internal static class Program
         Assert.Equal(0, optInTokens.InspectCalls);
         Assert.Equal(QuotaSlotStatus.Disabled, off.Find(ProviderSlotIds.Claude)!.Status);
 
+        var limitsParsed = ClaudeQuotaParser.Parse(
+            """
+            {"limits":[{"kind":"session","percent":25,"resets_at":"2026-09-28T18:00:00Z","is_active":true},{"kind":"weekly_all","percent":40,"resetsAt":"2026-10-05T00:00:00Z","is_active":true},{"kind":"weekly_scoped","percent":10,"resets_at":"2026-10-05T01:00:00Z","is_active":true,"scope":{"model":{"display_name":"Opus"}}},{"kind":"weekly_scoped","percent":0,"is_active":false,"scope":{"model":{"displayName":"Fable"}}},{"kind":"weekly_scoped","percent":5,"is_active":true,"scope":{}},{"kind":"credit","percent":3,"is_active":true}],"five_hour":{"utilization":99,"resets_at":"2026-09-28T18:00:00Z"},"extra_usage":{"utilization":99},"accessToken":"synthetic-claude-access-field"}
+            """,
+            out var limitsError, out var limitsFlags);
+        Assert.True(limitsError is null, "limits_parse_error");
+        Assert.Equal(3, limitsParsed.Count);
+        Assert.Equal("five_hour", limitsParsed[0].WindowId);
+        Assert.Equal(25d, limitsParsed[0].UsedPercent);
+        Assert.Equal(75d, limitsParsed[0].RemainingPercent);
+        Assert.True(limitsParsed[0].ResetsAtUtc.HasValue, "limits_session_reset_missing");
+        Assert.Equal("seven_day", limitsParsed[1].WindowId);
+        Assert.Equal(40d, limitsParsed[1].UsedPercent);
+        Assert.Equal("seven_day_opus", limitsParsed[2].WindowId);
+        Assert.Equal("每周 Opus", limitsParsed[2].DisplayName);
+        Assert.Equal(90d, limitsParsed[2].RemainingPercent);
+        Assert.True(limitsParsed.All(window => window.WindowId != "extra_usage"), "limits_extra_usage_counted");
+        Assert.DoesNotContain(access, limitsFlags);
+        Assert.True(limitsFlags.Contains("limits_inactive=1", StringComparison.Ordinal), "inactive_not_counted");
+        Assert.True(limitsFlags.Contains("limits_unknown=1", StringComparison.Ordinal), "unknown_not_counted");
+        Assert.True(limitsFlags.Contains("limits_scope=1", StringComparison.Ordinal), "scope_not_counted");
+        Assert.DoesNotContain("Fable", ClaudeWindowText(limitsParsed));
+        Assert.DoesNotContain("99", limitsParsed[0].UsedPercent!.Value.ToString(CultureInfo.InvariantCulture));
+
+        var inactiveOnly = ClaudeQuotaParser.Parse(
+            """{"limits":[{"kind":"session","percent":2,"is_active":false}],"five_hour":{"utilization":25,"resets_at":"2026-09-28T18:00:00Z"}}""",
+            out var inactiveError, out _);
+        Assert.True(inactiveError is null, "inactive_limits_blocked_legacy");
+        Assert.Equal(1, inactiveOnly.Count);
+        Assert.Equal(25d, inactiveOnly[0].UsedPercent);
+
+        var rangedLimits = ClaudeQuotaParser.Parse(
+            """{"limits":[{"kind":"session","percent":140,"resets_at":"2026-09-28T18:00:00Z"},{"kind":"weekly_all","percent":0},{"kind":"weekly_scoped","percent":4,"scope":{"model":{"display_name":"sk-ant Opus"}}}]}""",
+            out var rangedLimitsError, out var rangedFlags);
+        Assert.True(rangedLimitsError is null, "limits_zero_rejected");
+        Assert.Equal(1, rangedLimits.Count);
+        Assert.Equal("seven_day", rangedLimits[0].WindowId);
+        Assert.Equal(0d, rangedLimits[0].UsedPercent);
+        Assert.Equal(100d, rangedLimits[0].RemainingPercent);
+        Assert.True(!rangedLimits[0].ResetsAtUtc.HasValue, "limits_missing_reset_invented");
+        Assert.DoesNotContain("sk-ant", rangedFlags);
+        Assert.DoesNotContain("sk-ant", ClaudeWindowText(rangedLimits));
+
+        var mismatched = ClaudeQuotaParser.Parse(
+            """{"limits":[{"kind":"session","percent":10,"utilization":11}],"seven_day":{"utilization":40}}""",
+            out var mismatchedError, out _);
+        Assert.True(mismatchedError is null, "mismatched_percent_rejected_legacy");
+        Assert.Equal(1, mismatched.Count);
+        Assert.Equal("seven_day", mismatched[0].WindowId);
+
+        var conflicting = ClaudeQuotaParser.Parse(
+            """{"limits":[{"kind":"session","percent":10,"resets_at":"2026-09-28T18:00:00Z"},{"kind":"five_hour","percent":12,"resets_at":"2026-09-28T18:00:00Z"},{"kind":"weekly","percent":8}]}""",
+            out var conflictError, out _);
+        Assert.True(conflictError is null, "conflicting_session_rejected");
+        Assert.Equal(1, conflicting.Count);
+        Assert.Equal("seven_day", conflicting[0].WindowId);
+        Assert.Equal(8d, conflicting[0].UsedPercent);
+
+        var desktopAccess = "synthetic-desktop-access";
+        var desktopRefresh = "synthetic-desktop-refresh";
+        var otherAccess = "synthetic-desktop-other";
+        var desktopRoot = Path.Combine(Path.GetTempPath(), "cuh-claude-desktop-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(desktopRoot);
+        try
+        {
+            var activeDir = Path.Combine(desktopRoot, "active");
+            var future = DateTimeOffset.UtcNow.AddHours(3).ToUnixTimeMilliseconds();
+            WriteSyntheticDesktopCache(activeDir, DesktopCacheJson("acct-one", desktopAccess, desktopRefresh, future), "v10");
+            var activeInfo = new FileInfo(Path.Combine(activeDir, "config.json"));
+            var activeLength = activeInfo.Length;
+            var activeWrite = activeInfo.LastWriteTimeUtc;
+            var activeSource = new ClaudeDesktopTokenSource(activeDir);
+            var activeInspection = activeSource.InspectLogin();
+            Assert.True(activeInspection.Usable, "active_desktop_unusable");
+            Assert.Equal("claude_desktop", activeInspection.SourceKind);
+            Assert.True(!activeInspection.AccountAmbiguous, "active_desktop_ambiguous");
+            Assert.DoesNotContain(desktopAccess, activeInspection.Format());
+            Assert.DoesNotContain(desktopRefresh, activeInspection.Format());
+            var activeToken = activeSource.ReadAccessToken();
+            Assert.True(string.Equals(activeToken, desktopAccess, StringComparison.Ordinal), "desktop_access_not_selected");
+            Assert.True(!string.Equals(activeToken, desktopRefresh, StringComparison.Ordinal), "desktop_refresh_selected");
+            activeInfo.Refresh();
+            Assert.Equal(activeLength, activeInfo.Length);
+            Assert.Equal(activeWrite, activeInfo.LastWriteTimeUtc);
+
+            var staleDir = Path.Combine(desktopRoot, "stale");
+            WriteSyntheticDesktopCache(staleDir, DesktopCacheJson("acct-one", desktopAccess, desktopRefresh, 1000), "v10");
+            var staleSource = new ClaudeDesktopTokenSource(staleDir);
+            Assert.True(staleSource.InspectLogin().Expired, "stale_desktop_not_expired");
+            Assert.True(staleSource.ReadAccessToken() is null, "stale_desktop_token_returned");
+            var callsBeforeDesktop = calls;
+            var staleSlot = await new ClaudeQuotaAdapter(http, staleSource).ReadAsync(enabled, CancellationToken.None);
+            Assert.Equal(callsBeforeDesktop, calls);
+            Assert.Equal(QuotaSlotStatus.NotConnected, staleSlot.Status);
+            Assert.Equal("未连接", staleSlot.GlanceText);
+            Assert.Equal("claude_login_expired", staleSlot.ErrorCode);
+            Assert.DoesNotContain(desktopAccess, ClaudePublicText(staleSlot));
+
+            var badDpapi = Path.Combine(desktopRoot, "bad-dpapi");
+            WriteSyntheticDesktopCache(badDpapi, DesktopCacheJson("acct-one", desktopAccess, desktopRefresh, future), "v10", corruptKey: true);
+            var badDpapiSource = new ClaudeDesktopTokenSource(badDpapi);
+            Assert.True(badDpapiSource.InspectLogin().DecryptFailed, "bad_dpapi_not_failed");
+            Assert.True(badDpapiSource.ReadAccessToken() is null, "bad_dpapi_token_returned");
+            Assert.DoesNotContain(desktopAccess, badDpapiSource.InspectLogin().Format());
+            var badDpapiSlot = await new ClaudeQuotaAdapter(http, badDpapiSource).ReadAsync(enabled, CancellationToken.None);
+            Assert.Equal(callsBeforeDesktop, calls);
+            Assert.Equal(QuotaSlotStatus.Unavailable, badDpapiSlot.Status);
+            Assert.Equal("claude_desktop_decrypt_failed", badDpapiSlot.ErrorCode);
+            Assert.True(badDpapiSlot.GlanceRemainingPercent is null, "bad_dpapi_fake_percent");
+            Assert.DoesNotContain(desktopAccess, ClaudePublicText(badDpapiSlot));
+
+            var badKey = Path.Combine(desktopRoot, "bad-key");
+            WriteSyntheticDesktopCache(badKey, DesktopCacheJson("acct-one", desktopAccess, desktopRefresh, future), "v10", wrongKey: true);
+            var badKeySource = new ClaudeDesktopTokenSource(badKey);
+            Assert.True(badKeySource.InspectLogin().DecryptFailed, "bad_key_not_failed");
+            Assert.True(badKeySource.ReadAccessToken() is null, "bad_key_token_returned");
+
+            var absentDesktop = new ClaudeDesktopTokenSource(Path.Combine(desktopRoot, "missing"));
+            Assert.True(!absentDesktop.InspectLogin().FilePresent, "absent_desktop_present");
+            Assert.True(absentDesktop.ReadAccessToken() is null, "absent_desktop_token_returned");
+
+            var sameAccountDir = Path.Combine(desktopRoot, "same-account");
+            var sooner = DateTimeOffset.UtcNow.AddHours(1).ToUnixTimeMilliseconds();
+            var later = DateTimeOffset.UtcNow.AddHours(5).ToUnixTimeMilliseconds();
+            WriteSyntheticDesktopCache(sameAccountDir,
+                "{" + DesktopCacheEntry("acct-one", otherAccess, desktopRefresh, sooner) + "," +
+                DesktopCacheEntry("acct-one", desktopAccess, desktopRefresh, later, "device-2") + "}",
+                "v10");
+            var sameAccount = new ClaudeDesktopTokenSource(sameAccountDir);
+            Assert.True(sameAccount.InspectLogin().Usable, "same_account_latest_unusable");
+            Assert.True(string.Equals(sameAccount.ReadAccessToken(), desktopAccess, StringComparison.Ordinal),
+                "same_account_latest_not_selected");
+            Assert.DoesNotContain(otherAccess, sameAccount.InspectLogin().Format());
+            var tieDir = Path.Combine(desktopRoot, "tie");
+            WriteSyntheticDesktopCache(tieDir,
+                "{" + DesktopCacheEntry("acct-one", desktopAccess, desktopRefresh, later) + "," +
+                DesktopCacheEntry("acct-one", otherAccess, desktopRefresh, later, "device-2") + "}",
+                "v10");
+            var tieSource = new ClaudeDesktopTokenSource(tieDir);
+            Assert.Equal("multiple_tokens", tieSource.InspectLogin().AmbiguousReason);
+            Assert.True(tieSource.ReadAccessToken() is null, "tied_tokens_returned");
+
+            var ambiguousDir = Path.Combine(desktopRoot, "ambiguous");
+            WriteSyntheticDesktopCache(ambiguousDir,
+                "{" + DesktopCacheEntry("acct-one", desktopAccess, desktopRefresh, future) + "," +
+                DesktopCacheEntry("acct-two", otherAccess, desktopRefresh, future) + "}",
+                "v10");
+            var ambiguousSource = new ClaudeDesktopTokenSource(ambiguousDir);
+            Assert.True(ambiguousSource.InspectLogin().AccountAmbiguous, "two_accounts_not_ambiguous");
+            Assert.Equal("multiple_accounts", ambiguousSource.InspectLogin().AmbiguousReason);
+            Assert.True(ambiguousSource.ReadAccessToken() is null, "ambiguous_token_returned");
+            Assert.DoesNotContain(desktopAccess, ambiguousSource.InspectLogin().Format());
+            Assert.DoesNotContain(otherAccess, ambiguousSource.InspectLogin().Format());
+            var ambiguousFileSlot = await new ClaudeQuotaAdapter(http, ambiguousSource).ReadAsync(enabled, CancellationToken.None);
+            Assert.Equal(callsBeforeDesktop, calls);
+            Assert.Equal(QuotaSlotStatus.Unavailable, ambiguousFileSlot.Status);
+            Assert.Equal("claude_desktop_account_ambiguous", ambiguousFileSlot.ErrorCode);
+            Assert.DoesNotContain(otherAccess, ClaudePublicText(ambiguousFileSlot));
+
+            var roaming = Path.Combine(desktopRoot, "roaming");
+            var local = Path.Combine(desktopRoot, "local");
+            var msixOne = Path.Combine(local, "Packages", "Claude_one", "LocalCache", "Roaming", "Claude");
+            var msixTwo = Path.Combine(local, "Packages", "Claude_two", "LocalCache", "Roaming", "Claude");
+            WriteSyntheticDesktopCache(msixOne, DesktopCacheJson("acct-one", desktopAccess, desktopRefresh, future), "v11");
+            var msixSource = ClaudeDesktopTokenSource.FromProfileRoots(roaming, local);
+            Assert.True(string.Equals(msixSource.ReadAccessToken(), desktopAccess, StringComparison.Ordinal), "msix_token_not_selected");
+            Assert.Equal("msix", ClaudeDesktopProfileResolution.Resolve(roaming, local).ProfileKind);
+            WriteSyntheticDesktopCache(msixTwo, DesktopCacheJson("acct-two", otherAccess, desktopRefresh, future), "v10");
+            var manyMsix = ClaudeDesktopTokenSource.FromProfileRoots(roaming, local);
+            Assert.True(manyMsix.InspectLogin().AccountAmbiguous, "two_msix_profiles_not_ambiguous");
+            Assert.Equal("multiple_profiles", manyMsix.InspectLogin().AmbiguousReason);
+            Assert.True(manyMsix.ReadAccessToken() is null, "two_msix_token_returned");
+            var roamingAccess = "synthetic-roaming-access";
+            var roamingDir = Path.Combine(roaming, "Claude");
+            WriteSyntheticDesktopCache(roamingDir, DesktopCacheJson("acct-roam", roamingAccess, desktopRefresh, future), "v10");
+            var roamingSource = ClaudeDesktopTokenSource.FromProfileRoots(roaming, local);
+            Assert.Equal("roaming", ClaudeDesktopProfileResolution.Resolve(roaming, local).ProfileKind);
+            Assert.True(string.Equals(roamingSource.ReadAccessToken(), roamingAccess, StringComparison.Ordinal), "roaming_not_preferred");
+            Assert.DoesNotContain(otherAccess, roamingSource.InspectLogin().Format());
+            Assert.DoesNotContain(roamingAccess, roamingSource.InspectLogin().Format());
+
+            var codeDir = Path.Combine(desktopRoot, "code");
+            Directory.CreateDirectory(codeDir);
+            var codePath = Path.Combine(codeDir, ".credentials.json");
+            File.WriteAllText(codePath,
+                "{\"claudeAiOauth\":{\"accessToken\":\"" + access + "\",\"refreshToken\":\"" + refresh +
+                "\",\"expiresAt\":" + future.ToString(CultureInfo.InvariantCulture) + "}}");
+            var codeCounter = new CountingClaudeTokenSource(new ClaudeCodeCredentialTokenSource(codePath));
+            var desktopCounter = new CountingClaudeTokenSource(new ClaudeDesktopTokenSource(activeDir));
+            var preferred = new ClaudeLoginFallbackTokenSource(codeCounter, desktopCounter);
+            Assert.True(string.Equals(preferred.ReadAccessToken(), access, StringComparison.Ordinal), "code_file_not_preferred");
+            Assert.Equal(0, desktopCounter.Inspects);
+            Assert.Equal(0, desktopCounter.Reads);
+
+            var expiredCode = Path.Combine(codeDir, "expired.json");
+            File.WriteAllText(expiredCode,
+                "{\"claudeAiOauth\":{\"accessToken\":\"" + access + "\",\"refreshToken\":\"" + refresh + "\",\"expiresAt\":1000}}");
+            var expiredFallback = new ClaudeLoginFallbackTokenSource(
+                new ClaudeCodeCredentialTokenSource(expiredCode), new ClaudeDesktopTokenSource(activeDir));
+            Assert.True(string.Equals(expiredFallback.ReadAccessToken(), desktopAccess, StringComparison.Ordinal),
+                "expired_code_did_not_fall_back");
+            Assert.Equal("claude_desktop", expiredFallback.InspectLogin().SourceKind);
+
+            var absentFallback = new ClaudeLoginFallbackTokenSource(
+                new ClaudeCodeCredentialTokenSource(Path.Combine(codeDir, "nope.json")),
+                new ClaudeDesktopTokenSource(Path.Combine(desktopRoot, "missing")));
+            Assert.Equal("claude_sign_in_required",
+                (await new ClaudeQuotaAdapter(http, absentFallback).ReadAsync(enabled, CancellationToken.None)).ErrorCode);
+        }
+        finally
+        {
+            try { Directory.Delete(desktopRoot, true); }
+            catch (IOException) { }
+        }
+
+        var desktopCalls = 0;
+        string? desktopAuth = null;
+        var desktopHttp = new ScriptedHttpSender((request, _) =>
+        {
+            desktopCalls++;
+            desktopAuth = request.Headers["Authorization"];
+            var status = desktopCalls switch
+            {
+                1 => 200,
+                2 => 401,
+                3 => 403,
+                _ => 429,
+            };
+            var body = desktopCalls == 1
+                ? """{"limits":[{"kind":"session","percent":25,"resets_at":"2026-09-28T18:00:00Z"},{"kind":"weekly_all","percent":40,"resets_at":"2026-10-05T00:00:00Z"}]}"""
+                : "{\"error\":\"" + desktopAccess + "\"}";
+            return Task.FromResult(new AllowlistedHttpResponse(status, body, request.Url));
+        });
+        var desktopAdapter = new ClaudeQuotaAdapter(desktopHttp, new InjectedClaudeTokenSource(desktopAccess,
+            new ClaudeLoginInspection(true, true, true, true, false, true, "claude_desktop_oauth")
+            {
+                SourceKind = "claude_desktop",
+            }));
+        var desktopLive = await desktopAdapter.ReadAsync(enabled, CancellationToken.None);
+        Assert.Equal(1, desktopCalls);
+        Assert.Equal(QuotaSlotStatus.Live, desktopLive.Status);
+        Assert.Equal(60d, desktopLive.GlanceRemainingPercent);
+        Assert.True(string.Equals(desktopAuth, "Bearer " + desktopAccess, StringComparison.Ordinal), "desktop_authorization_mismatch");
+        Assert.True((desktopLive.FieldPresenceFlags ?? "").Contains("source_kind=claude_desktop", StringComparison.Ordinal),
+            "desktop_source_label_missing");
+        Assert.DoesNotContain(desktopAccess, ClaudePublicText(desktopLive));
+        var desktopDenied = await desktopAdapter.ReadAsync(enabled, CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.NotConnected, desktopDenied.Status);
+        Assert.Equal("claude_unauthorized", desktopDenied.ErrorCode);
+        Assert.DoesNotContain(desktopAccess, ClaudePublicText(desktopDenied));
+        var desktopForbidden = await desktopAdapter.ReadAsync(enabled, CancellationToken.None);
+        Assert.Equal(3, desktopCalls);
+        Assert.Equal("claude_unauthorized", desktopForbidden.ErrorCode);
+        var desktopLimited = await desktopAdapter.ReadAsync(enabled, CancellationToken.None);
+        Assert.Equal(QuotaSlotStatus.Unavailable, desktopLimited.Status);
+        Assert.Equal("claude_rate_limited", desktopLimited.ErrorCode);
+        Assert.True(desktopLimited.GlanceRemainingPercent is null, "desktop_rate_limit_fake_percent");
+        Assert.DoesNotContain(desktopAccess, ClaudePublicText(desktopLimited));
+
+        var ambiguousAdapter = new ClaudeQuotaAdapter(desktopHttp, new InjectedClaudeTokenSource(null,
+            new ClaudeLoginInspection(true, true, false, false, false, false, "ambiguous")
+            {
+                SourceKind = "claude_desktop",
+                AccountAmbiguous = true,
+            }));
+        var beforeAmbiguous = desktopCalls;
+        var ambiguousSlot = await ambiguousAdapter.ReadAsync(enabled, CancellationToken.None);
+        Assert.Equal(beforeAmbiguous, desktopCalls);
+        Assert.Equal(QuotaSlotStatus.Unavailable, ambiguousSlot.Status);
+        Assert.Equal("claude_desktop_account_ambiguous", ambiguousSlot.ErrorCode);
+        Assert.True(ambiguousSlot.GlanceRemainingPercent is null, "ambiguous_fake_percent");
+        Assert.DoesNotContain(desktopAccess, ClaudePublicText(ambiguousSlot));
+
         var report = new ProviderLiveDiagnostic.LiveSlotReport(ProviderSlotIds.Claude, live.Status.ToString(),
             live.Windows.Count, live.GlanceWindow?.DisplayName, live.GlanceRemainingPercent, true, 0, true, false,
             live.ErrorCode, null, live.FieldPresenceFlags, summary);
         var formatted = ProviderLiveDiagnostic.Format(new[] { report }, IdentityColumnPresence.Missing, false);
         Assert.Equal(0, ProviderLiveDiagnostic.SecretHits(formatted).Count);
         Assert.DoesNotContain(access, formatted);
+        Assert.True(formatted.Contains("source_kind=injected", StringComparison.Ordinal), "source_kind_redacted");
+        Assert.True(!formatted.Contains("fields=redacted", StringComparison.Ordinal), "fields_redacted");
         Assert.True(ProviderLiveDiagnostic.SecretHits("sk-ant-oat-example").Contains("sk-ant"), "secret_marker_missed");
+    }
+
+    private static string ClaudeWindowText(IReadOnlyList<QuotaWindowObservation> windows) =>
+        string.Join(" ", windows.Select(window => window.WindowId + " " + window.DisplayName));
+
+    private static string DesktopCacheEntry(string account, string access, string refresh, long expiresMs,
+        string device = "device-1") =>
+        "\"" + account + ":" + device + ":https://api.anthropic.com:user:inference\":{\"token\":\"" + access +
+        "\",\"refreshToken\":\"" + refresh + "\",\"expiresAt\":" + expiresMs.ToString(CultureInfo.InvariantCulture) + "}";
+
+    private static string DesktopCacheJson(string account, string access, string refresh, long expiresMs) =>
+        "{" + DesktopCacheEntry(account, access, refresh, expiresMs) + "}";
+
+    private static void WriteSyntheticDesktopCache(string directory, string plaintext, string version,
+        bool corruptKey = false, bool wrongKey = false)
+    {
+        Directory.CreateDirectory(directory);
+        var key = RandomNumberGenerator.GetBytes(32);
+        var wrapped = ProtectedData.Protect(key, null, DataProtectionScope.CurrentUser);
+        var blob = new byte[5 + wrapped.Length];
+        Encoding.ASCII.GetBytes("DPAPI").CopyTo(blob, 0);
+        wrapped.CopyTo(blob, 5);
+        if (corruptKey)
+            blob[^1] ^= 0x5A;
+        File.WriteAllText(Path.Combine(directory, "Local State"),
+            "{\"os_crypt\":{\"encrypted_key\":\"" + Convert.ToBase64String(blob) + "\"}}");
+        var cryptKey = wrongKey ? RandomNumberGenerator.GetBytes(32) : key;
+        File.WriteAllText(Path.Combine(directory, "config.json"),
+            "{\"oauth:tokenCacheV2\":\"" + SealDesktopCache(plaintext, cryptKey, version) + "\"}");
+        CryptographicOperations.ZeroMemory(key);
+        if (wrongKey)
+            CryptographicOperations.ZeroMemory(cryptKey);
+    }
+
+    private static string SealDesktopCache(string plaintext, byte[] key, string version)
+    {
+        var nonce = RandomNumberGenerator.GetBytes(12);
+        var plain = Encoding.UTF8.GetBytes(plaintext);
+        var cipher = new byte[plain.Length];
+        var tag = new byte[16];
+        using (var aes = new AesGcm(key, 16))
+            aes.Encrypt(nonce, plain, cipher, tag);
+        var blob = new byte[3 + nonce.Length + cipher.Length + tag.Length];
+        Encoding.ASCII.GetBytes(version).CopyTo(blob, 0);
+        nonce.CopyTo(blob, 3);
+        cipher.CopyTo(blob, 15);
+        tag.CopyTo(blob, 15 + cipher.Length);
+        return Convert.ToBase64String(blob);
+    }
+
+    private sealed class CountingClaudeTokenSource : IClaudeTokenSource
+    {
+        private readonly IClaudeTokenSource _inner;
+        public int Reads;
+        public int Inspects;
+
+        public CountingClaudeTokenSource(IClaudeTokenSource inner) => _inner = inner;
+
+        public string? ReadAccessToken()
+        {
+            Reads++;
+            return _inner.ReadAccessToken();
+        }
+
+        public ClaudeLoginInspection InspectLogin()
+        {
+            Inspects++;
+            return _inner.InspectLogin();
+        }
     }
 
     private static ProviderAccessSettings ClaudeSettings(bool claudeEnabled) =>

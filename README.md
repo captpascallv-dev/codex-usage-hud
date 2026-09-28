@@ -31,12 +31,15 @@ SHA-256 校验文件，用于确认下载内容没有发生变化。
 ### Claude 订阅额度槽
 
 在原有五个额度槽之外增加独立的 Claude 订阅槽，默认关闭，已有用户的启用状态保持不变。
-勾选后只读取本机 Claude Code 已有 OAuth 登录里的访问字段，向
-`https://api.anthropic.com/api/oauth/usage` 查询订阅用量。界面显示 5 小时会话和每周全部模型的
-剩余百分比（100 减去接口给出的已用百分比），并只展示接口实际返回的模型窗口和重置时间。
-缺少的窗口不是 0% 或 100%，缺少的重置时间不会推算。不分析 Claude 会话或上下文，不与 Codex
-或其他槽合并，也不从 raw token、本地对话或 API key 账单换算额度。没有可用登录时显示未连接；
-接口限流、暂时失败或格式不支持时显示不可用，并按有界退避重试。HUD 不登录、不刷新、不改写凭据。
+勾选后优先读取本机 Claude Code 已有 OAuth 登录里的访问字段。该文件没有可用访问令牌时，
+才回退到当前 Windows Claude Desktop 配置里的一个未过期访问令牌（`%APPDATA%\Claude`，
+必要时才看唯一的 MSIX 重定向）。多个 Desktop 账户无法证明当前账户时显示不可用，不选用任意缓存。
+向 `https://api.anthropic.com/api/oauth/usage` 查询订阅用量。界面显示 5 小时会话、每周全部模型，
+以及接口 `limits` 数组里实际返回的模型窗口；旧的顶层字段只在数组没有可用窗口时使用。
+剩余百分比是 100 减去接口给出的已用百分比。缺少的窗口不是 0% 或 100%，缺少的重置时间不会推算。
+不分析 Claude 会话或上下文，不与 Codex 或其他槽合并，也不从 raw token、本地对话或 API key 账单换算额度。
+没有可用登录时显示未连接；接口限流、暂时失败、无法解密或格式不支持时显示不可用，并按有界退避重试。
+HUD 不登录、不刷新、不改写凭据。
 
 ### v1.1.1 Codex备续期与 Grok 额度显示修复
 
@@ -185,7 +188,8 @@ the source with the project-local scripts below.
    已登录的 `openai-codex` 订阅；没有该登录时显示未连接，不要求第二套 Codex 主目录。
    在设置中勾选 Cursor、Grok、Grok Bot 或 Claude 后，HUD 才使用对应本机已有登录。Grok 需要已安装
    并登录的 Grok CLI；到期时由官方 `grok models` 续期。Grok Bot 走 Cursor 登录中的独立额度。
-   Claude 读取本机 Claude Code 已有 OAuth 登录的订阅用量（5 小时与每周窗口），不启动或更新 Claude，
+   Claude 优先读取本机 Claude Code 已有 OAuth 登录；没有可用访问令牌时才回退到当前 Claude Desktop
+   配置中的一个未过期访问令牌。订阅用量包含 5 小时、每周和接口实际返回的模型窗口。不启动或更新 Claude，
    也不把 raw token 当成订阅额度。公开包默认不启用 Cursor/Grok/Grok Bot/Claude，也不会写入任何人的启用勾选。
 9. 双击发布包中的 EXE 使用 `%LOCALAPPDATA%\CodexUsageHUD` 与默认 Codex 主目录。
    公开 ZIP 不含 `ISOLATED_PREVIEW.marker`。`--data-dir` / `--codex-home` 仅用于隔离预览或
@@ -216,7 +220,10 @@ browser storage, and unrelated projects are outside the reader. Opted-in Cursor,
 Grok, and Grok Bot slots, and the PI second Codex slot, may read only the
 necessary existing-login field at runtime and keep it in memory for that
 request. Grok renewal runs the official installed `grok models` CLI; the HUD
-does not write Grok `auth.json`. Agents still must not open credential files.
+does not write Grok `auth.json`. The opted-in Claude slot may also decrypt the
+current Desktop profile's OAuth access token in memory when the Claude Code
+file has none. Agents still must not open credential files, Claude
+`config.json`, or `Local State`.
 
 The default app database is `%LOCALAPPDATA%\CodexUsageHUD\usage.db`; settings
 always show that literal symbolic path, never its resolved private path. The app
@@ -378,11 +385,16 @@ the official `grok models` CLI to renew an expired access key that still has a
 refresh grant, then re-read the login file. The HUD does not write Grok
 `auth.json`. The PI second Codex slot reads `openai-codex` against
 `chatgpt.com/backend-api/wham/usage` without a second `CODEX_HOME`.
-Claude reads `claudeAiOauth.accessToken` from the existing Claude Code credential
-file and GETs `https://api.anthropic.com/api/oauth/usage`. Remaining percent is
-100 minus the returned utilization. Missing windows and missing reset times are
-left blank. The endpoint is undocumented and may return 429; the HUD then shows
-unavailable and backs off. It does not refresh Claude credentials or launch the CLI.
+Claude prefers `claudeAiOauth.accessToken` from the existing Claude Code credential
+file. When that file has no usable access token, it falls back to one unexpired
+access token from the current Windows Claude Desktop profile
+(`%APPDATA%\Claude`, or the single standard MSIX redirection). Multiple Desktop
+accounts stay unavailable. It GETs `https://api.anthropic.com/api/oauth/usage`.
+Remaining percent is 100 minus the returned used percent. A `limits` array is
+preferred, with the legacy top-level windows as fallback. Missing windows and
+missing reset times are left blank. The endpoint is undocumented and may return
+429; the HUD then shows unavailable and backs off. It does not refresh Claude
+credentials, modify Desktop files, or launch the CLI.
 
 ## Controls
 

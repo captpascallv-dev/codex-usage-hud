@@ -106,10 +106,15 @@ public static class ProviderLiveDiagnostic
                 var grokFile = WindowsLoginPresence.GrokAuthFile();
                 dependency ??= grokFile.Present ? null : "grok_auth_file_absent";
             }
-            if (slot.SlotId == ProviderSlotIds.Claude)
+            if (slot.SlotId == ProviderSlotIds.Claude && dependency is null)
             {
                 var claudeFile = WindowsLoginPresence.ClaudeCredentialsFile();
-                dependency ??= claudeFile.Present ? null : "claude_credentials_absent";
+                var desktop = WindowsLoginPresence.ClaudeDesktopProfile();
+                var failed = snapshot.Status is QuotaSlotStatus.NotConnected or QuotaSlotStatus.Unavailable;
+                if (!claudeFile.Present && !desktop.Present)
+                    dependency = "claude_credentials_absent";
+                else if (!claudeFile.Present && desktop.Present && failed)
+                    dependency = "claude_desktop_profile";
             }
             if (slot.SlotId == ProviderSlotIds.Cursor) cursorIdentity = snapshot.OpaqueIdentityHash;
             if (slot.SlotId == ProviderSlotIds.GrokBot) grokBotIdentity = snapshot.OpaqueIdentityHash;
@@ -303,7 +308,7 @@ public static class ProviderLiveDiagnostic
     {
         if (string.IsNullOrWhiteSpace(value)) return "none";
         return ProviderHttpErrors.IsStableCode(value) || value.All(character =>
-            character is '_' or '-' or ' ' or '=' || char.IsLetterOrDigit(character) || character > 127)
+            character is '_' or '-' or ' ' or '=' or ',' or ':' || char.IsLetterOrDigit(character) || character > 127)
             ? value.Replace('\n', ' ').Replace('\r', ' ')
             : "redacted";
     }

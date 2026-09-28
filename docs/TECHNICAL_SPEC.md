@@ -96,12 +96,23 @@ PI providers.
 Pascal 2026-09-28: the opted-in Claude slot may read only `claudeAiOauth.accessToken`
 and `expiresAt` from the existing Claude Code credential file
 `%USERPROFILE%\.claude\.credentials.json`, or `%CLAUDE_CONFIG_DIR%\.credentials.json`
-when that variable is set. The access value stays in memory for one GET
+when that variable is set. When that file has no usable access token, the same
+slot may fall back to the current Windows Claude Desktop profile only:
+`%APPDATA%\Claude\config.json` and the sibling `Local State`, or the single
+standard MSIX redirection
+`%LOCALAPPDATA%\Packages\Claude_*\LocalCache\Roaming\Claude\` when the roaming
+pair is absent. It decrypts `oauth:tokenCacheV2` (or `oauth:tokenCache` only
+when V2 is absent) in memory with the current-user DPAPI key from `os_crypt`
+and reads one unexpired OAuth access token for `https://api.anthropic.com`.
+It does not read refresh tokens, scan browsers, cookies, Credential Manager,
+other Electron profiles, or transcripts, and it does not modify Desktop files.
+If more than one Desktop account or profile is present, the slot is unavailable
+instead of choosing one. The access value stays in memory for one GET
 `https://api.anthropic.com/api/oauth/usage` with the `anthropic-beta: oauth-2025-04-20`
 header. The host and path are fixed, redirects are refused, and the body is
 bounded. There is no token refresh, no credential rewrite, no browser-cookie
 scrape, no API-key billing, and no transcript or raw-token quota. An expired
-local access token is `未连接`. Agents must not open that file.
+local access token is `未连接`. Agents must not open those files.
 
 For `state_5.sqlite`, inspect `PRAGMA table_info(threads)` and select only the
 intersection of these columns: `id`, `rollout_path`, `created_at`,
@@ -364,17 +375,23 @@ official CLI refresh succeeds, `grok_login_revoked` when the grant is gone, and
 up to 35s for that CLI refresh; the 500ms board publish budget is unchanged.
 
 Claude subscription quota is a separate allowlisted GET, not a Codex or
-Cursor pool. `utilization` is an authoritative used percent; remaining is
-`100 - utilization`. The five-hour session and weekly all-models windows are
-shown when that object contains a finite utilization in `[0, 100]`. Additional
-`seven_day_*` objects are shown only when they likewise contain that field.
-A missing or non-numeric window is omitted, never rendered as 0% or 100%.
-A missing or unparseable `resets_at` is not invented from a duration.
-`extra_usage` credit fields are not subscription quota. HTTP 401/403 is
-`未连接` and is not retried inside the read. HTTP 429, transport failure, and
-an unsupported body are unavailable. The existing per-slot backoff starts at
-15 seconds, doubles, and caps at 2 minutes, and the quota cadence remains
+Cursor pool. When the body contains a `limits` array, that array is the
+current reading: `session` / `five_hour` is the five-hour window, `weekly_all`
+/ `weekly` / `seven_day` is the overall weekly window, and `weekly_scoped`
+entries are shown only when `scope.model.display_name` is present. `percent`
+and legacy `utilization` are the same used-percent unit; remaining is
+`100 - used`. Entries with `is_active: false`, an unknown kind, or a used
+percent outside `[0, 100]` are omitted. If the array yields no usable window,
+the reader falls back to the legacy top-level `five_hour`, `seven_day`, and
+`seven_day_*` objects. A missing or non-numeric window is omitted, never
+rendered as 0% or 100%. A missing or unparseable reset is not invented from a
+duration. `extra_usage` credit fields are not subscription quota. HTTP 401/403
+is `未连接` and is not retried inside the read. HTTP 429, transport failure,
+and an unsupported body are unavailable. The existing per-slot backoff starts
+at 15 seconds, doubles, and caps at 2 minutes, and the quota cadence remains
 60 seconds. No Claude Code process is launched and no model call is made.
+Diagnostics name the source as `claude_code_file` or `claude_desktop` and do
+not include the access token.
 
 Do not pass a service-tier override. Use JSON-RPC over stdin/stdout:
 

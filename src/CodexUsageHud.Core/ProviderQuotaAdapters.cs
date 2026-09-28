@@ -844,20 +844,42 @@ public sealed class ClaudeQuotaAdapter
 
         if (!inspection.Usable)
         {
+            var desktop = string.Equals(inspection.SourceKind, "claude_desktop", StringComparison.Ordinal);
+            if (inspection.AccountAmbiguous)
+            {
+                return Unavailable(settings, "Claude Desktop 有多个账户缓存，无法证明当前账户",
+                    "不选用任意缓存账户", "claude_desktop_account_ambiguous", inspection);
+            }
+
+            if (inspection.DecryptFailed)
+            {
+                return Unavailable(settings, "Claude Desktop 登录无法在本地解密",
+                    "不改写 Desktop 配置", "claude_desktop_decrypt_failed", inspection);
+            }
+
+            if (inspection.Expired)
+            {
+                return Disconnected(settings,
+                    desktop ? "未连接：Claude Desktop 登录已过期" : "未连接：Claude Code 登录已过期",
+                    "不刷新、不重写凭据", "claude_login_expired", inspection);
+            }
+
             if (!inspection.FilePresent)
             {
                 return Disconnected(settings, "未连接：本机没有可用的 Claude Code 登录",
                     "需要 Claude Code 已登录", "claude_sign_in_required", inspection);
             }
 
-            if (inspection.Expired)
+            if (desktop && inspection.Recognized && !inspection.HasAccess)
             {
-                return Disconnected(settings, "未连接：Claude Code 登录已过期",
-                    "不刷新、不重写凭据", "claude_login_expired", inspection);
+                return Disconnected(settings, "未连接：Claude Desktop 没有可用的访问令牌",
+                    "需要当前账户的未过期访问令牌", "claude_sign_in_required", inspection);
             }
 
-            return Disconnected(settings, "未连接：本机 Claude Code 登录当前无法用于订阅额度",
-                "仅接受 claudeAiOauth.accessToken", "claude_login_unsupported", inspection);
+            return Disconnected(settings,
+                desktop ? "未连接：Claude Desktop 登录当前无法用于订阅额度" : "未连接：本机 Claude Code 登录当前无法用于订阅额度",
+                desktop ? "仅接受当前账户未过期的访问令牌" : "仅接受 claudeAiOauth.accessToken",
+                "claude_login_unsupported", inspection);
         }
 
         string? token;

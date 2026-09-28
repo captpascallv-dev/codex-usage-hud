@@ -754,12 +754,14 @@ public partial class MainWindow : Window, IDisposable
         var grokBot = WindowsLoginPresence.GrokBot();
         var piCodex = WindowsLoginPresence.PiCodexAuthFile();
         var claude = WindowsLoginPresence.ClaudeCredentialsFile();
+        var claudeDesktop = WindowsLoginPresence.ClaudeDesktopProfile();
         PiCodexPresenceText.Text = $"PI ChatGPT/Codex 订阅登录文件：{(piCodex.Present ? "存在" : "未找到")}（{piCodex.RelativeHint}）";
         var presence =
             $"Cursor 登录文件：{(cursor.Present ? "存在" : "未找到")}（{cursor.RelativeHint}）\n" +
             $"Grok 登录目录：{(grok.Present ? "存在" : "未找到")}（{grok.RelativeHint}）\n" +
             $"Grok Bot：{(grokBot.Present ? "Cursor 登录文件存在" : "未找到 Cursor 登录文件")}（{grokBot.RelativeHint}）\n" +
-            $"Claude Code 登录文件：{(claude.Present ? "存在" : "未找到")}（{claude.RelativeHint}）";
+            $"Claude Code 登录文件：{(claude.Present ? "存在" : "未找到")}（{claude.RelativeHint}）\n" +
+            $"Claude Desktop 配置：{(claudeDesktop.Present ? "存在" : "未找到")}（{claudeDesktop.RelativeHint}）";
         SettingsStatusText.Text = IsolatedPreviewLaunch.CurrentProcessIsolated
             ? "隔离预览：不会改写已安装 HUD 的开机启动或桌面快捷方式。\n" + presence
             : presence;

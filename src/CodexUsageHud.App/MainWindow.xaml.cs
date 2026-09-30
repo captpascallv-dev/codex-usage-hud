@@ -72,6 +72,7 @@ public partial class MainWindow : Window, IDisposable
     private const double RailTopHeight = 78;
     private const double RailTopDelayHeight = 100;
     private const double RailTopNarrowHeight = 96;
+    private const double RailTopNarrowDelayHeight = 112;
     private const double RailTopNarrowBreakpoint = 900;
     private const double ExpandedWidth = 1180;
     private const double ExpandedHeight = 820;
@@ -595,8 +596,9 @@ public partial class MainWindow : Window, IDisposable
             var available = Math.Max(8, work.Width - 24);
             var width = Math.Min(RailTopWidth, available);
             var delayed = _viewModel.Slots.Any(slot => slot.UpdateDelayed);
-            var height = width < RailTopNarrowBreakpoint
-                ? RailTopNarrowHeight
+            var narrow = width < RailTopNarrowBreakpoint;
+            var height = narrow
+                ? delayed ? RailTopNarrowDelayHeight : RailTopNarrowHeight
                 : delayed ? RailTopDelayHeight : RailTopHeight;
             return new System.Windows.Size(width, height);
         }

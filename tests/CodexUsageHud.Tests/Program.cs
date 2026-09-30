@@ -10609,6 +10609,8 @@ internal static class Program
 
     private readonly record struct ClaudeDelayCapture(
         ProviderQuotaBoard Board,
+        ProviderQuotaBoard OrdinaryBoard,
+        ProviderQuotaBoard RecoveredBoard,
         string DetailStatus,
         string DetailPercent,
         string DetailObserved,
@@ -10736,6 +10738,13 @@ internal static class Program
             "windows_marked_old");
         Assert.True(viewModel.SlotDetailBody.Contains("状态码 claude_rate_limited", StringComparison.Ordinal), "safe_error_code");
         Assert.True(viewModel.SlotDetailBody.Contains("旧值", StringComparison.Ordinal), "body_old_value");
+        var ordinaryBoard = delayedBoard with
+        {
+            Slots = delayedBoard.Slots.Select(slot => slot.SlotId == ProviderSlotIds.Claude
+                ? live with { Label = "Claude 订阅" }
+                : slot).ToArray(),
+            GeneratedAtUtc = live.ObservedAtUtc,
+        };
         var recoveredBoard = delayedBoard with
         {
             Slots = delayedBoard.Slots.Select(slot => slot.SlotId == ProviderSlotIds.Claude ? recovered : slot).ToArray(),
@@ -10748,8 +10757,8 @@ internal static class Program
         Assert.True(!recoveredModel.SlotDetailObserved.Contains("更新延迟", StringComparison.Ordinal), "recovered_detail");
         Assert.True(recoveredModel.SlotDetailWindows.All(row => !row.RemainingText.Contains("旧值", StringComparison.Ordinal)),
             "recovered_windows");
-        return new ClaudeDelayCapture(delayedBoard, viewModel.SlotDetailStatus, viewModel.SlotDetailPercent,
-            viewModel.SlotDetailObserved, viewModel.SlotDetailBody,
+        return new ClaudeDelayCapture(delayedBoard, ordinaryBoard, recoveredBoard, viewModel.SlotDetailStatus,
+            viewModel.SlotDetailPercent, viewModel.SlotDetailObserved, viewModel.SlotDetailBody,
             viewModel.SlotDetailWindows.Select(row => row.Name + " " + row.RemainingText).ToArray(),
             viewModel.RenderedStrings());
     }
@@ -11147,6 +11156,181 @@ internal static class Program
             "detail_png=" + detailPath + "\r\n");
         Assert.True(new FileInfo(railPath).Length > 1000, "rail_png_small");
         Assert.True(new FileInfo(detailPath).Length > 1000, "detail_png_small");
+        CaptureClaudeDelayTopRail(window, viewModel, capture, output);
+    }
+
+    private static void CaptureClaudeDelayTopRail(MainWindow window, MainViewModel viewModel,
+        ClaudeDelayCapture capture, string output)
+    {
+        var notes = new StringBuilder();
+        notes.AppendLine("SYNTHETIC Claude delay top rail. No live quota and no account content.");
+        notes.AppendLine("wide ordinary 1100x78, delayed 1100x100, recovery 1100x78.");
+        notes.AppendLine("narrow ordinary and recovery are 640x96; delayed narrow is 640x112 so the wrapped age stays inside the slot.");
+        try
+        {
+            InvokeWindowMethod(window, "OnCloseSlotDetail", window, new System.Windows.RoutedEventArgs());
+            var dockField = typeof(MainWindow).GetField("_dockSide",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("dock_field_missing");
+            dockField.SetValue(window, Enum.Parse(dockField.FieldType, "Top"));
+            ApplyClaudeTopState(window, viewModel, capture.OrdinaryBoard, 1920, 1080, expand: true);
+            AssertClaudeTopSize(window, viewModel, 1100, 78, false, "ordinary_wide", notes);
+            AssertClaudeTopDelayCleared(window, "60%", "ordinary_wide", notes);
+
+            ApplyClaudeTopState(window, viewModel, capture.Board, 1920, 1080, expand: false);
+            AssertClaudeTopSize(window, viewModel, 1100, 100, false, "delayed_wide", notes);
+            AssertClaudeTopDelayFits(window, "delayed_wide", notes);
+            var widePath = Path.Combine(output, "claude-delay-top-1100.png");
+            RenderWindow(window, widePath);
+
+            ApplyClaudeTopState(window, viewModel, capture.RecoveredBoard, 1920, 1080, expand: false);
+            AssertClaudeTopSize(window, viewModel, 1100, 78, false, "recovery_wide", notes);
+            AssertClaudeTopDelayCleared(window, "69%", "recovery_wide", notes);
+            RenderWindow(window, Path.Combine(output, "claude-delay-top-1100-recovered.png"));
+
+            ApplyClaudeTopState(window, viewModel, capture.OrdinaryBoard, 664, 900, expand: false);
+            AssertClaudeTopSize(window, viewModel, 640, 96, true, "ordinary_narrow", notes);
+            AssertClaudeTopDelayCleared(window, "60%", "ordinary_narrow", notes);
+
+            ApplyClaudeTopState(window, viewModel, capture.Board, 664, 900, expand: false);
+            AssertClaudeTopSize(window, viewModel, 640, 112, true, "delayed_narrow", notes);
+            AssertClaudeTopDelayFits(window, "delayed_narrow", notes);
+            var narrowPath = Path.Combine(output, "claude-delay-top-640.png");
+            RenderWindow(window, narrowPath);
+
+            ApplyClaudeTopState(window, viewModel, capture.RecoveredBoard, 664, 900, expand: false);
+            AssertClaudeTopSize(window, viewModel, 640, 96, true, "recovery_narrow", notes);
+            AssertClaudeTopDelayCleared(window, "69%", "recovery_narrow", notes);
+            RenderWindow(window, Path.Combine(output, "claude-delay-top-640-recovered.png"));
+
+            notes.AppendLine("wide_png=" + widePath);
+            notes.AppendLine("narrow_png=" + narrowPath);
+            Assert.True(new FileInfo(widePath).Length > 1000, "top_wide_png_small");
+            Assert.True(new FileInfo(narrowPath).Length > 1000, "top_narrow_png_small");
+        }
+        finally
+        {
+            File.WriteAllText(Path.Combine(output, "claude-delay-top-notes.txt"), notes.ToString());
+        }
+    }
+
+    private static void ApplyClaudeTopState(MainWindow window, MainViewModel viewModel, ProviderQuotaBoard board,
+        double workWidth, double workHeight, bool expand)
+    {
+        viewModel.Apply(SyntheticProviderSnapshot(board, board.GeneratedAtUtc));
+        viewModel.IsExpanded = false;
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, workWidth, workHeight));
+        if (expand)
+            InvokeWindowMethod(window, "ApplyExpansionState", false);
+        else
+            InvokeWindowMethod(window, "RemeasureCompactRail");
+        window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+        window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
+        window.UpdateLayout();
+        InvokeWindowMethod(window, "UpdateTextBlocks");
+    }
+
+    private static void AssertClaudeTopSize(MainWindow window, MainViewModel viewModel, double width, double height,
+        bool narrow, string label, StringBuilder notes)
+    {
+        var shell = window.FindName("RailTopShell") as System.Windows.FrameworkElement
+            ?? throw new InvalidOperationException("top_shell_missing");
+        notes.AppendLine(label +
+            " width=" + window.Width.ToString("0.###", CultureInfo.InvariantCulture) +
+            " height=" + window.Height.ToString("0.###", CultureInfo.InvariantCulture) +
+            " narrow=" + viewModel.TopBarNarrowLayout.ToString() +
+            " shell=" + shell.Visibility +
+            " shell_h=" + shell.ActualHeight.ToString("0.###", CultureInfo.InvariantCulture));
+        Assert.True(Math.Abs(window.Width - width) <= 1.5d, label + "_width:" + window.Width.ToString("0.###", CultureInfo.InvariantCulture));
+        Assert.True(Math.Abs(window.Height - height) <= 1.5d, label + "_height:" + window.Height.ToString("0.###", CultureInfo.InvariantCulture));
+        Assert.True(viewModel.TopBarNarrowLayout == narrow, label + "_narrow_flag");
+        Assert.True(shell.Visibility == System.Windows.Visibility.Visible, label + "_shell_hidden");
+    }
+
+    private static void AssertClaudeTopDelayCleared(MainWindow window, string percent, string label, StringBuilder notes)
+    {
+        var button = RequireTopSlotButton(window, ProviderSlotIds.Claude);
+        var texts = FindVisualChildren<System.Windows.Controls.TextBlock>(button)
+            .Select(block => block.Text)
+            .Where(text => !string.IsNullOrWhiteSpace(text))
+            .ToArray();
+        notes.AppendLine(label + " text=" + string.Join(" | ", texts));
+        Assert.True(texts.Any(text => text.Contains(percent, StringComparison.Ordinal)), label + "_percent");
+        Assert.True(!texts.Any(text => text.Contains("更新延迟", StringComparison.Ordinal)), label + "_delay_still_visible");
+    }
+
+    private static void AssertClaudeTopDelayFits(MainWindow window, string label, StringBuilder notes)
+    {
+        var shell = window.FindName("RailTopShell") as System.Windows.FrameworkElement
+            ?? throw new InvalidOperationException("top_shell_missing");
+        var button = RequireTopSlotButton(window, ProviderSlotIds.Claude);
+        var blocks = FindVisualChildren<System.Windows.Controls.TextBlock>(button)
+            .Where(block => block.Visibility == System.Windows.Visibility.Visible && !string.IsNullOrWhiteSpace(block.Text))
+            .ToArray();
+        var percent = blocks.FirstOrDefault(block => block.Text.Contains("60%", StringComparison.Ordinal))
+            ?? throw new InvalidOperationException(label + "_percent_missing");
+        var delay = blocks.FirstOrDefault(block => block.Text.Contains("更新延迟", StringComparison.Ordinal))
+            ?? throw new InvalidOperationException(label + "_delay_missing");
+        Assert.True(delay.Text.Contains("分钟前", StringComparison.Ordinal), label + "_age_missing");
+        var shellBounds = new System.Windows.Rect(0, 0, shell.ActualWidth, shell.ActualHeight);
+        var buttonBounds = button.TransformToAncestor(shell).TransformBounds(
+            new System.Windows.Rect(0, 0, button.ActualWidth, button.ActualHeight));
+        notes.AppendLine(label + " slot_bounds=" + buttonBounds.ToString(CultureInfo.InvariantCulture));
+        System.Windows.Rect? percentBounds = null;
+        System.Windows.Rect? delayBounds = null;
+        foreach (var block in blocks)
+        {
+            if (block.ActualWidth < 1d || block.ActualHeight < 1d) continue;
+            var bounds = block.TransformToAncestor(shell).TransformBounds(
+                new System.Windows.Rect(0, 0, block.ActualWidth, block.ActualHeight));
+            var verticalShort = block.DesiredSize.Height - block.Margin.Top - block.Margin.Bottom - block.ActualHeight;
+            var horizontalShort = block.DesiredSize.Width - block.Margin.Left - block.Margin.Right - block.ActualWidth;
+            notes.AppendLine(label + " block=" + block.Text +
+                " bounds=" + bounds.ToString(CultureInfo.InvariantCulture) +
+                " desired=" + block.DesiredSize.Width.ToString("0.###", CultureInfo.InvariantCulture) +
+                "x" + block.DesiredSize.Height.ToString("0.###", CultureInfo.InvariantCulture) +
+                " actual=" + block.ActualWidth.ToString("0.###", CultureInfo.InvariantCulture) +
+                "x" + block.ActualHeight.ToString("0.###", CultureInfo.InvariantCulture));
+            var inside = bounds.Left >= shellBounds.Left - 1.5d && bounds.Top >= shellBounds.Top - 1.5d &&
+                bounds.Right <= shellBounds.Right + 1.5d && bounds.Bottom <= shellBounds.Bottom + 1.5d &&
+                bounds.Left >= buttonBounds.Left - 1.5d && bounds.Top >= buttonBounds.Top - 1.5d &&
+                bounds.Right <= buttonBounds.Right + 1.5d && bounds.Bottom <= buttonBounds.Bottom + 1.5d;
+            Assert.True(inside, label + "_clipped:" + block.Text);
+            Assert.True(verticalShort <= 1.5d && horizontalShort <= 1.5d, label + "_arranged_short:" + block.Text);
+            if (ReferenceEquals(block, percent)) percentBounds = bounds;
+            if (ReferenceEquals(block, delay)) delayBounds = bounds;
+        }
+
+        var overlap = System.Windows.Rect.Intersect(percentBounds!.Value, delayBounds!.Value);
+        notes.AppendLine(label + " percent_delay_overlap=" + overlap.ToString(CultureInfo.InvariantCulture));
+        Assert.True(overlap.IsEmpty || overlap.Width <= 0.5d || overlap.Height <= 0.5d, label + "_percent_delay_overlap");
+        var chrome = window.FindName("RailTopTopmostButton") as System.Windows.FrameworkElement;
+        var chromePanel = chrome is null ? null : System.Windows.Media.VisualTreeHelper.GetParent(chrome) as System.Windows.FrameworkElement;
+        if (chromePanel is not null)
+        {
+            var chromeBounds = chromePanel.TransformToAncestor(shell).TransformBounds(
+                new System.Windows.Rect(0, 0, chromePanel.ActualWidth, chromePanel.ActualHeight));
+            var chromeOverlap = System.Windows.Rect.Intersect(buttonBounds, chromeBounds);
+            notes.AppendLine(label + " chrome_overlap=" + chromeOverlap.ToString(CultureInfo.InvariantCulture));
+            Assert.True(chromeOverlap.IsEmpty || chromeOverlap.Width <= 0.5d || chromeOverlap.Height <= 0.5d,
+                label + "_chrome_overlap");
+        }
+    }
+
+    private static System.Windows.Controls.Button RequireTopSlotButton(MainWindow window, string slotId)
+    {
+        var list = window.FindName("RailTopSlotList") as System.Windows.Controls.ItemsControl
+            ?? throw new InvalidOperationException("top_list_missing");
+        list.UpdateLayout();
+        for (var index = 0; index < list.Items.Count; index++)
+        {
+            var container = list.ItemContainerGenerator.ContainerFromIndex(index);
+            if (container is null) continue;
+            var button = FindVisualChild<System.Windows.Controls.Button>(container);
+            if (button?.Tag as string == slotId) return button;
+        }
+
+        throw new InvalidOperationException("top_slot_button_missing:" + slotId);
     }
 
     private static List<string> CollectVisualText(System.Windows.DependencyObject root)

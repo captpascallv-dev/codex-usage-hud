@@ -819,6 +819,9 @@
                                                        Foreground="{StaticResource HudMuted}" VerticalAlignment="Bottom"
                                                        TextWrapping="Wrap" TextTrimming="None" />
                                         </StackPanel>
+                                        <TextBlock Text="{Binding DelayText}" FontSize="11" Margin="0,1,0,0"
+                                                   Foreground="{StaticResource HudMuted}" TextWrapping="Wrap"
+                                                   Visibility="{Binding UpdateDelayed, Converter={StaticResource BoolVisibility}}" />
                                     </StackPanel>
                                 </Grid>
                             </Button>
@@ -898,6 +901,9 @@
                                                    TextWrapping="Wrap" TextTrimming="None" />
                                         <TextBlock Text="{Binding GlancePercentText}" FontSize="22" FontWeight="Bold"
                                                    Foreground="{StaticResource HudMint}" TextTrimming="None" />
+                                        <TextBlock Text="{Binding DelayText}" FontSize="11" Margin="0,1,0,0"
+                                                   Foreground="{StaticResource HudMuted}" TextWrapping="Wrap"
+                                                   Visibility="{Binding UpdateDelayed, Converter={StaticResource BoolVisibility}}" />
                                     </StackPanel>
                                 </Grid>
                             </Button>

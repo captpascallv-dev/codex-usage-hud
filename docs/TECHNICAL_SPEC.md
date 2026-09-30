@@ -391,10 +391,26 @@ the reader falls back to the legacy top-level `five_hour`, `seven_day`, and
 `seven_day_*` objects. A missing or non-numeric window is omitted, never
 rendered as 0% or 100%. A missing or unparseable reset is not invented from a
 duration. `extra_usage` credit fields are not subscription quota. HTTP 401/403
-is `未连接` and is not retried inside the read. HTTP 429, transport failure,
-and an unsupported body are unavailable. The existing per-slot backoff starts
-at 15 seconds, doubles, and caps at 2 minutes, and the quota cadence remains
-60 seconds. No Claude Code process is launched and no model call is made.
+is `未连接` and is not retried inside the read. It clears any previous Claude
+windows for that slot. An unsupported body stays unavailable. After a
+successful Claude quota read, HTTP 429, timeout, network failure, and HTTP
+5xx keep the last successful five-hour, weekly, and model windows, the
+original observation time, and the verified identity, marked `更新延迟`. They
+do not invent a new observation or percentage. With no successful observation
+yet, the slot stays unavailable. Disabling the slot, a configuration or
+account change, unusable or ambiguous credentials, and identity rejection
+also clear the previous windows. Expired resets are not shown as available;
+a weekly window that has not reset stays separate. Nothing is written to a
+disk quota cache.
+
+Claude automatic successful reads wait 5 minutes. HTTP 429 then waits 5, 10,
+and 20 minutes, capped at 30 minutes, and a manual refresh waits out that
+cooldown as well. Other Claude transport failures keep the shared 15-second
+backoff that doubles up to 2 minutes. A Claude observation stays live for 6
+minutes, so the 5-minute cadence is not labeled stale. Other providers keep
+the 60-second cadence, 75-second freshness, and 15-second backoff. No Claude
+Code process is launched and no model call is made.
+
 Diagnostics name the source as `claude_code_file` or `claude_desktop` and do
 not include the access token.
 
@@ -563,7 +579,7 @@ Default cadence:
 
 - UI countdown: 1 second, no I/O
 - append/session refresh: 8 seconds
-- quota refresh: 60 seconds plus manual refresh
+- quota refresh: 60 seconds plus manual refresh; a successful automatic Claude read waits 5 minutes
 - source discovery: 30 seconds or when metadata changes
 
 Avoid FileSystemWatcher as the sole truth source; periodic reconciliation is

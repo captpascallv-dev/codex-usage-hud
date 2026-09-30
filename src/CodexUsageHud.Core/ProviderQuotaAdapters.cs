@@ -820,11 +820,14 @@ public sealed class ClaudeQuotaAdapter
 
     private readonly IAllowlistedHttpSender _http;
     private readonly IClaudeTokenSource _tokens;
+    private readonly Func<DateTimeOffset> _clock;
 
-    public ClaudeQuotaAdapter(IAllowlistedHttpSender http, IClaudeTokenSource tokens)
+    public ClaudeQuotaAdapter(IAllowlistedHttpSender http, IClaudeTokenSource tokens,
+        Func<DateTimeOffset>? clock = null)
     {
         _http = http;
         _tokens = tokens;
+        _clock = clock ?? (() => DateTimeOffset.UtcNow);
     }
 
     public async Task<ProviderSlotSnapshot> ReadAsync(ProviderSlotSettings settings,
@@ -916,7 +919,14 @@ public sealed class ClaudeQuotaAdapter
             if (response.StatusCode == 429)
             {
                 return Unavailable(settings, "Claude 订阅额度接口限流，不显示猜测百分比",
-                    "oauth/usage HTTP 429", "claude_rate_limited", inspection);
+                    "oauth/usage HTTP 429", "claude_rate_limited", inspection, identity: identity);
+            }
+
+            if (response.StatusCode is >= 500 and <= 599)
+            {
+                return Unavailable(settings, "Claude 订阅额度接口不可用",
+                    "oauth/usage HTTP " + response.StatusCode, "claude_http_" + response.StatusCode, inspection,
+                    identity: identity);
             }
 
             if (response.StatusCode < 200 || response.StatusCode >= 300)
@@ -932,7 +942,7 @@ public sealed class ClaudeQuotaAdapter
                     "缺少可用的 utilization 窗口", error ?? "claude_schema_unsupported", inspection, flags);
             }
 
-            var now = DateTimeOffset.UtcNow;
+            var now = _clock();
             var current = windows.Any(window => !window.ResetsAtUtc.HasValue || window.ResetsAtUtc.Value > now);
             return new ProviderSlotSnapshot(settings.SlotId, ProviderIds.Claude, settings.Label, true, false,
                 current ? QuotaSlotStatus.Live : QuotaSlotStatus.Stale,
@@ -941,7 +951,8 @@ public sealed class ClaudeQuotaAdapter
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return Unavailable(settings, "Claude 订阅额度请求超时", "独立超时", "claude_timeout", inspection);
+            return Unavailable(settings, "Claude 订阅额度请求超时", "独立超时", "claude_timeout", inspection,
+                identity: identity);
         }
         catch (InvalidOperationException exception)
         {
@@ -950,7 +961,8 @@ public sealed class ClaudeQuotaAdapter
         }
         catch (HttpRequestException)
         {
-            return Unavailable(settings, "Claude 订阅额度网络不可用", "独立失败", "claude_network", inspection);
+            return Unavailable(settings, "Claude 订阅额度网络不可用", "独立失败", "claude_network", inspection,
+                identity: identity);
         }
     }
 
@@ -963,10 +975,11 @@ public sealed class ClaudeQuotaAdapter
         };
 
     private static ProviderSlotSnapshot Unavailable(ProviderSlotSettings settings, string statusText, string source,
-        string code, ClaudeLoginInspection inspection, string? flags = null) =>
+        string code, ClaudeLoginInspection inspection, string? flags = null, string? identity = null) =>
         ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.Unavailable, statusText, source,
             code) with
         {
+            OpaqueIdentityHash = identity,
             FieldPresenceFlags = flags is null ? inspection.Format() : inspection.Format() + " " + flags,
         };
 }

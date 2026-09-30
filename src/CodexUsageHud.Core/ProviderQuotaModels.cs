@@ -73,7 +73,9 @@ public sealed record ProviderSlotSnapshot(
     int UnverifiedHistoryCount = 0,
     int ForeignHistoryCount = 0,
     string? ConfigFingerprint = null,
-    string? FieldPresenceFlags = null)
+    string? FieldPresenceFlags = null,
+    bool UpdateDelayed = false,
+    string? DelayText = null)
 {
     public TimeSpan ObservationAge(DateTimeOffset nowUtc) =>
         nowUtc - ObservedAtUtc < TimeSpan.Zero ? TimeSpan.Zero : nowUtc - ObservedAtUtc;
@@ -143,6 +145,13 @@ public sealed record ProviderSlotSnapshot(
             if (Status == QuotaSlotStatus.NoAllowance) return "无额度";
             if (Status == QuotaSlotStatus.IdentityCollision) return "同一账户";
             if (Status == QuotaSlotStatus.Unavailable) return "不可用";
+            if (UpdateDelayed)
+            {
+                return GlanceWindow is { } delayed && delayed.RemainingPercent is { } delayedRemaining
+                    ? $"{delayed.DisplayName} {delayedRemaining:0}% · 更新延迟"
+                    : "更新延迟";
+            }
+
             if (GlanceWindow is { } window && window.RemainingPercent is { } remaining)
             {
                 var named = $"{window.DisplayName} {remaining:0}%";

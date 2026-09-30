@@ -234,6 +234,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             values.Add(slot.Label);
             values.Add(slot.GlanceText);
+            values.Add(slot.DelayText ?? string.Empty);
             values.Add(slot.StatusText);
             values.Add(slot.SourceDescription);
         }
@@ -467,9 +468,14 @@ public sealed class MainViewModel : INotifyPropertyChanged
         {
             SlotDetailTitle = slot.ShortAlias;
             SlotDetailPercent = slot.GlancePercentText;
-            SlotDetailStatus = ProviderQuotaPresentation.StatusCaption(slot.Status);
+            SlotDetailStatus = slot.UpdateDelayed
+                ? "更新延迟"
+                : ProviderQuotaPresentation.StatusCaption(slot.Status);
             SlotDetailSource = "来源：" + slot.SourceDescription;
-            SlotDetailObserved = "观测：" + ProviderQuotaPresentation.FormatAge(slot.ObservationAge(_snapshot.GeneratedAtUtc));
+            var observedAge = ProviderQuotaPresentation.FormatAge(slot.ObservationAge(_snapshot.GeneratedAtUtc));
+            SlotDetailObserved = slot.UpdateDelayed
+                ? "观测：" + observedAge + " · 更新延迟"
+                : "观测：" + observedAge;
             SlotDetailAccountHint = SlotAccountHint(slot);
             SlotDetailWindows = BuildWindowRows(slot, _snapshot.GeneratedAtUtc);
             SlotDetailBody = BuildSlotDetail(slot, _snapshot.GeneratedAtUtc);
@@ -526,7 +532,13 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 ? "没有计入计划的额度，不显示 100% 可用。"
                 : "没有可展示的额度窗口。");
         else
-            lines.AddRange(slot.Windows.Select(window => ProviderQuotaPresentation.FormatWindowLine(window, nowUtc)));
+            lines.AddRange(slot.Windows.Select(window =>
+            {
+                var line = ProviderQuotaPresentation.FormatWindowLine(window, nowUtc);
+                return slot.UpdateDelayed && window.HasUsablePercent ? line + " · 旧值" : line;
+            }));
+        if (slot.UpdateDelayed && !string.IsNullOrWhiteSpace(slot.ErrorCode))
+            lines.Add("状态码 " + slot.ErrorCode);
         if (slot.ForeignHistoryCount > 0 || slot.UnverifiedHistoryCount > 0)
         {
             lines.Add($"确认他户 {slot.ForeignHistoryCount} 已排除；行级 account_id 未匹配 {slot.UnverifiedHistoryCount}（目录绑定不是机器核验）");
@@ -566,7 +578,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
 
             var remaining = window.RemainingPercent!.Value;
             var remainingText = remaining.ToString("0", CultureInfo.InvariantCulture) + "%";
-            if (!live)
+            if (slot.UpdateDelayed)
+                remainingText += " · 旧值";
+            else if (!live)
                 remainingText += " · 陈旧";
             return new SlotWindowRow(window.DisplayName + " · 剩余", remainingText, reset, remaining, live, !live);
         }).ToArray();

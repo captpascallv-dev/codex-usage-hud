@@ -26,28 +26,53 @@ public sealed class IsolatedQuotaCache
 
 public sealed class ProviderRefreshBackoff
 {
+    public static readonly TimeSpan DefaultFailureDelay = TimeSpan.FromSeconds(15);
+    public static readonly TimeSpan DefaultFailureCap = TimeSpan.FromMinutes(2);
+    public static readonly TimeSpan DefaultSuccessInterval = TimeSpan.FromSeconds(60);
+    public static readonly TimeSpan RateLimitInitial = TimeSpan.FromMinutes(5);
+    public static readonly TimeSpan RateLimitCap = TimeSpan.FromMinutes(30);
+
     private DateTimeOffset _nextAttemptUtc = DateTimeOffset.MinValue;
-    private TimeSpan _delay = TimeSpan.FromSeconds(15);
+    private TimeSpan _delay = DefaultFailureDelay;
+    private TimeSpan _rateDelay = RateLimitInitial;
+    private bool _rateLimitedHold;
 
     public bool IsDue(DateTimeOffset nowUtc) => nowUtc >= _nextAttemptUtc;
 
-    public void Succeeded(DateTimeOffset nowUtc)
+    public bool HoldsManual(DateTimeOffset nowUtc) => _rateLimitedHold && nowUtc < _nextAttemptUtc;
+
+    public void Succeeded(DateTimeOffset nowUtc, TimeSpan? successInterval = null)
     {
-        _delay = TimeSpan.FromSeconds(15);
-        _nextAttemptUtc = nowUtc + TimeSpan.FromSeconds(60);
+        _delay = DefaultFailureDelay;
+        _rateDelay = RateLimitInitial;
+        _rateLimitedHold = false;
+        _nextAttemptUtc = nowUtc + (successInterval ?? DefaultSuccessInterval);
     }
 
     public void Failed(DateTimeOffset nowUtc)
     {
+        if (_rateLimitedHold && nowUtc < _nextAttemptUtc)
+            return;
+        _rateLimitedHold = false;
         _nextAttemptUtc = nowUtc + _delay;
-        var nextMs = Math.Min(_delay.TotalMilliseconds * 2, TimeSpan.FromMinutes(2).TotalMilliseconds);
+        var nextMs = Math.Min(_delay.TotalMilliseconds * 2, DefaultFailureCap.TotalMilliseconds);
         _delay = TimeSpan.FromMilliseconds(nextMs);
+    }
+
+    public void FailedRateLimited(DateTimeOffset nowUtc)
+    {
+        _rateLimitedHold = true;
+        _nextAttemptUtc = nowUtc + _rateDelay;
+        var nextMs = Math.Min(_rateDelay.TotalMilliseconds * 2, RateLimitCap.TotalMilliseconds);
+        _rateDelay = TimeSpan.FromMilliseconds(nextMs);
     }
 }
 
 public sealed class ProviderQuotaCoordinator
 {
     public static readonly TimeSpan LiveFreshness = TimeSpan.FromSeconds(75);
+    public static readonly TimeSpan ClaudeLiveFreshness = TimeSpan.FromMinutes(6);
+    public static readonly TimeSpan ClaudeSuccessInterval = TimeSpan.FromMinutes(5);
 
     private readonly CodexQuotaProfile _codex;
     private readonly PiCodexQuotaAdapter _piCodex;
@@ -63,6 +88,7 @@ public sealed class ProviderQuotaCoordinator
     private readonly ConcurrentDictionary<string, int> _generation = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, string> _generationFingerprint = new(StringComparer.Ordinal);
     private readonly object _generationLock = new();
+    private readonly Func<DateTimeOffset> _clock;
 
     public event Action<ProviderSlotSnapshot>? SlotPublished;
 
@@ -71,8 +97,9 @@ public sealed class ProviderQuotaCoordinator
         IAllowlistedHttpSender? http = null, ICursorTokenSource? cursorTokens = null,
         IGrokTokenSource? grokTokens = null, PiCodexQuotaAdapter? piCodex = null,
         IPiCodexTokenSource? piTokens = null, ClaudeQuotaAdapter? claude = null,
-        IClaudeTokenSource? claudeTokens = null)
+        IClaudeTokenSource? claudeTokens = null, Func<DateTimeOffset>? clock = null)
     {
+        _clock = clock ?? (() => DateTimeOffset.UtcNow);
         http ??= new AllowlistedHttpsSender(TimeSpan.FromSeconds(8));
         cursorTokens ??= DefaultTokenSources.Cursor();
         grokTokens ??= DefaultTokenSources.Grok();
@@ -82,13 +109,15 @@ public sealed class ProviderQuotaCoordinator
         _cursor = cursor ?? new CursorQuotaAdapter(http, cursorTokens);
         _grok = grok ?? new GrokQuotaAdapter(http, grokTokens);
         _grokBot = grokBot ?? new GrokBotQuotaAdapter(http, cursorTokens);
-        _claude = claude ?? new ClaudeQuotaAdapter(http, claudeTokens ?? DefaultTokenSources.Claude());
+        _claude = claude ?? new ClaudeQuotaAdapter(http, claudeTokens ?? DefaultTokenSources.Claude(), _clock);
     }
 
     public IsolatedQuotaCache Cache => _cache;
     public TimeSpan PublishBudget { get; set; } = TimeSpan.FromMilliseconds(500);
 
     public Func<string>? GrokLoginStampOverride { get; set; }
+
+    public Func<string>? ClaudeLoginStampOverride { get; set; }
 
     public static string FormatLoginStamp(LoginPresence presence)
     {
@@ -113,10 +142,10 @@ public sealed class ProviderQuotaCoordinator
         var all = Task.WhenAll(tasks);
         var winner = await Task.WhenAny(all, Task.Delay(PublishBudget, cancellationToken)).ConfigureAwait(false);
         if (winner != all)
-            return CurrentBoard(DateTimeOffset.UtcNow, settings);
+            return CurrentBoard(_clock(), settings);
 
         await all.ConfigureAwait(false);
-        return CurrentBoard(DateTimeOffset.UtcNow, settings);
+        return CurrentBoard(_clock(), settings);
     }
 
     private ProviderSlotSnapshot PresentSlot(ProviderSlotSettings slot, DateTimeOffset nowUtc)
@@ -177,19 +206,20 @@ public sealed class ProviderQuotaCoordinator
         try
         {
             if (!IsCurrent(slot.SlotId, started))
-                return PresentSlot(slot, DateTimeOffset.UtcNow);
+                return PresentSlot(slot, _clock());
 
             if (!acquiredImmediate &&
                 _snapshots.TryGetValue(slot.SlotId, out var published) &&
                 string.Equals(published.ConfigFingerprint, fingerprint, StringComparison.Ordinal))
             {
-                return AgeIfNeeded(published, DateTimeOffset.UtcNow);
+                return AgeIfNeeded(published, _clock());
             }
 
             var backoff = _backoff.GetOrAdd(slot.SlotId, _ => new ProviderRefreshBackoff());
-            var now = DateTimeOffset.UtcNow;
+            var now = _clock();
             var skipBackoff = slot.SlotId == ProviderSlotIds.CodexPrimary && primaryCodexObservation is not null;
-            if (!manual && !skipBackoff && !backoff.IsDue(now) &&
+            var manualHeld = manual && backoff.HoldsManual(now);
+            if ((!manual || manualHeld) && !skipBackoff && !backoff.IsDue(now) &&
                 _snapshots.TryGetValue(slot.SlotId, out var cached) &&
                 string.Equals(cached.ConfigFingerprint, fingerprint, StringComparison.Ordinal))
             {
@@ -223,17 +253,27 @@ public sealed class ProviderQuotaCoordinator
                     }
                 }
                 snapshot = snapshot with { ConfigFingerprint = fingerprint };
+                var sampledAt = _clock();
                 if (snapshot.Status is QuotaSlotStatus.Live or QuotaSlotStatus.Stale or
                     QuotaSlotStatus.Disabled or QuotaSlotStatus.SetupRequired or QuotaSlotStatus.NotConnected
                     or QuotaSlotStatus.NoAllowance)
                 {
-                    backoff.Succeeded(DateTimeOffset.UtcNow);
+                    var interval = slot.SlotId == ProviderSlotIds.Claude &&
+                        snapshot.Status is QuotaSlotStatus.Live or QuotaSlotStatus.Stale
+                        ? ClaudeSuccessInterval
+                        : ProviderRefreshBackoff.DefaultSuccessInterval;
+                    backoff.Succeeded(sampledAt, interval);
                 }
-                else backoff.Failed(DateTimeOffset.UtcNow);
+                else if (slot.SlotId == ProviderSlotIds.Claude &&
+                         string.Equals(snapshot.ErrorCode, "claude_rate_limited", StringComparison.Ordinal))
+                {
+                    backoff.FailedRateLimited(sampledAt);
+                }
+                else backoff.Failed(sampledAt);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                backoff.Failed(DateTimeOffset.UtcNow);
+                backoff.Failed(_clock());
                 snapshot = ProviderQuotaPresentation.Placeholder(slot,
                     slot.SlotId == ProviderSlotIds.CodexPrimary, QuotaSlotStatus.Unavailable,
                     "此来源超时，不影响其他槽", "独立超时", "slot_timeout") with
@@ -243,7 +283,7 @@ public sealed class ProviderQuotaCoordinator
             }
             catch (Exception)
             {
-                backoff.Failed(DateTimeOffset.UtcNow);
+                backoff.Failed(_clock());
                 snapshot = ProviderQuotaPresentation.Placeholder(slot,
                     slot.SlotId == ProviderSlotIds.CodexPrimary, QuotaSlotStatus.Unavailable,
                     "此来源失败，不影响其他槽", "独立失败", "slot_failed") with
@@ -253,7 +293,7 @@ public sealed class ProviderQuotaCoordinator
             }
 
             if (!IsCurrent(slot.SlotId, started))
-                return PresentSlot(slot, DateTimeOffset.UtcNow);
+                return PresentSlot(slot, _clock());
 
             Publish(slot.SlotId, snapshot);
             return snapshot;
@@ -274,7 +314,7 @@ public sealed class ProviderQuotaCoordinator
                 if (primaryCodexObservation is not null)
                 {
                     var windows = ProviderQuotaPresentation.FromCodex(primaryCodexObservation);
-                    var now = DateTimeOffset.UtcNow;
+                    var now = _clock();
                     var status = windows.Count == 0
                         ? QuotaSlotStatus.Unavailable
                         : ProviderQuotaPresentation.CodexStatus(primaryCodexObservation, now);
@@ -359,21 +399,29 @@ public sealed class ProviderQuotaCoordinator
         var hasCurrent = windows.Any(window => window.HasUsablePercent);
         var status = snapshot.Status;
         var text = snapshot.StatusText;
-        if (snapshot.Status == QuotaSlotStatus.Live)
+        string? delayText = null;
+        if (snapshot.UpdateDelayed)
         {
+            status = QuotaSlotStatus.Stale;
+            text = "更新延迟 · " + ProviderQuotaPresentation.FormatAge(snapshot.ObservationAge(nowUtc));
+            delayText = text;
+        }
+        else if (snapshot.Status == QuotaSlotStatus.Live)
+        {
+            var freshness = snapshot.SlotId == ProviderSlotIds.Claude ? ClaudeLiveFreshness : LiveFreshness;
             if (snapshot.Windows.Count > 0 && !hasCurrent)
             {
                 status = QuotaSlotStatus.Stale;
                 text = "窗口已到期，不作为当前额度";
             }
-            else if (snapshot.ObservationAge(nowUtc) > LiveFreshness)
+            else if (snapshot.ObservationAge(nowUtc) > freshness)
             {
                 status = QuotaSlotStatus.Stale;
                 text = "观测已超过新鲜窗口，不作为实时额度";
             }
         }
 
-        return snapshot with { Windows = windows, Status = status, StatusText = text };
+        return snapshot with { Windows = windows, Status = status, StatusText = text, DelayText = delayText };
     }
 
     public string ConfigurationKey(ProviderSlotSettings slot)
@@ -385,6 +433,7 @@ public sealed class ProviderQuotaCoordinator
             ProviderSlotIds.Grok =>
                 GrokLoginStampOverride?.Invoke() ?? FormatLoginStamp(WindowsLoginPresence.GrokAuthFile()),
             ProviderSlotIds.Claude =>
+                ClaudeLoginStampOverride?.Invoke() ??
                 FormatLoginStamp(WindowsLoginPresence.ClaudeCredentialsFile()) + ":" +
                 FormatLoginStamp(WindowsLoginPresence.ClaudeDesktopProfile()),
             ProviderSlotIds.CodexSecondary =>
@@ -414,8 +463,63 @@ public sealed class ProviderQuotaCoordinator
 
     private void Publish(string slotId, ProviderSlotSnapshot snapshot)
     {
+        if (slotId == ProviderSlotIds.Claude)
+            snapshot = ResolveClaudePublication(snapshot);
         _snapshots[slotId] = snapshot;
         SlotPublished?.Invoke(snapshot);
+    }
+
+    private ProviderSlotSnapshot ResolveClaudePublication(ProviderSlotSnapshot incoming)
+    {
+        if (!IsClaudeTransientFailure(incoming))
+            return incoming with { UpdateDelayed = false, DelayText = null };
+
+        if (!_snapshots.TryGetValue(ProviderSlotIds.Claude, out var previous) ||
+            !CanRetainClaude(previous, incoming))
+        {
+            return incoming with { UpdateDelayed = false, DelayText = null };
+        }
+
+        return previous with
+        {
+            Label = incoming.Label,
+            Enabled = true,
+            Status = QuotaSlotStatus.Stale,
+            StatusText = "更新延迟",
+            ErrorCode = incoming.ErrorCode,
+            UpdateDelayed = true,
+            DelayText = null,
+            FieldPresenceFlags = incoming.FieldPresenceFlags ?? previous.FieldPresenceFlags,
+        };
+    }
+
+    private static bool CanRetainClaude(ProviderSlotSnapshot previous, ProviderSlotSnapshot incoming)
+    {
+        if (!previous.Enabled || previous.Windows.Count == 0) return false;
+        if (previous.Status is not (QuotaSlotStatus.Live or QuotaSlotStatus.Stale)) return false;
+        if (string.IsNullOrWhiteSpace(previous.OpaqueIdentityHash)) return false;
+        if (!string.Equals(previous.ConfigFingerprint, incoming.ConfigFingerprint, StringComparison.Ordinal))
+            return false;
+        if (!string.IsNullOrWhiteSpace(incoming.OpaqueIdentityHash) &&
+            !string.Equals(previous.OpaqueIdentityHash, incoming.OpaqueIdentityHash, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool IsClaudeTransientFailure(ProviderSlotSnapshot snapshot)
+    {
+        if (snapshot.SlotId != ProviderSlotIds.Claude || snapshot.Status != QuotaSlotStatus.Unavailable)
+            return false;
+        var code = snapshot.ErrorCode ?? string.Empty;
+        if (code is "claude_rate_limited" or "claude_timeout" or "claude_network" or "slot_timeout" or "slot_failed")
+            return true;
+        const string httpPrefix = "claude_http_";
+        return code.StartsWith(httpPrefix, StringComparison.Ordinal) &&
+               int.TryParse(code.AsSpan(httpPrefix.Length), out var status) &&
+               status is >= 500 and <= 599;
     }
 
     private void DropCachedQuota(string slotId)

@@ -159,6 +159,7 @@ internal static class Program
             ("primary_binding_unknown_history", PrimaryBindingUnknownHistory),
             ("provider_missing_fields_no_allowance_stale_reset", ProviderParserTruthfulness),
             ("claude_subscription_quota_slot", () => ClaudeSubscriptionQuotaSlot().GetAwaiter().GetResult()),
+            ("claude_refresh_stability", () => ClaudeRefreshStability(runRoot)),
             ("failed_provider_does_not_block_ui", () => FailedProviderDoesNotBlock(runRoot).GetAwaiter().GetResult()),
             ("codex_home_child_environment_isolation", CodexHomeChildEnvironmentIsolation),
             ("hud_rail_dock_rapid_click", () => HudRailDockRapidClick(runRoot)),
@@ -10530,6 +10531,640 @@ internal static class Program
 
     private static string Fixture(string relative) => Path.Combine(ProjectRoot(), "tests", "fixtures", relative);
 
+    private static void ClaudeRefreshStability(string runRoot)
+    {
+        var capture = ClaudeRefreshStabilityCore(runRoot).GetAwaiter().GetResult();
+        RenderClaudeDelayCapture(runRoot, capture);
+    }
+
+    private static async Task<ClaudeDelayCapture> ClaudeRefreshStabilityCore(string runRoot)
+    {
+        _ = runRoot;
+        var backoff = new ProviderRefreshBackoff();
+        var backoffStart = DateTimeOffset.UnixEpoch;
+        backoff.Succeeded(backoffStart);
+        Assert.True(!backoff.IsDue(backoffStart.AddSeconds(59)), "default_success_still_60s");
+        Assert.True(backoff.IsDue(backoffStart.AddSeconds(60)), "default_success_due_60s");
+        Assert.True(!backoff.HoldsManual(backoffStart.AddSeconds(10)), "default_success_does_not_hold_manual");
+        backoff.Failed(backoffStart.AddSeconds(60));
+        Assert.True(!backoff.IsDue(backoffStart.AddSeconds(74)), "default_failure_still_15s");
+        Assert.True(backoff.IsDue(backoffStart.AddSeconds(75)), "default_failure_due_15s");
+        backoff.Failed(backoffStart.AddSeconds(75));
+        Assert.True(backoff.IsDue(backoffStart.AddSeconds(75).AddSeconds(30)), "default_failure_doubles_30s");
+
+        var rate = new ProviderRefreshBackoff();
+        rate.FailedRateLimited(backoffStart);
+        Assert.True(rate.HoldsManual(backoffStart.AddMinutes(4)), "rate_limit_holds_manual");
+        Assert.True(!rate.IsDue(backoffStart.AddMinutes(5).AddSeconds(-1)), "rate_limit_5m");
+        Assert.True(rate.IsDue(backoffStart.AddMinutes(5)), "rate_limit_due_5m");
+        rate.FailedRateLimited(backoffStart.AddMinutes(5));
+        Assert.True(!rate.IsDue(backoffStart.AddMinutes(15).AddSeconds(-1)), "rate_limit_10m");
+        Assert.True(rate.IsDue(backoffStart.AddMinutes(15)), "rate_limit_due_10m");
+        rate.FailedRateLimited(backoffStart.AddMinutes(15));
+        Assert.True(!rate.IsDue(backoffStart.AddMinutes(35).AddSeconds(-1)), "rate_limit_20m");
+        Assert.True(rate.IsDue(backoffStart.AddMinutes(35)), "rate_limit_due_20m");
+        rate.FailedRateLimited(backoffStart.AddMinutes(35));
+        Assert.True(!rate.IsDue(backoffStart.AddMinutes(65).AddSeconds(-1)), "rate_limit_cap_30m");
+        Assert.True(rate.IsDue(backoffStart.AddMinutes(65)), "rate_limit_due_30m");
+        rate.FailedRateLimited(backoffStart.AddMinutes(65));
+        Assert.True(rate.IsDue(backoffStart.AddMinutes(95)), "rate_limit_stays_capped");
+        rate.Succeeded(backoffStart.AddMinutes(100), ProviderQuotaCoordinator.ClaudeSuccessInterval);
+        Assert.True(!rate.HoldsManual(backoffStart.AddMinutes(101)), "success_clears_manual_hold");
+        Assert.True(!rate.IsDue(backoffStart.AddMinutes(105).AddSeconds(-1)), "claude_success_waits_5m");
+        Assert.True(rate.IsDue(backoffStart.AddMinutes(105)), "claude_success_due_5m");
+
+        var freshAt = new DateTimeOffset(2026, 9, 30, 12, 0, 0, TimeSpan.Zero);
+        var freshWindows = new[]
+        {
+            new QuotaWindowObservation("five_hour", "5 小时", 25, freshAt.AddHours(4), 300, true),
+            new QuotaWindowObservation("seven_day", "每周", 40, freshAt.AddDays(6), 10080, true),
+        };
+        var fresh = new ProviderSlotSnapshot(ProviderSlotIds.Claude, ProviderIds.Claude, "Claude 订阅", true, false,
+            QuotaSlotStatus.Live, "Claude 订阅额度", freshAt, ClaudeQuotaAdapter.SourceDescription, freshWindows, "identity");
+        Assert.Equal(QuotaSlotStatus.Live, ProviderQuotaCoordinator.AgeIfNeeded(fresh, freshAt.AddMinutes(5)).Status);
+        Assert.Equal(QuotaSlotStatus.Live, ProviderQuotaCoordinator.AgeIfNeeded(fresh, freshAt.AddMinutes(6)).Status);
+        var beyond = ProviderQuotaCoordinator.AgeIfNeeded(fresh, freshAt.AddMinutes(6).AddSeconds(1));
+        Assert.Equal(QuotaSlotStatus.Stale, beyond.Status);
+        Assert.True(beyond.StatusText.Contains("新鲜", StringComparison.Ordinal), "claude_freshness_text");
+        Assert.True(!beyond.UpdateDelayed, "freshness_is_not_update_delay");
+        var other = fresh with { SlotId = ProviderSlotIds.Cursor, ProviderId = ProviderIds.Cursor };
+        Assert.Equal(QuotaSlotStatus.Live, ProviderQuotaCoordinator.AgeIfNeeded(other, freshAt.AddSeconds(75)).Status);
+        Assert.Equal(QuotaSlotStatus.Stale, ProviderQuotaCoordinator.AgeIfNeeded(other, freshAt.AddSeconds(76)).Status);
+        var delayedOnly = fresh with { Status = QuotaSlotStatus.Stale, StatusText = "更新延迟", UpdateDelayed = true };
+        var delayedAged = ProviderQuotaCoordinator.AgeIfNeeded(delayedOnly, freshAt.AddMinutes(30));
+        Assert.Equal("更新延迟 · 30 分钟前", delayedAged.DelayText);
+        Assert.Equal(60d, delayedAged.GlanceRemainingPercent);
+
+        var access = "synthetic-claude-access-field";
+        var otherAccess = "synthetic-claude-access-other";
+        var capture = await RunClaudeRetainScenario(access, otherAccess).ConfigureAwait(false);
+        await RunClaudeNonRateLimitScenario(access).ConfigureAwait(false);
+        await RunClaudeClearingScenario(access, otherAccess).ConfigureAwait(false);
+        await RunCursorCadenceUnchanged(access).ConfigureAwait(false);
+        var rendered = string.Join('\n', capture.ViewText);
+        Assert.DoesNotContain(access, rendered);
+        Assert.DoesNotContain(otherAccess, rendered);
+        return capture;
+    }
+
+    private readonly record struct ClaudeDelayCapture(
+        ProviderQuotaBoard Board,
+        string DetailStatus,
+        string DetailPercent,
+        string DetailObserved,
+        string DetailBody,
+        IReadOnlyList<string> WindowText,
+        IReadOnlyList<string> ViewText);
+
+    private static async Task<ClaudeDelayCapture> RunClaudeRetainScenario(string access, string otherAccess)
+    {
+        var phase = "live";
+        var calls = 0;
+        var tokens = new ScriptedClaudeTokens { Token = access };
+        var now = DateTimeOffset.UtcNow;
+        var sessionReset = now.AddDays(2);
+        var weeklyReset = now.AddDays(8);
+        var coordinator = new ProviderQuotaCoordinator(
+            http: new ScriptedHttpSender((_, _) =>
+            {
+                Interlocked.Increment(ref calls);
+                if (phase == "network") throw new HttpRequestException("synthetic-network");
+                if (phase == "timeout") throw new OperationCanceledException();
+                var status = phase switch
+                {
+                    "429" => 429,
+                    "500" => 500,
+                    "401" => 401,
+                    _ => 200,
+                };
+                var body = phase == "recover"
+                    ? ClaudeLimitsBody(11, 22, 31, sessionReset, weeklyReset)
+                    : ClaudeLimitsBody(25, 40, 16, sessionReset, weeklyReset);
+                return Task.FromResult(new AllowlistedHttpResponse(status, body, ProviderHttpAllowlist.ClaudeOAuthUsage));
+            }),
+            claudeTokens: tokens,
+            clock: () => now)
+        {
+            ClaudeLoginStampOverride = () => "stamp-a",
+        };
+        var settings = ClaudeSettings(true);
+        var live = await ReadClaude(coordinator, settings, false).ConfigureAwait(false);
+        Assert.Equal(1, calls);
+        Assert.Equal(QuotaSlotStatus.Live, live.Status);
+        Assert.Equal(60d, live.GlanceRemainingPercent);
+        Assert.Equal("每周", live.GlanceWindow!.DisplayName);
+        Assert.Equal(3, live.Windows.Count);
+        var observed = live.ObservedAtUtc;
+        var identity = live.OpaqueIdentityHash;
+        Assert.True(!string.IsNullOrWhiteSpace(identity), "claude_identity_missing");
+        Assert.DoesNotContain(access, ClaudePublicText(live));
+
+        now = observed.AddMinutes(3).AddSeconds(5);
+        phase = "429";
+        var delayed = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(2, calls);
+        AssertClaudeRetained(delayed, observed, identity, 25d, 40d, 16d, "claude_rate_limited");
+        Assert.Equal("更新延迟 · 3 分钟前", delayed.DelayText);
+        Assert.Equal(60d, delayed.GlanceRemainingPercent);
+        Assert.Equal("60%", delayed.GlancePercentText);
+        Assert.True(delayed.GlanceText.Contains("更新延迟", StringComparison.Ordinal), "glance_delay");
+        Assert.True(!delayed.StatusText.Contains("实时", StringComparison.Ordinal), "delay_not_live");
+        Assert.True(!delayed.SourceDescription.Contains("429", StringComparison.Ordinal), "source_not_http_error");
+        Assert.True(coordinator.Cache.Load(ProviderSlotIds.Claude) is null, "claude_retain_not_disk_cache");
+
+        var blocked = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(2, calls);
+        Assert.Equal(observed, blocked.ObservedAtUtc);
+        await ReadClaude(coordinator, settings, false).ConfigureAwait(false);
+        Assert.Equal(2, calls);
+
+        var rateStarted = now;
+        now = rateStarted.AddMinutes(4);
+        await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(2, calls);
+        now = rateStarted.AddMinutes(5).AddSeconds(1);
+        var repeated = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(3, calls);
+        AssertClaudeRetained(repeated, observed, identity, 25d, 40d, 16d, "claude_rate_limited");
+        var secondRate = now;
+        now = secondRate.AddMinutes(9);
+        await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(3, calls);
+        now = secondRate.AddMinutes(10).AddSeconds(1);
+        phase = "recover";
+        await Task.Delay(30).ConfigureAwait(false);
+        var recovered = await ReadClaude(coordinator, settings, false).ConfigureAwait(false);
+        Assert.Equal(4, calls);
+        Assert.Equal(QuotaSlotStatus.Live, recovered.Status);
+        Assert.True(!recovered.UpdateDelayed, "recovery_clears_delay");
+        Assert.True(recovered.DelayText is null, "recovery_clears_delay_text");
+        Assert.Equal(69d, recovered.GlanceRemainingPercent);
+        Assert.Equal("每周 Opus", recovered.GlanceWindow!.DisplayName);
+        Assert.Equal(11d, RequireWindow(recovered, "five_hour").UsedPercent);
+        Assert.Equal(22d, RequireWindow(recovered, "seven_day").UsedPercent);
+        Assert.Equal(31d, RequireWindow(recovered, "seven_day_opus").UsedPercent);
+        Assert.True(recovered.ObservedAtUtc > observed, "recovery_has_new_observation_time");
+        Assert.Equal(identity, recovered.OpaqueIdentityHash);
+        Assert.True(!recovered.StatusText.Contains("更新延迟", StringComparison.Ordinal), "recovery_status");
+
+        var generated = rateStarted;
+        var delayedBoard = new ProviderQuotaBoard(new[]
+        {
+            new ProviderSlotSnapshot(ProviderSlotIds.CodexPrimary, ProviderIds.Codex, "Codex 当前", false, true,
+                QuotaSlotStatus.Disabled, "未启用", generated, "未启用", Array.Empty<QuotaWindowObservation>()),
+            new ProviderSlotSnapshot(ProviderSlotIds.CodexSecondary, ProviderIds.Codex, "Codex 第二账户", false, false,
+                QuotaSlotStatus.Disabled, "未启用", generated, "未启用", Array.Empty<QuotaWindowObservation>()),
+            new ProviderSlotSnapshot(ProviderSlotIds.Cursor, ProviderIds.Cursor, "Cursor", false, false,
+                QuotaSlotStatus.Disabled, "未启用", generated, "未启用", Array.Empty<QuotaWindowObservation>()),
+            new ProviderSlotSnapshot(ProviderSlotIds.Grok, ProviderIds.Grok, "Grok", false, false,
+                QuotaSlotStatus.Disabled, "未启用", generated, "未启用", Array.Empty<QuotaWindowObservation>()),
+            new ProviderSlotSnapshot(ProviderSlotIds.GrokBot, ProviderIds.GrokBot, "Grok Bot", false, false,
+                QuotaSlotStatus.Disabled, "未启用", generated, "未启用", Array.Empty<QuotaWindowObservation>()),
+            delayed with { Label = "Claude 订阅" },
+        }, generated);
+        _ = otherAccess;
+        var viewModel = new MainViewModel();
+        viewModel.Apply(SyntheticProviderSnapshot(delayedBoard, generated));
+        viewModel.SelectSlot(ProviderSlotIds.Claude, true);
+        Assert.Equal("60%", viewModel.SlotDetailPercent);
+        Assert.Equal("更新延迟", viewModel.SlotDetailStatus);
+        Assert.True(viewModel.SlotDetailObserved.Contains("3 分钟前", StringComparison.Ordinal), "detail_age");
+        Assert.True(viewModel.SlotDetailObserved.Contains("更新延迟", StringComparison.Ordinal), "detail_delay");
+        Assert.True(!viewModel.SlotDetailStatus.Contains("实时", StringComparison.Ordinal), "detail_not_live");
+        Assert.Equal(3, viewModel.SlotDetailWindows.Count);
+        Assert.True(viewModel.SlotDetailWindows.All(row => row.RemainingText.Contains("旧值", StringComparison.Ordinal)),
+            "windows_marked_old");
+        Assert.True(viewModel.SlotDetailBody.Contains("状态码 claude_rate_limited", StringComparison.Ordinal), "safe_error_code");
+        Assert.True(viewModel.SlotDetailBody.Contains("旧值", StringComparison.Ordinal), "body_old_value");
+        var recoveredBoard = delayedBoard with
+        {
+            Slots = delayedBoard.Slots.Select(slot => slot.SlotId == ProviderSlotIds.Claude ? recovered : slot).ToArray(),
+            GeneratedAtUtc = recovered.ObservedAtUtc,
+        };
+        var recoveredModel = new MainViewModel();
+        recoveredModel.Apply(SyntheticProviderSnapshot(recoveredBoard, recovered.ObservedAtUtc));
+        recoveredModel.SelectSlot(ProviderSlotIds.Claude, true);
+        Assert.Equal("实时", recoveredModel.SlotDetailStatus);
+        Assert.True(!recoveredModel.SlotDetailObserved.Contains("更新延迟", StringComparison.Ordinal), "recovered_detail");
+        Assert.True(recoveredModel.SlotDetailWindows.All(row => !row.RemainingText.Contains("旧值", StringComparison.Ordinal)),
+            "recovered_windows");
+        return new ClaudeDelayCapture(delayedBoard, viewModel.SlotDetailStatus, viewModel.SlotDetailPercent,
+            viewModel.SlotDetailObserved, viewModel.SlotDetailBody,
+            viewModel.SlotDetailWindows.Select(row => row.Name + " " + row.RemainingText).ToArray(),
+            viewModel.RenderedStrings());
+    }
+
+    private static async Task RunClaudeNonRateLimitScenario(string access)
+    {
+        var phase = "live";
+        var calls = 0;
+        var now = DateTimeOffset.UtcNow;
+        var sessionReset = now.AddDays(2);
+        var weeklyReset = now.AddDays(8);
+        var coordinator = new ProviderQuotaCoordinator(
+            http: new ScriptedHttpSender((_, _) =>
+            {
+                Interlocked.Increment(ref calls);
+                if (phase == "network") throw new HttpRequestException("synthetic-network");
+                if (phase == "timeout") throw new OperationCanceledException();
+                var status = phase == "500" ? 500 : 200;
+                return Task.FromResult(new AllowlistedHttpResponse(status,
+                    ClaudeLimitsBody(25, 40, 16, sessionReset, weeklyReset), ProviderHttpAllowlist.ClaudeOAuthUsage));
+            }),
+            claudeTokens: new ScriptedClaudeTokens { Token = access },
+            clock: () => now)
+        {
+            ClaudeLoginStampOverride = () => "stamp-a",
+        };
+        var settings = ClaudeSettings(true);
+        var live = await ReadClaude(coordinator, settings, false).ConfigureAwait(false);
+        var observed = live.ObservedAtUtc;
+        var identity = live.OpaqueIdentityHash;
+        phase = "network";
+        now = observed.AddMinutes(1);
+        var networkAt = now;
+        var network = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(2, calls);
+        AssertClaudeRetained(network, observed, identity, 25d, 40d, 16d, "claude_network");
+        await ReadClaude(coordinator, settings, false).ConfigureAwait(false);
+        Assert.Equal(2, calls);
+        now = networkAt.AddSeconds(14);
+        await ReadClaude(coordinator, settings, false).ConfigureAwait(false);
+        Assert.Equal(2, calls);
+        now = networkAt.AddSeconds(16);
+        var networkAgain = await ReadClaude(coordinator, settings, false).ConfigureAwait(false);
+        Assert.Equal(3, calls);
+        AssertClaudeRetained(networkAgain, observed, identity, 25d, 40d, 16d, "claude_network");
+        phase = "500";
+        now = now.AddSeconds(31);
+        var server = await ReadClaude(coordinator, settings, false).ConfigureAwait(false);
+        Assert.Equal(4, calls);
+        AssertClaudeRetained(server, observed, identity, 25d, 40d, 16d, "claude_http_500");
+        phase = "timeout";
+        now = now.AddSeconds(61);
+        var timedOut = await ReadClaude(coordinator, settings, false).ConfigureAwait(false);
+        Assert.Equal(5, calls);
+        AssertClaudeRetained(timedOut, observed, identity, 25d, 40d, 16d, "claude_timeout");
+        var manualAt = now;
+        phase = "network";
+        var manual = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(6, calls);
+        AssertClaudeRetained(manual, observed, identity, 25d, 40d, 16d, "claude_network");
+        _ = manualAt;
+    }
+
+    private static async Task RunClaudeClearingScenario(string access, string otherAccess)
+    {
+        var phase = "live";
+        var calls = 0;
+        var tokens = new ScriptedClaudeTokens { Token = access };
+        var stamp = "stamp-a";
+        var now = DateTimeOffset.UtcNow;
+        var sessionReset = now.AddHours(-2);
+        var weeklyReset = now.AddDays(8);
+        var coordinator = new ProviderQuotaCoordinator(
+            http: new ScriptedHttpSender((_, _) =>
+            {
+                Interlocked.Increment(ref calls);
+                var status = phase switch
+                {
+                    "401" => 401,
+                    "429" => 429,
+                    "schema" => 200,
+                    _ => 200,
+                };
+                var body = phase == "schema"
+                    ? "{\"extra_usage\":{\"utilization\":5}}"
+                    : phase == "expired-window"
+                        ? ClaudeLimitsBody(80, 40, 16, sessionReset, weeklyReset)
+                        : ClaudeLimitsBody(25, 40, 16, now.AddDays(2), weeklyReset);
+                return Task.FromResult(new AllowlistedHttpResponse(status, body, ProviderHttpAllowlist.ClaudeOAuthUsage));
+            }),
+            claudeTokens: tokens,
+            clock: () => now)
+        {
+            ClaudeLoginStampOverride = () => stamp,
+        };
+        var settings = ClaudeSettings(true);
+
+        phase = "429";
+        var none = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.Unavailable, none.Status);
+        Assert.True(none.GlanceRemainingPercent is null, "no_prior_percent");
+        Assert.True(!none.UpdateDelayed, "no_prior_delay");
+        Assert.Equal("不可用", none.GlanceText);
+        var blocked = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(1, calls);
+        Assert.Equal(QuotaSlotStatus.Unavailable, blocked.Status);
+
+        phase = "expired-window";
+        now = now.AddMinutes(6);
+        var expiredLive = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(2, calls);
+        phase = "429";
+        var expiredDelay = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(3, calls);
+        Assert.True(expiredDelay.UpdateDelayed, "expired_window_still_retained");
+        Assert.True(!RequireWindow(expiredDelay, "five_hour").HasUsablePercent, "expired_five_hour_hidden");
+        Assert.True(RequireWindow(expiredDelay, "seven_day").HasUsablePercent, "weekly_remains");
+        Assert.Equal(60d, expiredDelay.GlanceRemainingPercent);
+        Assert.Equal("每周", expiredDelay.GlanceWindow!.DisplayName);
+        var expiredModel = new MainViewModel();
+        expiredModel.Apply(SyntheticProviderSnapshot(new ProviderQuotaBoard(new[] { expiredDelay }, now), now));
+        expiredModel.SelectSlot(ProviderSlotIds.Claude, true);
+        Assert.Equal("已到期", expiredModel.SlotDetailWindows.First(row =>
+            row.Name.Contains("5 小时", StringComparison.Ordinal)).RemainingText);
+        Assert.True(expiredModel.SlotDetailWindows.Any(row =>
+            row.Name.Contains("每周", StringComparison.Ordinal) && row.RemainingText.Contains("60%", StringComparison.Ordinal)),
+            "weekly_remains_distinct");
+
+        phase = "live";
+        now = now.AddMinutes(6);
+        var again = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.Live, again.Status);
+        phase = "401";
+        var denied = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.NotConnected, denied.Status);
+        Assert.Equal("claude_unauthorized", denied.ErrorCode);
+        Assert.Equal(0, denied.Windows.Count);
+        Assert.True(!denied.UpdateDelayed, "unauthorized_clears_delay");
+        Assert.Equal("未连接", denied.GlanceText);
+
+        phase = "live";
+        now = now.AddMinutes(6);
+        await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        phase = "schema";
+        var schema = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.Unavailable, schema.Status);
+        Assert.Equal(0, schema.Windows.Count);
+        Assert.True(!schema.UpdateDelayed, "schema_does_not_retain");
+
+        phase = "live";
+        now = now.AddMinutes(6);
+        await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        var disabled = await ReadClaude(coordinator, ClaudeSettings(false), true).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.Disabled, disabled.Status);
+        Assert.Equal(0, disabled.Windows.Count);
+        phase = "429";
+        var afterEnable = await ReadClaude(coordinator, ClaudeSettings(true), true).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.Unavailable, afterEnable.Status);
+        Assert.Equal(0, afterEnable.Windows.Count);
+        Assert.True(afterEnable.GlanceRemainingPercent is null, "disable_does_not_restore");
+
+        phase = "live";
+        now = now.AddMinutes(6);
+        var stamped = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.Live, stamped.Status);
+        stamp = "stamp-b";
+        phase = "429";
+        var switched = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.Unavailable, switched.Status);
+        Assert.Equal(0, switched.Windows.Count);
+        Assert.True(!switched.UpdateDelayed, "config_change_clears");
+
+        stamp = "stamp-a";
+        phase = "live";
+        now = now.AddMinutes(6);
+        var firstAccount = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.Live, firstAccount.Status);
+        tokens.Token = otherAccess;
+        phase = "429";
+        var otherAccount = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.Unavailable, otherAccount.Status);
+        Assert.Equal(0, otherAccount.Windows.Count);
+        Assert.True(!string.Equals(firstAccount.OpaqueIdentityHash, otherAccount.OpaqueIdentityHash, StringComparison.Ordinal),
+            "identity_changed");
+        Assert.DoesNotContain(otherAccess, ClaudePublicText(otherAccount));
+
+        tokens.Token = access;
+        phase = "live";
+        now = now.AddMinutes(6);
+        await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        tokens.Inspection = new ClaudeLoginInspection(true, true, true, true, true, false, "injected");
+        var expiredLogin = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.NotConnected, expiredLogin.Status);
+        Assert.Equal("claude_login_expired", expiredLogin.ErrorCode);
+        Assert.Equal(0, expiredLogin.Windows.Count);
+
+        tokens.Inspection = ClaudeLoginInspection.Injected(true);
+        tokens.Token = access;
+        phase = "live";
+        now = now.AddMinutes(1);
+        await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        tokens.Inspection = new ClaudeLoginInspection(true, true, false, false, false, false, "injected")
+        {
+            AccountAmbiguous = true,
+            AmbiguousReason = "multiple",
+        };
+        var ambiguous = await ReadClaude(coordinator, settings, true).ConfigureAwait(false);
+        Assert.Equal("claude_desktop_account_ambiguous", ambiguous.ErrorCode);
+        Assert.Equal(0, ambiguous.Windows.Count);
+        Assert.True(!ambiguous.UpdateDelayed, "ambiguous_clears");
+    }
+
+    private static async Task RunCursorCadenceUnchanged(string access)
+    {
+        var claudeCalls = 0;
+        var cursorCalls = 0;
+        var cursorMode = 200;
+        var now = DateTimeOffset.UtcNow;
+        var sessionReset = now.AddDays(2);
+        var weeklyReset = now.AddDays(8);
+        var coordinator = new ProviderQuotaCoordinator(
+            http: new ScriptedHttpSender((request, _) =>
+            {
+                if (request.Url.AbsolutePath.Contains("oauth/usage", StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref claudeCalls);
+                    return Task.FromResult(new AllowlistedHttpResponse(200,
+                        ClaudeLimitsBody(25, 40, 16, sessionReset, weeklyReset), request.Url));
+                }
+
+                if (request.Url.AbsolutePath.Contains("usage-summary", StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref cursorCalls);
+                    var status = cursorMode;
+                    var body = status == 200
+                        ? """{"billingCycleEnd":"2026-12-15T00:00:00Z","individualUsage":{"plan":{"autoPercentUsed":12.5,"apiPercentUsed":4}}}"""
+                        : "{}";
+                    return Task.FromResult(new AllowlistedHttpResponse(status, body, request.Url));
+                }
+
+                return Task.FromResult(new AllowlistedHttpResponse(404, "{}", request.Url));
+            }),
+            cursorTokens: new InjectedTokenSource(SyntheticJwt("auth0|cursor-cadence")),
+            claudeTokens: new ScriptedClaudeTokens { Token = access },
+            clock: () => now)
+        {
+            ClaudeLoginStampOverride = () => "stamp-a",
+        };
+        var settings = new ProviderAccessSettings(new[]
+        {
+            new ProviderSlotSettings(ProviderSlotIds.CodexPrimary, "Codex 当前", false),
+            new ProviderSlotSettings(ProviderSlotIds.CodexSecondary, "Codex 第二账户", false),
+            new ProviderSlotSettings(ProviderSlotIds.Cursor, "Cursor", true),
+            new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", false),
+            new ProviderSlotSettings(ProviderSlotIds.GrokBot, "Grok Bot", false),
+            new ProviderSlotSettings(ProviderSlotIds.Claude, "Claude 订阅", true),
+        }, CompactLayoutModes.Rail, true);
+        var first = await coordinator.RefreshAsync(settings, null, CancellationToken.None, false).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.Live, first.Find(ProviderSlotIds.Cursor)!.Status);
+        Assert.Equal(QuotaSlotStatus.Live, first.Find(ProviderSlotIds.Claude)!.Status);
+        Assert.Equal(1, cursorCalls);
+        Assert.Equal(1, claudeCalls);
+        now = now.AddSeconds(59);
+        await coordinator.RefreshAsync(settings, null, CancellationToken.None, false).ConfigureAwait(false);
+        Assert.Equal(1, cursorCalls);
+        Assert.Equal(1, claudeCalls);
+        now = now.AddSeconds(2);
+        await coordinator.RefreshAsync(settings, null, CancellationToken.None, false).ConfigureAwait(false);
+        Assert.Equal(2, cursorCalls);
+        Assert.Equal(1, claudeCalls);
+        now = now.AddMinutes(3);
+        await coordinator.RefreshAsync(settings, null, CancellationToken.None, false).ConfigureAwait(false);
+        Assert.Equal(3, cursorCalls);
+        Assert.Equal(1, claudeCalls);
+        now = now.AddSeconds(61);
+        await coordinator.RefreshAsync(settings, null, CancellationToken.None, false).ConfigureAwait(false);
+        Assert.Equal(4, cursorCalls);
+        Assert.Equal(2, claudeCalls);
+
+        cursorMode = 429;
+        var limited = await coordinator.RefreshAsync(settings, null, CancellationToken.None, true).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.Unavailable, limited.Find(ProviderSlotIds.Cursor)!.Status);
+        Assert.True(limited.Find(ProviderSlotIds.Cursor)!.GlanceRemainingPercent is null, "cursor_429_drops_percent");
+        Assert.Equal(0, limited.Find(ProviderSlotIds.Cursor)!.Windows.Count);
+        var cursorAfterLimit = cursorCalls;
+        await coordinator.RefreshAsync(settings, null, CancellationToken.None, false).ConfigureAwait(false);
+        Assert.Equal(cursorAfterLimit, cursorCalls);
+        await coordinator.RefreshAsync(settings, null, CancellationToken.None, true).ConfigureAwait(false);
+        Assert.Equal(cursorAfterLimit + 1, cursorCalls);
+    }
+
+    private static async Task<ProviderSlotSnapshot> ReadClaude(ProviderQuotaCoordinator coordinator,
+        ProviderAccessSettings settings, bool manual)
+    {
+        var board = await coordinator.RefreshAsync(settings, null, CancellationToken.None, manual).ConfigureAwait(false);
+        return board.Find(ProviderSlotIds.Claude)!;
+    }
+
+    private static void AssertClaudeRetained(ProviderSlotSnapshot slot, DateTimeOffset observed, string? identity,
+        double fiveHourUsed, double weeklyUsed, double modelUsed, string errorCode)
+    {
+        Assert.Equal(QuotaSlotStatus.Stale, slot.Status);
+        Assert.True(slot.UpdateDelayed, "update_delayed");
+        Assert.Equal(observed, slot.ObservedAtUtc);
+        Assert.Equal(identity, slot.OpaqueIdentityHash);
+        Assert.Equal(errorCode, slot.ErrorCode);
+        Assert.Equal(fiveHourUsed, RequireWindow(slot, "five_hour").UsedPercent);
+        Assert.Equal(weeklyUsed, RequireWindow(slot, "seven_day").UsedPercent);
+        Assert.Equal(modelUsed, RequireWindow(slot, "seven_day_opus").UsedPercent);
+        Assert.True(slot.DelayText is not null && slot.DelayText.Contains("更新延迟", StringComparison.Ordinal), "delay_label");
+    }
+
+    private static QuotaWindowObservation RequireWindow(ProviderSlotSnapshot slot, string windowId)
+    {
+        var window = slot.Windows.FirstOrDefault(item => item.WindowId == windowId);
+        if (window is null) throw new InvalidOperationException("window_missing:" + windowId);
+        return window;
+    }
+
+    private static string ClaudeLimitsBody(int sessionUsed, int weeklyUsed, int modelUsed,
+        DateTimeOffset sessionReset, DateTimeOffset weeklyReset)
+    {
+        static string Stamp(DateTimeOffset value) =>
+            value.UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
+        return "{\"limits\":[" +
+               "{\"kind\":\"session\",\"percent\":" + sessionUsed.ToString(CultureInfo.InvariantCulture) +
+               ",\"resets_at\":\"" + Stamp(sessionReset) + "\",\"is_active\":true}," +
+               "{\"kind\":\"weekly_all\",\"percent\":" + weeklyUsed.ToString(CultureInfo.InvariantCulture) +
+               ",\"resets_at\":\"" + Stamp(weeklyReset) + "\",\"is_active\":true}," +
+               "{\"kind\":\"weekly_scoped\",\"percent\":" + modelUsed.ToString(CultureInfo.InvariantCulture) +
+               ",\"resets_at\":\"" + Stamp(weeklyReset) +
+               "\",\"is_active\":true,\"scope\":{\"model\":{\"display_name\":\"Opus\"}}}" +
+               "]}";
+    }
+
+    private static HudSnapshot SyntheticProviderSnapshot(ProviderQuotaBoard board, DateTimeOffset generated) =>
+        new(new QuotaObservation(null, Array.Empty<QuotaBucket>(), QuotaSource.Unavailable, generated, false),
+            Array.Empty<SessionAggregate>(), null, generated, false, "合成观测", Array.Empty<string>(),
+            Providers: board);
+
+    private static void RenderClaudeDelayCapture(string runRoot, ClaudeDelayCapture capture)
+    {
+        EnsureWpfTestApplication();
+        var output = Path.Combine(ProjectRoot(), ".artifacts", "claude-refresh-capture");
+        Directory.CreateDirectory(output);
+        var home = Path.Combine(runRoot, "claude-delay-capture", "codex-home");
+        Directory.CreateDirectory(Path.Combine(home, "sessions"));
+        var idle = new ProviderQuotaCoordinator { ClaudeLoginStampOverride = () => "capture-stamp" };
+        using var engine = new UsageEngine(home, Path.Combine(runRoot, "claude-delay-capture", "usage.db"),
+            Path.Combine(runRoot, "claude-delay-capture", "hud.log"), providers: idle);
+        using var window = new MainWindow(engine, () => Task.CompletedTask, false);
+        window.ShowActivated = false;
+        window.ShowInTaskbar = false;
+        window.Topmost = true;
+        window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+        window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
+        var viewModelField = typeof(MainWindow).GetField("_viewModel",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("view_model_field_missing");
+        var viewModel = (MainViewModel)(viewModelField.GetValue(window)
+            ?? throw new InvalidOperationException("view_model_missing"));
+        viewModel.Apply(SyntheticProviderSnapshot(capture.Board, capture.Board.GeneratedAtUtc));
+        viewModel.IsExpanded = false;
+        viewModel.SelectSlot(ProviderSlotIds.Claude, true);
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 1920, 1080));
+        window.Show();
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        InvokeWindowMethod(window, "UpdateTextBlocks");
+        window.UpdateLayout();
+        var railPath = Path.Combine(output, "claude-delay-rail.png");
+        RenderWindow(window, railPath);
+        InvokeWindowMethod(window, "PlaceSlotDetailPopup");
+        window.UpdateLayout();
+        var detailPath = Path.Combine(output, "claude-delay-detail.png");
+        var popupHost = window.FindName("SlotDetailHost") as System.Windows.FrameworkElement
+            ?? throw new InvalidOperationException("detail_host_missing");
+        RenderElement(popupHost, detailPath);
+        var railText = CollectVisualText(window);
+        var detailText = CollectVisualText(popupHost);
+        Assert.True(railText.Any(text => text.Contains("60%", StringComparison.Ordinal)), "rail_percent_visible");
+        Assert.True(railText.Any(text => text.Contains("更新延迟", StringComparison.Ordinal)), "rail_delay_visible");
+        Assert.True(detailText.Any(text => text.Contains("更新延迟", StringComparison.Ordinal)), "detail_delay_visible");
+        Assert.True(detailText.Any(text => text.Contains("旧值", StringComparison.Ordinal)), "detail_old_value_visible");
+        Assert.True(detailText.Any(text => text.Contains("分钟前", StringComparison.Ordinal)), "detail_age_visible");
+        Assert.True(!detailText.Any(text => text.Contains("实时", StringComparison.Ordinal)), "detail_not_labeled_live");
+        File.WriteAllText(Path.Combine(output, "claude-delay-notes.txt"),
+            "SYNTHETIC Claude delay capture. No live quota and no account content.\r\n" +
+            "detail_status=" + capture.DetailStatus + "\r\n" +
+            "detail_percent=" + capture.DetailPercent + "\r\n" +
+            "detail_observed=" + capture.DetailObserved + "\r\n" +
+            "windows=" + string.Join(" | ", capture.WindowText) + "\r\n" +
+            "rail_text=" + string.Join(" | ", railText) + "\r\n" +
+            "detail_text=" + string.Join(" | ", detailText) + "\r\n" +
+            "rail_png=" + railPath + "\r\n" +
+            "detail_png=" + detailPath + "\r\n");
+        Assert.True(new FileInfo(railPath).Length > 1000, "rail_png_small");
+        Assert.True(new FileInfo(detailPath).Length > 1000, "detail_png_small");
+    }
+
+    private static List<string> CollectVisualText(System.Windows.DependencyObject root)
+    {
+        var texts = new List<string>();
+        CollectVisualText(root, texts);
+        return texts;
+    }
+
+    private static void CollectVisualText(System.Windows.DependencyObject node, List<string> texts)
+    {
+        if (node is System.Windows.Controls.TextBlock block && !string.IsNullOrWhiteSpace(block.Text))
+            texts.Add(block.Text);
+        var count = System.Windows.Media.VisualTreeHelper.GetChildrenCount(node);
+        for (var index = 0; index < count; index++)
+            CollectVisualText(System.Windows.Media.VisualTreeHelper.GetChild(node, index), texts);
+    }
+
     private static async Task ClaudeSubscriptionQuotaSlot()
     {
         var access = "synthetic-claude-access-field";
@@ -11203,6 +11838,14 @@ internal static class Program
         cipher.CopyTo(blob, 15);
         tag.CopyTo(blob, 15 + cipher.Length);
         return Convert.ToBase64String(blob);
+    }
+
+    private sealed class ScriptedClaudeTokens : IClaudeTokenSource
+    {
+        public string? Token { get; set; }
+        public ClaudeLoginInspection Inspection { get; set; } = ClaudeLoginInspection.Injected(true);
+        public string? ReadAccessToken() => Token;
+        public ClaudeLoginInspection InspectLogin() => Inspection;
     }
 
     private sealed class CountingClaudeTokenSource : IClaudeTokenSource

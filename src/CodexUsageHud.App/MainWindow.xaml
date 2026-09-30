@@ -567,7 +567,9 @@
                                     <TextBox x:Name="SlotCodexPrimaryLabel" Height="34" Margin="0,0,0,8" Padding="8,6" LostFocus="OnProviderSettingsChanged" />
                                     <CheckBox x:Name="SlotCodexSecondaryEnabled" Content="Codex 第二账户（仅额度）" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,6" Click="OnProviderSettingsChanged" />
                                     <TextBox x:Name="SlotCodexSecondaryLabel" Height="34" Margin="0,4,0,6" Padding="8,6" LostFocus="OnProviderSettingsChanged" />
-                                    <TextBlock Text="第二账户读取本机 PI 已登录的 ChatGPT/Codex 订阅（openai-codex）。不要求第二套 CODEX_HOME，也不会复制登录或刷新凭据。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,10" />
+                                    <TextBlock Text="可选 Codex CLI 主目录。留空则继续读取本机 PI 的 ChatGPT/Codex 订阅。" Style="{StaticResource Caption}" Margin="0,0,0,6" TextWrapping="Wrap" />
+                                    <TextBox x:Name="SlotCodexSecondaryHome" Height="34" Margin="0,0,0,6" Padding="8,6" LostFocus="OnProviderSettingsChanged" />
+                                    <TextBlock Text="填写目录后，只对该目录启动只读 App Server 读取额度。不会自动猜测路径，失败时也不会改回 PI，不会复制登录或刷新凭据。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,10" />
                                     <TextBlock x:Name="PiCodexPresenceText" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,10" />
                                     <CheckBox x:Name="SlotCursorEnabled" Content="启用 Cursor 额度" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,6" Click="OnProviderSettingsChanged" />
                                     <TextBox x:Name="SlotCursorLabel" Height="34" Margin="0,0,0,8" Padding="8,6" LostFocus="OnProviderSettingsChanged" />

@@ -123,8 +123,9 @@ Codex App Server 现会同时返回名为 `primary` 与 `secondary` 的额度窗
 - 完全本地运行，不上传遥测，不做云同步。
 - Codex 额度仍只通过本机 App Server 只读方法 `account/rateLimits/read` 读取。
 - 六个额度槽（两个 Codex、Cursor、Grok、Grok Bot、Claude 订阅）。当前 Codex 走本机 App Server。
-  第二 Codex 读取本机 PI 已登录的 ChatGPT/Codex 订阅（openai-codex），不要求第二套
-  `CODEX_HOME`，也不会复制登录。Cursor、Grok、Grok Bot 和 Claude 需在设置中勾选后，运行时才读取
+  第二 Codex 默认仍读取本机 PI 已登录的 ChatGPT/Codex 订阅（openai-codex）。设置里可以另填一个
+  Codex CLI 主目录；留空继续用 PI，填写后只对该目录读取 CLI 额度，失败时不改回 PI，也不复制登录。
+  Cursor、Grok、Grok Bot 和 Claude 需在设置中勾选后，运行时才读取
   各自本机已有登录中的必要字段，并只访问该服务自己的额度接口。Claude 只显示订阅用量，不分析会话。
   Grok 访问令牌到期时，若本地仍有可续期凭据，HUD 会调用官方 `grok models` 让 Grok CLI 自己续写登录，而不是
   把文件时间戳当成退出登录，也不会改写 `auth.json`。Claude 登录过期时不刷新、不改写凭据。
@@ -151,8 +152,9 @@ Codex App Server 现会同时返回名为 `primary` 与 `secondary` 的额度窗
 Codex Usage HUD is an unofficial, privacy-first Windows companion for local Codex usage.
 It shows official quota windows, APP/CLI session hierarchy, raw-token metadata, running
 state, and explainable continuation-risk guidance. It runs locally. Primary Codex quota uses
-the local App Server; the second Codex slot may read PI's existing ChatGPT/Codex
-(`openai-codex`) login against its usage endpoint. Opted-in Cursor/Grok/Grok Bot/Claude slots may
+the local App Server; the second Codex slot reads PI's existing ChatGPT/Codex
+(`openai-codex`) login when its optional CLI directory is blank, and uses that
+directory's app-server quota when a directory is set. Opted-in Cursor/Grok/Grok Bot/Claude slots may
 use existing logins against their own quota endpoints. Claude is subscription quota only:
 five-hour and weekly utilization when the usage endpoint returns them, with no session analysis
 and no token-to-quota conversion. When a Grok access key is expired
@@ -185,8 +187,8 @@ the source with the project-local scripts below.
 6. Windows 可能把托盘图标放进右下角的 `^` 隐藏区；如果一时找不到，再双击同一个 EXE
    或桌面快捷方式，会唤回已经运行的紧凑卡，不会重复启动后台。
 7. 发布包是便携版，不需要安装；移动 EXE 后重新运行一次即可修复已启用的开机启动路径。
-8. 额度槽：当前 Codex 使用本机已安装的 Codex CLI App Server。第二 Codex 读取本机 PI
-   已登录的 `openai-codex` 订阅；没有该登录时显示未连接，不要求第二套 Codex 主目录。
+8. 额度槽：当前 Codex 使用本机已安装的 Codex CLI App Server。第二 Codex 在目录留空时读取本机 PI
+   已登录的 `openai-codex` 订阅；填写目录后只读取该 CLI 主目录的额度。没有对应登录时显示未连接。
    在设置中勾选 Cursor、Grok、Grok Bot 或 Claude 后，HUD 才使用对应本机已有登录。Grok 需要已安装
    并登录的 Grok CLI；到期时由官方 `grok models` 续期。Grok Bot 走 Cursor 登录中的独立额度。
    Claude 优先读取本机 Claude Code 已有 OAuth 登录；没有可用访问令牌时才回退到当前 Claude Desktop
@@ -384,8 +386,9 @@ Cursor, Grok, Grok Bot and Claude quota reads run only after the user enables th
 They use existing local logins against fixed HTTPS allowlists. Grok may spawn
 the official `grok models` CLI to renew an expired access key that still has a
 refresh grant, then re-read the login file. The HUD does not write Grok
-`auth.json`. The PI second Codex slot reads `openai-codex` against
-`chatgpt.com/backend-api/wham/usage` without a second `CODEX_HOME`.
+`auth.json`. The second Codex slot reads `openai-codex` against
+`chatgpt.com/backend-api/wham/usage` when its optional CLI home is blank.
+An explicit directory uses the Codex CLI app-server for that directory only.
 Claude prefers `claudeAiOauth.accessToken` from the existing Claude Code credential
 file. When that file has no usable access token, it falls back to one unexpired
 access token from the current Windows Claude Desktop profile

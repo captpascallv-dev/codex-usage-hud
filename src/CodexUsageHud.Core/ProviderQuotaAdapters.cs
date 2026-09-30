@@ -26,11 +26,23 @@ public class CodexQuotaProfile
                 QuotaSlotStatus.Disabled, "未启用", "用户关闭了此槽", "slot_disabled");
         }
 
-        if (!string.IsNullOrWhiteSpace(isolatedHome) && !Directory.Exists(isolatedHome))
+        if (!string.IsNullOrWhiteSpace(isolatedHome))
         {
-            return ProviderQuotaPresentation.Placeholder(settings, suppliesLocalAnalysis,
-                QuotaSlotStatus.SetupRequired, SecondaryCodexHome.InvalidStatusText,
-                SecondaryCodexHome.InvalidDetail, SecondaryCodexHome.InvalidCode);
+            var comparedPrimary = suppliesLocalAnalysis ? null : primaryHome;
+            var homeStatus = SecondaryCodexHome.Classify(isolatedHome, comparedPrimary);
+            if (homeStatus == SecondaryHomeStatus.SameAsPrimary)
+            {
+                return ProviderQuotaPresentation.Placeholder(settings, false,
+                    QuotaSlotStatus.SetupRequired, SecondaryCodexHome.SameStatusText,
+                    SecondaryCodexHome.SameDetail, SecondaryCodexHome.SameCode);
+            }
+
+            if (homeStatus == SecondaryHomeStatus.MissingPath)
+            {
+                return ProviderQuotaPresentation.Placeholder(settings, suppliesLocalAnalysis,
+                    QuotaSlotStatus.SetupRequired, SecondaryCodexHome.InvalidStatusText,
+                    SecondaryCodexHome.InvalidDetail, SecondaryCodexHome.InvalidCode);
+            }
         }
 
         var executable = _discovery.Find(_executableOverride);
@@ -54,7 +66,8 @@ public class CodexQuotaProfile
             .ConfigureAwait(false);
         var result = combined.Quota;
         var identity = combined.Identity?.Hash;
-        var flags = combined.IdentityShape?.Format() ?? combined.Identity?.PresenceFlags;
+        var flags = AppendPlanType(combined.IdentityShape?.Format() ?? combined.Identity?.PresenceFlags,
+            result.Observation.PlanType ?? combined.PlanType);
         var now = DateTimeOffset.UtcNow;
         var windows = ProviderQuotaPresentation.FromCodex(result.Observation);
         if (windows.Count == 0)
@@ -67,8 +80,11 @@ public class CodexQuotaProfile
             var text = status == QuotaSlotStatus.NotConnected
                 ? "未连接：App Server 无法读取该主目录登录态"
                 : "官方额度不可用";
+            var failedSource = suppliesLocalAnalysis
+                ? "Codex App Server account/rateLimits/read"
+                : SecondaryCodexHome.CliSourceDescription;
             return new ProviderSlotSnapshot(settings.SlotId, ProviderIds.Codex, settings.Label, true,
-                suppliesLocalAnalysis, status, text, now, "Codex App Server account/rateLimits/read",
+                suppliesLocalAnalysis, status, text, now, failedSource,
                 Array.Empty<QuotaWindowObservation>(), identity, code, FieldPresenceFlags: flags);
         }
 
@@ -77,10 +93,12 @@ public class CodexQuotaProfile
             ? QuotaSlotStatus.Stale
             : ProviderQuotaPresentation.CodexStatus(result.Observation, now);
         var statusText = statusLive == QuotaSlotStatus.Stale ? "陈旧观测，不作为实时额度" : "官方 App Server";
+        var source = suppliesLocalAnalysis
+            ? "Codex App Server account/rateLimits/read · 子进程隔离 CODEX_HOME"
+            : SecondaryCodexHome.CliSourceDescription;
         return new ProviderSlotSnapshot(settings.SlotId, ProviderIds.Codex, settings.Label, true,
             suppliesLocalAnalysis, statusLive, statusText, result.Observation.ObservedAtUtc,
-            "Codex App Server account/rateLimits/read · 子进程隔离 CODEX_HOME",
-            windows, identity, result.ErrorCode, identity, FieldPresenceFlags: flags);
+            source, windows, identity, result.ErrorCode, identity, FieldPresenceFlags: flags);
     }
 
     public async Task<string?> ReadIdentityAsync(string? isolatedHome, CancellationToken cancellationToken)
@@ -105,6 +123,13 @@ public class CodexQuotaProfile
         {
             return null;
         }
+    }
+
+    private static string? AppendPlanType(string? flags, string? planType)
+    {
+        if (string.IsNullOrWhiteSpace(planType)) return flags;
+        var marker = "plan_type=" + planType;
+        return string.IsNullOrWhiteSpace(flags) ? marker : flags + " " + marker;
     }
 }
 

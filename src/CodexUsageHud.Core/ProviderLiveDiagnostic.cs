@@ -330,4 +330,116 @@ public static class ProviderLiveDiagnostic
         var text = builder.ToString();
         return SecretHits(text).Count == 0 ? text : "redacted";
     }
+
+    public static async Task<string> RunSecondaryCliQuotaAsync(string cliHome, bool comparePrimary,
+        CancellationToken cancellationToken)
+    {
+        var home = SecondaryCodexHome.Normalize(cliHome);
+        var primaryHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".codex");
+        var profile = new CodexQuotaProfile();
+        var secondarySettings = new ProviderSlotSettings(ProviderSlotIds.CodexSecondary, "Codex 第二账户", true, home);
+        ProviderSlotSnapshot secondary;
+        string? dependency = null;
+        try
+        {
+            secondary = await profile.ReadAsync(secondarySettings, home, false, cancellationToken, primaryHome)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            secondary = ProviderQuotaPresentation.Placeholder(secondarySettings, false, QuotaSlotStatus.Unavailable,
+                "此来源超时，不影响其他槽", "独立超时", "slot_timeout");
+            dependency = "slot_timeout";
+        }
+        catch (Exception exception)
+        {
+            dependency = exception.GetType().Name;
+            secondary = ProviderQuotaPresentation.Placeholder(secondarySettings, false, QuotaSlotStatus.Unavailable,
+                "此来源失败，不影响其他槽", dependency, dependency);
+        }
+
+        var auth = WindowsLoginPresence.CodexCliAuthFile(home);
+        if (secondary.Status is QuotaSlotStatus.NotConnected or QuotaSlotStatus.Unavailable && !auth.Present)
+            dependency ??= "codex_cli_auth_file_absent";
+        dependency ??= secondary.ErrorCode;
+
+        bool? identityEqual = null;
+        bool primaryIdentityPresent = false;
+        if (comparePrimary)
+        {
+            try
+            {
+                var primary = await profile.ReadAsync(
+                    new ProviderSlotSettings(ProviderSlotIds.CodexPrimary, "Codex 当前", true),
+                    primaryHome, true, cancellationToken).ConfigureAwait(false);
+                primaryIdentityPresent = !string.IsNullOrWhiteSpace(primary.OpaqueIdentityHash);
+                identityEqual = primaryIdentityPresent &&
+                    !string.IsNullOrWhiteSpace(secondary.OpaqueIdentityHash) &&
+                    string.Equals(primary.OpaqueIdentityHash, secondary.OpaqueIdentityHash, StringComparison.Ordinal);
+            }
+            catch (OperationCanceledException)
+            {
+                dependency ??= "primary_compare_timeout";
+            }
+            catch (Exception exception)
+            {
+                dependency ??= "primary_compare_" + exception.GetType().Name;
+            }
+        }
+
+        var plan = PlanTypeFromFlags(secondary.FieldPresenceFlags);
+        var lines = new List<string>
+        {
+            "secondary_cli_quota isolated=1 settings_untouched=1 secrets_omitted=1",
+            "source=codex_cli_app_server",
+            "local_analysis=" + Flag(secondary.SuppliesLocalAnalysis),
+            "status=" + secondary.Status,
+            "observed_at=" + secondary.ObservedAtUtc.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ",
+                System.Globalization.CultureInfo.InvariantCulture),
+            "plan_type=" + SanitizeToken(plan),
+            "identity_present=" + Flag(!string.IsNullOrWhiteSpace(secondary.OpaqueIdentityHash)),
+            "primary_identity_present=" + Flag(primaryIdentityPresent),
+            "identity_equal=" + Flag(identityEqual == true),
+            "auth_file_present=" + Flag(auth.Present),
+            "error=" + SanitizeToken(secondary.ErrorCode),
+            "dependency=" + SanitizeToken(dependency),
+            "windows=" + secondary.Windows.Count,
+        };
+        if (secondary.Windows.Count == 0)
+            lines.Add("window=none");
+        foreach (var window in secondary.Windows)
+        {
+            var used = window.UsedPercent.HasValue
+                ? window.UsedPercent.Value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)
+                : "none";
+            var remaining = window.RemainingPercent.HasValue
+                ? window.RemainingPercent.Value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)
+                : "none";
+            var duration = window.WindowDurationMinutes?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none";
+            var reset = window.ResetsAtUtc.HasValue
+                ? window.ResetsAtUtc.Value.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ",
+                    System.Globalization.CultureInfo.InvariantCulture)
+                : "none";
+            lines.Add("window id=" + SanitizeToken(window.WindowId) +
+                      " name=" + SanitizeToken(window.DisplayName) +
+                      " used=" + used +
+                      " remaining=" + remaining +
+                      " duration_mins=" + duration +
+                      " reset=" + reset);
+        }
+
+        var output = string.Join('\n', lines);
+        return SecretHits(output).Count == 0 ? output : "secondary_cli_quota redacted=1";
+    }
+
+    private static string? PlanTypeFromFlags(string? flags)
+    {
+        if (string.IsNullOrWhiteSpace(flags)) return null;
+        const string marker = "plan_type=";
+        var index = flags.IndexOf(marker, StringComparison.Ordinal);
+        if (index < 0) return null;
+        var value = flags[(index + marker.Length)..];
+        var end = value.IndexOf(' ');
+        return end < 0 ? value : value[..end];
+    }
 }

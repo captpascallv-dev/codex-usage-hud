@@ -743,6 +743,7 @@ public partial class MainWindow : Window, IDisposable
         var stored = ProviderSettingKeys.FromStored(_restoredSettings);
         ApplySlotEditor(stored.Slot(ProviderSlotIds.CodexPrimary), SlotCodexPrimaryEnabled, SlotCodexPrimaryLabel);
         ApplySlotEditor(stored.Slot(ProviderSlotIds.CodexSecondary), SlotCodexSecondaryEnabled, SlotCodexSecondaryLabel);
+        SlotCodexSecondaryHome.Text = stored.Slot(ProviderSlotIds.CodexSecondary).CodexHome ?? string.Empty;
         ApplySlotEditor(stored.Slot(ProviderSlotIds.Cursor), SlotCursorEnabled, SlotCursorLabel);
         ApplySlotEditor(stored.Slot(ProviderSlotIds.Grok), SlotGrokEnabled, SlotGrokLabel);
         ApplySlotEditor(stored.Slot(ProviderSlotIds.GrokBot), SlotGrokBotEnabled, SlotGrokBotLabel);
@@ -758,10 +759,9 @@ public partial class MainWindow : Window, IDisposable
         var cursor = WindowsLoginPresence.Cursor();
         var grok = WindowsLoginPresence.Grok();
         var grokBot = WindowsLoginPresence.GrokBot();
-        var piCodex = WindowsLoginPresence.PiCodexAuthFile();
         var claude = WindowsLoginPresence.ClaudeCredentialsFile();
         var claudeDesktop = WindowsLoginPresence.ClaudeDesktopProfile();
-        PiCodexPresenceText.Text = $"PI ChatGPT/Codex 订阅登录文件：{(piCodex.Present ? "存在" : "未找到")}（{piCodex.RelativeHint}）";
+        UpdateSecondarySourcePresence();
         var presence =
             $"Cursor 登录文件：{(cursor.Present ? "存在" : "未找到")}（{cursor.RelativeHint}）\n" +
             $"Grok 登录目录：{(grok.Present ? "存在" : "未找到")}（{grok.RelativeHint}）\n" +
@@ -790,7 +790,7 @@ public partial class MainWindow : Window, IDisposable
             new ProviderSlotSettings(ProviderSlotIds.CodexPrimary, TextOrDefault(SlotCodexPrimaryLabel, "Codex 当前"),
                 SlotCodexPrimaryEnabled.IsChecked == true),
             new ProviderSlotSettings(ProviderSlotIds.CodexSecondary, TextOrDefault(SlotCodexSecondaryLabel, "Codex 第二账户"),
-                SlotCodexSecondaryEnabled.IsChecked == true),
+                SlotCodexSecondaryEnabled.IsChecked == true, SecondaryCodexHome.Normalize(SlotCodexSecondaryHome.Text)),
             new ProviderSlotSettings(ProviderSlotIds.Cursor, TextOrDefault(SlotCursorLabel, "Cursor"),
                 SlotCursorEnabled.IsChecked == true),
             new ProviderSlotSettings(ProviderSlotIds.Grok, TextOrDefault(SlotGrokLabel, "Grok"),
@@ -817,7 +817,37 @@ public partial class MainWindow : Window, IDisposable
     private async void OnProviderSettingsChanged(object sender, RoutedEventArgs e)
     {
         if (!_settingsReady) return;
+        UpdateSecondarySourcePresence();
         await SaveSettingsSafelyAsync(CaptureWindowSettings());
+    }
+
+    private void UpdateSecondarySourcePresence()
+    {
+        var home = SecondaryCodexHome.Normalize(SlotCodexSecondaryHome.Text);
+        if (home is null)
+        {
+            var piCodex = WindowsLoginPresence.PiCodexAuthFile();
+            PiCodexPresenceText.Text = "留空：使用 PI ChatGPT/Codex 订阅。登录文件" +
+                (piCodex.Present ? "存在" : "未找到") + "（" + piCodex.RelativeHint + "）";
+            return;
+        }
+
+        var kind = SecondaryCodexHome.Classify(home, _engine.BoundCodexHome);
+        if (kind == SecondaryHomeStatus.SameAsPrimary)
+        {
+            PiCodexPresenceText.Text = SecondaryCodexHome.SameStatusText;
+            return;
+        }
+
+        if (kind != SecondaryHomeStatus.Ready)
+        {
+            PiCodexPresenceText.Text = SecondaryCodexHome.InvalidStatusText + "。不会改回 PI。";
+            return;
+        }
+
+        var auth = WindowsLoginPresence.CodexCliAuthFile(home);
+        PiCodexPresenceText.Text = "Codex CLI 主目录已配置。登录文件" +
+            (auth.Present ? "存在" : "未找到") + "（" + auth.RelativeHint + "，只看时间与大小）";
     }
 
     private void OnEngineProvidersUpdated()

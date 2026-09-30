@@ -119,6 +119,8 @@ public sealed class ProviderQuotaCoordinator
 
     public Func<string>? ClaudeLoginStampOverride { get; set; }
 
+    public Func<string, string>? CodexCliAuthStampOverride { get; set; }
+
     public static string FormatLoginStamp(LoginPresence presence)
     {
         if (!presence.Present) return "0";
@@ -241,8 +243,9 @@ public sealed class ProviderQuotaCoordinator
             {
                 snapshot = await ReadSlotAsync(slot, primaryCodexObservation, timeout.Token, primaryIdentityHash,
                     primaryCodexHome).ConfigureAwait(false);
-                // PI's native refresh rotates its own auth file during this read. Bind the
-                // resulting observation to the new stamp, never to the pre-refresh stamp.
+                // PI renewal rotates its login during the read. A CLI app-server read can also
+                // touch the selected home's auth-file metadata. Bind this completed observation
+                // to the post-read stamp so that rotation does not drop the windows just read.
                 if (slot.SlotId == ProviderSlotIds.CodexSecondary && IsCurrent(slot.SlotId, started))
                 {
                     var refreshedKey = ConfigurationKey(slot);
@@ -334,9 +337,37 @@ public sealed class ProviderQuotaCoordinator
                 _cache.Store(slot.SlotId, ObservationFrom(primary));
                 return primary;
             case ProviderSlotIds.CodexSecondary:
-                var secondary = await _piCodex.ReadAsync(slot, cancellationToken).ConfigureAwait(false);
-                _cache.Store(slot.SlotId, ObservationFrom(secondary));
-                return secondary;
+                if (!SecondaryCodexHome.UsesCli(slot.CodexHome))
+                {
+                    var secondary = await _piCodex.ReadAsync(slot, cancellationToken).ConfigureAwait(false);
+                    _cache.Store(slot.SlotId, ObservationFrom(secondary));
+                    return secondary;
+                }
+
+                var cliHome = SecondaryCodexHome.Normalize(slot.CodexHome);
+                var homeStatus = SecondaryCodexHome.Classify(cliHome, primaryCodexHome);
+                if (homeStatus == SecondaryHomeStatus.SameAsPrimary)
+                {
+                    var sameHome = ProviderQuotaPresentation.Placeholder(slot, false,
+                        QuotaSlotStatus.SetupRequired, SecondaryCodexHome.SameStatusText,
+                        SecondaryCodexHome.SameDetail, SecondaryCodexHome.SameCode);
+                    _cache.Store(slot.SlotId, ObservationFrom(sameHome));
+                    return sameHome;
+                }
+
+                if (homeStatus != SecondaryHomeStatus.Ready)
+                {
+                    var invalidHome = ProviderQuotaPresentation.Placeholder(slot, false,
+                        QuotaSlotStatus.SetupRequired, SecondaryCodexHome.InvalidStatusText,
+                        SecondaryCodexHome.InvalidDetail, SecondaryCodexHome.InvalidCode);
+                    _cache.Store(slot.SlotId, ObservationFrom(invalidHome));
+                    return invalidHome;
+                }
+
+                var cli = await _codex.ReadAsync(slot, cliHome, false, cancellationToken, primaryCodexHome)
+                    .ConfigureAwait(false);
+                _cache.Store(slot.SlotId, ObservationFrom(cli));
+                return cli;
             case ProviderSlotIds.Cursor:
                 return await _cursor.ReadAsync(slot, cancellationToken).ConfigureAwait(false);
             case ProviderSlotIds.Grok:
@@ -436,11 +467,21 @@ public sealed class ProviderQuotaCoordinator
                 ClaudeLoginStampOverride?.Invoke() ??
                 FormatLoginStamp(WindowsLoginPresence.ClaudeCredentialsFile()) + ":" +
                 FormatLoginStamp(WindowsLoginPresence.ClaudeDesktopProfile()),
-            ProviderSlotIds.CodexSecondary =>
-                _piTokens.ConfigurationFingerprint() + "|" + (slot.CodexHome ?? string.Empty),
+            ProviderSlotIds.CodexSecondary => SecondaryFingerprint(slot),
             _ => slot.CodexHome ?? string.Empty,
         };
         return string.Join('|', slot.SlotId, slot.Enabled ? "1" : "0", slot.CodexHome ?? string.Empty, presence);
+    }
+
+    private string SecondaryFingerprint(ProviderSlotSettings slot)
+    {
+        if (!SecondaryCodexHome.UsesCli(slot.CodexHome))
+            return _piTokens.ConfigurationFingerprint() + "|" + (slot.CodexHome ?? string.Empty);
+
+        var home = SecondaryCodexHome.Normalize(slot.CodexHome) ?? slot.CodexHome ?? string.Empty;
+        var stamp = CodexCliAuthStampOverride?.Invoke(home) ??
+                    FormatLoginStamp(WindowsLoginPresence.CodexCliAuthFile(home));
+        return "cli|" + home + "|" + stamp;
     }
 
     private int BeginGeneration(string slotId, string fingerprint)

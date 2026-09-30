@@ -50,6 +50,13 @@ public static class WindowsLoginPresence
         return InspectFile(ProviderIds.Codex, path, @"%USERPROFILE%\.pi\agent\auth-file");
     }
 
+    public static LoginPresence CodexCliAuthFile(string? codexHome)
+    {
+        if (string.IsNullOrWhiteSpace(codexHome))
+            return new LoginPresence(ProviderIds.Codex, false, @"CODEX_HOME\auth-file", null, null);
+        return InspectFile(ProviderIds.Codex, Path.Combine(codexHome, "auth.json"), @"CODEX_HOME\auth-file");
+    }
+
     public static LoginPresence ClaudeCredentialsFile(string? userProfile = null, string? configDir = null)
     {
         var configured = configDir ?? Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR");

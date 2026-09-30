@@ -86,12 +86,18 @@ access key is not logout. When the same issuer entry still has a refresh
 grant, the HUD runs the official non-interactive `grok models` CLI so Grok's
 own lock can rotate the file, then re-reads the access key. The HUD does not
 POST `auth.x.ai`, write `auth.json`, or treat file expiry as a fake 0%/100%. Primary Codex quota still uses App Server, not extracted Codex tokens.
-The second Codex slot may read only the `openai-codex` OAuth entry from the
-existing PI login store at runtime, keep access token and ChatGPT account id
-in memory, and GET `https://chatgpt.com/backend-api/wham/usage` on the HTTPS
-allowlist with redirects refused. Agents must not open that file. Do not copy
-PI credentials into Codex `auth.json`, refresh the PI store, or scan unrelated
-PI providers.
+The second Codex slot stays quota-only. When its optional Codex home is blank,
+it may read only the `openai-codex` OAuth entry from the existing PI login
+store at runtime, keep access token and ChatGPT account id in memory, and GET
+`https://chatgpt.com/backend-api/wham/usage` on the HTTPS allowlist with
+redirects refused. When that slot has an explicit directory, the HUD instead
+launches the installed Codex app-server with `CODEX_HOME` set only on that
+child, then sends `initialize`, `initialized`, `account/rateLimits/read`, and
+`account/read` with `refreshToken` false. A blank home remains PI. An invalid
+directory or the same directory as the primary home is rejected and does not
+fall back to PI. Agents must not open login files. Do not copy PI credentials
+into Codex `auth.json`, refresh either store by a custom mechanism, or scan
+unrelated homes.
 
 Pascal 2026-09-28: the opted-in Claude slot may read only `claudeAiOauth.accessToken`
 and `expiresAt` from the existing Claude Code credential file
@@ -355,11 +361,16 @@ compatibility fallbacks. Launch a short-lived child process:
 codex -s read-only -a never app-server
 ```
 
-Both Codex slots set `CODEX_HOME` only on that child process environment so
-quota and `account/read` identity share the same authenticated profile. Missing
-identity invalidates any previous association; do not combine one account's
-quota with another's identity. Do not change the parent process environment or
-copy logins. HTTP provider bodies are bounded streaming reads with stable
+The primary Codex slot sets `CODEX_HOME` only on that child process environment
+so quota and `account/read` identity share the same authenticated profile. The
+secondary slot does the same only when its optional home is set; otherwise it
+uses the PI usage endpoint above. `account/rateLimits/read` prefers
+`rateLimitsByLimitId` independent buckets (`usedPercent`, `windowDurationMins`,
+`resetsAt`, optional `planType`). Legacy `rateLimits` is used only when that
+map is absent. Do not infer a model bucket or a plan entitlement that the
+response did not return. Missing identity invalidates any previous association;
+do not combine one account's quota with another's identity. Do not change the
+parent process environment or copy logins. HTTP provider bodies are bounded streaming reads with stable
 sanitized error codes. Rail and panel remaining percentages name the exact
 window or pool; they are never averaged.
 

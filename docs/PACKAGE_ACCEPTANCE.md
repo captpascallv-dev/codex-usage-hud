@@ -33,9 +33,10 @@ contains no real local usage, session identifiers, credentials or machine paths.
 
 - Primary Codex uses the local App Server `account/rateLimits/read`. Session
   analysis stays on the owner-confirmed primary home.
-- The second Codex slot is quota-only and may read PI's existing ChatGPT/Codex
-  (`openai-codex`) login against `chatgpt.com/backend-api/wham/usage`. It does
-  not require a second `CODEX_HOME`.
+- The second Codex slot is quota-only. A blank home still reads PI's existing
+  ChatGPT/Codex (`openai-codex`) login against `chatgpt.com/backend-api/wham/usage`
+  and does not require a second `CODEX_HOME`. An explicit directory selects that
+  directory's Codex CLI app-server quota instead, with no PI fallback.
 - Cursor, Grok and Grok Bot default off. After the user enables a slot, the HUD
   reads only the necessary existing-login field and calls that service's own
   quota endpoint. Missing login is 未连接, never a fake 0% or 100%.

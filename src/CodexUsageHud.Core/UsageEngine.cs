@@ -67,6 +67,7 @@ public sealed class UsageEngine : IDisposable
     public event Action? ProvidersUpdated;
 
     public UsageDatabase Database => _database;
+    public string BoundCodexHome => _codexHome;
     public RefreshCadence Cadence => _cadence;
     public IsolatedQuotaCache ProviderCache => _providers.Cache;
 

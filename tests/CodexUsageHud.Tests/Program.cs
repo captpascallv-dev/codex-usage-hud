@@ -66,6 +66,10 @@ internal static class Program
         }
         if (args.Length > 0 && args[0].Equals("--grok-renewal-proof", StringComparison.Ordinal))
             return RunGrokRenewalProof();
+        if (args.Length > 0 && args[0].Equals("--secondary-cli-quota", StringComparison.Ordinal))
+            return RunSecondaryCliQuota(args.Skip(1).ToArray());
+        if (args.Length > 0 && args[0].Equals("--secondary-cli-capture", StringComparison.Ordinal))
+            return RunSecondaryCliCapture(args.Skip(1).ToArray());
 
         var runRoot = NewRunRoot("test-run");
         var tests = new (string Name, Action Run)[]
@@ -190,6 +194,7 @@ internal static class Program
             ("identity_mismatch_does_not_rebind", IdentityMismatchDoesNotRebind),
             ("pi_codex_parser_and_auth_shape", PiCodexParserAndAuthShape),
             ("pi_codex_adapter_statuses_and_cache", () => PiCodexAdapterStatusesAndCache().GetAwaiter().GetResult()),
+            ("secondary_cli_home_routes_quota_only", () => SecondaryCliHomeRoutesQuotaOnly(runRoot).GetAwaiter().GetResult()),
             ("pi_expired_native_renewal_rereads_quota", () => PiExpiredRenewal().GetAwaiter().GetResult()),
             ("pi_renewal_single_flight", () => PiRenewalSingleFlight().GetAwaiter().GetResult()),
             ("pi_renewal_coordinator_stamp_tracks_pi_rotation", () => PiRenewalCoordinatorStamp().GetAwaiter().GetResult()),
@@ -2050,7 +2055,7 @@ internal static class Program
         if (args.Length < 2) return 3;
         var mode = args[0];
         File.WriteAllText(args[1], Environment.ProcessId.ToString(CultureInfo.InvariantCulture), Encoding.ASCII);
-        if (Console.ReadLine() is null) return 4;
+        if (ReadAppServerRequest() is null) return 4;
 
         if (mode.Equals("initialize-exit", StringComparison.Ordinal)) return 7;
 
@@ -2061,7 +2066,7 @@ internal static class Program
             Console.Out.WriteLine(new string('x', PrivacyJsonlReader.AllowlistedRecordLimit + 4096));
             Console.Out.WriteLine("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}");
             Console.Out.Flush();
-            if (Console.ReadLine() is null) return 5;
+            if (ReadAppServerRequest() is null) return 5;
             Console.Out.WriteLine("{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"rateLimits\":{\"id\":\"codex-main\",\"name\":\"Codex\",\"usedPercent\":12,\"windowDurationMins\":10080,\"resetsAt\":1900000000}}}");
             Console.Out.Flush();
             new ManualResetEventSlim(false).Wait();
@@ -2077,6 +2082,20 @@ internal static class Program
         }
 
         return 6;
+    }
+
+    private static string? ReadAppServerRequest()
+    {
+        while (true)
+        {
+            var line = Console.ReadLine();
+            if (line is null) return null;
+            if (line.Contains("\"id\"", StringComparison.Ordinal) &&
+                line.Contains("\"method\"", StringComparison.Ordinal))
+            {
+                return line;
+            }
+        }
     }
 
     private static void TokenMathAndOverflow()
@@ -3868,6 +3887,54 @@ internal static class Program
         }
     }
 
+    private static int RunSecondaryCliQuota(string[] args)
+    {
+        var comparePrimary = args.Any(arg => arg.Equals("--compare-primary", StringComparison.OrdinalIgnoreCase));
+        var home = args.FirstOrDefault(arg => !arg.StartsWith("--", StringComparison.Ordinal));
+        if (string.IsNullOrWhiteSpace(home))
+        {
+            Console.WriteLine("secondary_cli_quota error=home_required");
+            return 2;
+        }
+
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(70));
+            var output = ProviderLiveDiagnostic.RunSecondaryCliQuotaAsync(home, comparePrimary, timeout.Token)
+                .GetAwaiter().GetResult();
+            Console.WriteLine(output);
+            return ProviderLiveDiagnostic.SecretHits(output).Count == 0 ? 0 : 3;
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine("secondary_cli_quota status=TIMEOUT error=slot_timeout");
+            return 2;
+        }
+        catch (Exception)
+        {
+            Console.WriteLine("secondary_cli_quota status=ERROR code=run_failed");
+            return 2;
+        }
+    }
+
+    private static int RunSecondaryCliCapture(string[] args)
+    {
+        var outputDirectory = args.Length > 0 && !string.IsNullOrWhiteSpace(args[0])
+            ? Path.GetFullPath(args[0])
+            : Path.Combine(ProjectRoot(), ".artifacts", "secondary-cli-capture");
+        try
+        {
+            var inspection = RenderSecondaryCliSynthetic(outputDirectory);
+            Console.WriteLine(inspection);
+            return 0;
+        }
+        catch (Exception exception)
+        {
+            Console.WriteLine("secondary_cli_capture error=" + exception.GetType().Name);
+            return 1;
+        }
+    }
+
     private static ThreadMetadataRow MetaRow(string threadId, string? accountId) =>
         new(threadId, null, null, null, null, null, null, null, null, null, null, accountId);
 
@@ -4011,7 +4078,8 @@ internal static class Program
     private static async Task ProviderConfigSwitchDropsCachedQuota()
     {
         var now = DateTimeOffset.UtcNow;
-        var profile = new ScriptedPiCodexAdapter((settings, _) =>
+        var homes = SecondaryCliHomes("config-switch");
+        var profile = new ScriptedCodexProfile((settings, _, _) =>
             Task.FromResult(ScriptedCodexSnapshot(settings,
                 settings.CodexHome is not null && settings.CodexHome.Contains("home-b", StringComparison.Ordinal)
                     ? 90
@@ -4020,15 +4088,17 @@ internal static class Program
                     ? "Codex B"
                     : "Codex A",
                 now)));
-        var coordinator = new ProviderQuotaCoordinator(piCodex: profile);
-        var settingsA = FiveSlotSettings(true, @"C:\codex-home-a");
-        var boardA = await coordinator.RefreshAsync(settingsA, PrimaryObservation(now), CancellationToken.None, true);
+        var coordinator = new ProviderQuotaCoordinator(codex: profile);
+        var settingsA = FiveSlotSettings(true, homes.HomeA);
+        var boardA = await coordinator.RefreshAsync(settingsA, PrimaryObservation(now), CancellationToken.None, true,
+            null, homes.Primary);
         Assert.Equal(80d, boardA.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent);
-        var settingsB = FiveSlotSettings(true, @"C:\codex-home-b");
+        var settingsB = FiveSlotSettings(true, homes.HomeB);
         var staleView = coordinator.CurrentBoard(now, settingsB);
         Assert.True(staleView.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent is null);
         Assert.Equal(QuotaSlotStatus.Unavailable, staleView.Find(ProviderSlotIds.CodexSecondary)!.Status);
-        var boardB = await coordinator.RefreshAsync(settingsB, PrimaryObservation(now), CancellationToken.None, false);
+        var boardB = await coordinator.RefreshAsync(settingsB, PrimaryObservation(now), CancellationToken.None, false,
+            null, homes.Primary);
         Assert.Equal(10d, boardB.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent);
         Assert.True(boardB.Find(ProviderSlotIds.CodexSecondary)!.GlanceText.Contains("Codex B", StringComparison.Ordinal));
     }
@@ -4116,21 +4186,24 @@ internal static class Program
     {
         var now = DateTimeOffset.UtcNow;
         var hold = new TaskCompletionSource<ProviderSlotSnapshot>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var profile = new ScriptedPiCodexAdapter(async (settings, cancellationToken) =>
+        var homes = SecondaryCliHomes("switch-during-refresh");
+        var profile = new ScriptedCodexProfile(async (settings, _, cancellationToken) =>
         {
             if (settings.CodexHome is not null && settings.CodexHome.Contains("home-a", StringComparison.Ordinal))
                 return await hold.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             return ScriptedCodexSnapshot(settings, 90, "Codex B", now);
         });
-        var coordinator = new ProviderQuotaCoordinator(piCodex: profile)
+        var coordinator = new ProviderQuotaCoordinator(codex: profile)
         {
             PublishBudget = TimeSpan.FromMilliseconds(200),
         };
-        var settingsA = FiveSlotSettings(true, @"C:\codex-home-a");
-        var settingsB = FiveSlotSettings(true, @"C:\codex-home-b");
-        var refreshA = coordinator.RefreshAsync(settingsA, PrimaryObservation(now), CancellationToken.None, true);
+        var settingsA = FiveSlotSettings(true, homes.HomeA);
+        var settingsB = FiveSlotSettings(true, homes.HomeB);
+        var refreshA = coordinator.RefreshAsync(settingsA, PrimaryObservation(now), CancellationToken.None, true,
+            null, homes.Primary);
         await Task.Delay(50).ConfigureAwait(false);
-        var refreshB = coordinator.RefreshAsync(settingsB, PrimaryObservation(now), CancellationToken.None, true);
+        var refreshB = coordinator.RefreshAsync(settingsB, PrimaryObservation(now), CancellationToken.None, true,
+            null, homes.Primary);
         hold.TrySetResult(ScriptedCodexSnapshot(settingsA.Slot(ProviderSlotIds.CodexSecondary), 20, "Codex A", now));
         await refreshA.ConfigureAwait(false);
         await refreshB.ConfigureAwait(false);
@@ -5224,6 +5297,414 @@ internal static class Program
         }
     }
 
+    private readonly record struct SecondaryCliHomeSet(string Primary, string HomeA, string HomeB);
+
+    private static SecondaryCliHomeSet SecondaryCliHomes(string name)
+    {
+        var root = Path.Combine(ProjectRoot(), ".artifacts", "secondary-cli-routing", name);
+        var primary = Path.Combine(root, "primary");
+        var homeA = Path.Combine(root, "home-a");
+        var homeB = Path.Combine(root, "home-b");
+        Directory.CreateDirectory(Path.Combine(primary, "sessions"));
+        Directory.CreateDirectory(homeA);
+        Directory.CreateDirectory(homeB);
+        return new SecondaryCliHomeSet(primary, homeA, homeB);
+    }
+
+    private static async Task SecondaryCliHomeRoutesQuotaOnly(string runRoot)
+    {
+        var captureDir = Path.Combine(runRoot, "secondary-cli-capture");
+        var inspection = RenderSecondaryCliSynthetic(captureDir);
+        Assert.True(inspection.Contains("settings_home=synthetic", StringComparison.Ordinal));
+        Assert.True(inspection.Contains("detail_source=cli", StringComparison.Ordinal));
+        Assert.True(inspection.Contains("analysis_button=collapsed", StringComparison.Ordinal));
+        Assert.True(!inspection.Contains(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            StringComparison.OrdinalIgnoreCase));
+
+        var root = Path.Combine(runRoot, "secondary-cli");
+        var primary = Path.Combine(root, "primary-home");
+        var cli = Path.Combine(root, "cli-home");
+        var other = Path.Combine(root, "other-home");
+        Directory.CreateDirectory(Path.Combine(primary, "sessions"));
+        Directory.CreateDirectory(cli);
+        Directory.CreateDirectory(other);
+        var authPath = Path.Combine(cli, "auth.json");
+        File.WriteAllBytes(authPath, new byte[] { 1 });
+        var stampBefore = ProviderQuotaCoordinator.FormatLoginStamp(WindowsLoginPresence.CodexCliAuthFile(cli));
+        File.SetLastWriteTimeUtc(authPath, DateTime.UtcNow.AddMinutes(5));
+        var stampAfter = ProviderQuotaCoordinator.FormatLoginStamp(WindowsLoginPresence.CodexCliAuthFile(cli));
+        Assert.True(stampBefore != "0" && stampAfter != stampBefore);
+
+        var parentHome = Environment.GetEnvironmentVariable("CODEX_HOME");
+        var start = AppServerProtocol.CreateStartInfo("codex.exe",
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["CODEX_HOME"] = cli });
+        Assert.Equal(Path.GetFullPath(cli), start.Environment["CODEX_HOME"]);
+        Assert.Equal(parentHome, Environment.GetEnvironmentVariable("CODEX_HOME"));
+        var arguments = string.Join(' ', start.ArgumentList);
+        Assert.True(arguments.Contains("app-server", StringComparison.Ordinal));
+        Assert.True(arguments.Contains("read-only", StringComparison.Ordinal));
+        Assert.True(!arguments.Contains("thread/start", StringComparison.Ordinal));
+        Assert.True(!arguments.Contains("turn/start", StringComparison.Ordinal));
+
+        var now = DateTimeOffset.UtcNow;
+        var mode = "cli";
+        var identity = "account-a";
+        var stamp = "stamp-a";
+        var piCalls = 0;
+        var cliCalls = 0;
+        var profile = new ScriptedCodexProfile((settings, home, _) =>
+        {
+            Interlocked.Increment(ref cliCalls);
+            if (string.Equals(mode, "rotate", StringComparison.Ordinal)) stamp = "stamp-b";
+            if (string.Equals(mode, "auth", StringComparison.Ordinal))
+            {
+                return Task.FromResult(ProviderQuotaPresentation.Placeholder(settings, false,
+                    QuotaSlotStatus.NotConnected, "未连接：App Server 无法读取该主目录登录态",
+                    "登录不可用", "app_server_initialize_exit"));
+            }
+
+            var used = home is not null && home.Contains("other-home", StringComparison.Ordinal) ? 70d : 40d;
+            var name = used > 50 ? "CLI other" : "CLI 5h";
+            return Task.FromResult(ScriptedCodexSnapshot(settings, used, name, now) with
+            {
+                SuppliesLocalAnalysis = false,
+                SourceDescription = SecondaryCodexHome.CliSourceDescription,
+                OpaqueIdentityHash = identity,
+            });
+        });
+        var pi = new ScriptedPiCodexAdapter((settings, _) =>
+        {
+            Interlocked.Increment(ref piCalls);
+            return Task.FromResult(ScriptedCodexSnapshot(settings, 11, "PI Window", now) with
+            {
+                SuppliesLocalAnalysis = false,
+                SourceDescription = PiCodexSubscription.SourceDescription,
+                OpaqueIdentityHash = "pi-account",
+            });
+        });
+        var coordinator = new ProviderQuotaCoordinator(codex: profile, piCodex: pi,
+            piTokens: new InjectedPiCodexTokenSource(null, "pi-fp"))
+        {
+            CodexCliAuthStampOverride = _ => stamp,
+        };
+
+        var blank = SixSlotSettings(true, null);
+        Assert.True(coordinator.ConfigurationKey(blank.Slot(ProviderSlotIds.CodexSecondary)).Contains("pi-fp",
+            StringComparison.Ordinal));
+        Assert.True(!coordinator.ConfigurationKey(blank.Slot(ProviderSlotIds.CodexSecondary)).Contains("cli|",
+            StringComparison.Ordinal));
+        var blankBoard = await coordinator.RefreshAsync(blank, PrimaryObservation(now), CancellationToken.None, true,
+            "primary-hash", primary).ConfigureAwait(false);
+        var blankSecondary = blankBoard.Find(ProviderSlotIds.CodexSecondary)!;
+        Assert.Equal(1, piCalls);
+        Assert.Equal(0, cliCalls);
+        Assert.Equal(89d, blankSecondary.GlanceRemainingPercent);
+        Assert.True(blankSecondary.SourceDescription.Contains("wham/usage", StringComparison.Ordinal));
+        Assert.True(!blankSecondary.SuppliesLocalAnalysis);
+        Assert.True(blankBoard.PrimaryCodex!.SuppliesLocalAnalysis);
+        Assert.Equal(80d, blankBoard.PrimaryCodex.GlanceRemainingPercent);
+
+        var cliSettings = SixSlotSettings(true, cli);
+        var cliKey = coordinator.ConfigurationKey(cliSettings.Slot(ProviderSlotIds.CodexSecondary));
+        Assert.True(cliKey.Contains("cli|" + Path.GetFullPath(cli).TrimEnd(Path.DirectorySeparatorChar),
+            StringComparison.OrdinalIgnoreCase));
+        var cliBoard = await coordinator.RefreshAsync(cliSettings, PrimaryObservation(now), CancellationToken.None, true,
+            "primary-hash", primary).ConfigureAwait(false);
+        var cliSecondary = cliBoard.Find(ProviderSlotIds.CodexSecondary)!;
+        Assert.Equal(1, piCalls);
+        Assert.Equal(1, cliCalls);
+        Assert.True(string.Equals(Path.GetFullPath(cli), profile.LastIsolatedHome, StringComparison.OrdinalIgnoreCase));
+        Assert.True(profile.LastSuppliesLocalAnalysis == false);
+        Assert.Equal(60d, cliSecondary.GlanceRemainingPercent);
+        Assert.Equal(SecondaryCodexHome.CliSourceDescription, cliSecondary.SourceDescription);
+        Assert.True(!cliSecondary.SuppliesLocalAnalysis);
+        Assert.True(cliBoard.PrimaryCodex!.SuppliesLocalAnalysis);
+        Assert.True(!coordinator.Cache.SharesReference(ProviderSlotIds.CodexPrimary, ProviderSlotIds.CodexSecondary));
+        Assert.Equal(6, cliBoard.Slots.Count);
+        foreach (var slotId in new[]
+                 {
+                     ProviderSlotIds.Cursor, ProviderSlotIds.Grok, ProviderSlotIds.GrokBot, ProviderSlotIds.Claude,
+                 })
+        {
+            Assert.Equal(QuotaSlotStatus.Disabled, cliBoard.Find(slotId)!.Status);
+            Assert.Equal(0, cliBoard.Find(slotId)!.Windows.Count);
+        }
+
+        mode = "rotate";
+        var rotated = await coordinator.RefreshAsync(cliSettings, PrimaryObservation(now), CancellationToken.None, true,
+            "primary-hash", primary).ConfigureAwait(false);
+        Assert.Equal("stamp-b", stamp);
+        Assert.Equal(QuotaSlotStatus.Live, rotated.Find(ProviderSlotIds.CodexSecondary)!.Status);
+        Assert.Equal(60d, rotated.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent);
+        Assert.Equal(coordinator.ConfigurationKey(cliSettings.Slot(ProviderSlotIds.CodexSecondary)),
+            rotated.Find(ProviderSlotIds.CodexSecondary)!.ConfigFingerprint);
+
+        stamp = "stamp-c";
+        var changedView = coordinator.CurrentBoard(now, cliSettings);
+        Assert.True(changedView.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent is null);
+        Assert.Equal("config_changed", changedView.Find(ProviderSlotIds.CodexSecondary)!.ErrorCode);
+        mode = "auth";
+        var authFailed = await coordinator.RefreshAsync(cliSettings, PrimaryObservation(now), CancellationToken.None, true,
+            "primary-hash", primary).ConfigureAwait(false);
+        Assert.Equal(1, piCalls);
+        Assert.Equal(QuotaSlotStatus.NotConnected, authFailed.Find(ProviderSlotIds.CodexSecondary)!.Status);
+        Assert.Equal("app_server_initialize_exit", authFailed.Find(ProviderSlotIds.CodexSecondary)!.ErrorCode);
+        Assert.True(authFailed.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent is null);
+        Assert.Equal(0, authFailed.Find(ProviderSlotIds.CodexSecondary)!.Windows.Count);
+
+        mode = "cli";
+        identity = "account-a";
+        stamp = "stamp-d";
+        var restored = await coordinator.RefreshAsync(cliSettings, PrimaryObservation(now), CancellationToken.None, true,
+            "primary-hash", primary).ConfigureAwait(false);
+        Assert.Equal(60d, restored.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent);
+
+        var missingSettings = SixSlotSettings(true, Path.Combine(root, "missing-home"));
+        var missing = await coordinator.RefreshAsync(missingSettings, PrimaryObservation(now), CancellationToken.None,
+            true, "primary-hash", primary).ConfigureAwait(false);
+        Assert.Equal(SecondaryCodexHome.InvalidCode, missing.Find(ProviderSlotIds.CodexSecondary)!.ErrorCode);
+        Assert.Equal(QuotaSlotStatus.SetupRequired, missing.Find(ProviderSlotIds.CodexSecondary)!.Status);
+        Assert.True(missing.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent is null);
+        var callsAfterMissing = cliCalls;
+        var sameSettings = SixSlotSettings(true, primary + Path.DirectorySeparatorChar);
+        var same = await coordinator.RefreshAsync(sameSettings, PrimaryObservation(now), CancellationToken.None, true,
+            "primary-hash", primary).ConfigureAwait(false);
+        Assert.Equal(callsAfterMissing, cliCalls);
+        Assert.Equal(1, piCalls);
+        Assert.Equal(SecondaryCodexHome.SameCode, same.Find(ProviderSlotIds.CodexSecondary)!.ErrorCode);
+        Assert.Equal(0, same.Find(ProviderSlotIds.CodexSecondary)!.Windows.Count);
+        Assert.Equal(80d, same.PrimaryCodex!.GlanceRemainingPercent);
+
+        var realProfile = new CodexQuotaProfile();
+        var slot = new ProviderSlotSettings(ProviderSlotIds.CodexSecondary, "Codex 第二账户", true, cli);
+        var directMissing = await realProfile.ReadAsync(slot, Path.Combine(root, "missing-home"), false,
+            CancellationToken.None, primary).ConfigureAwait(false);
+        Assert.Equal(SecondaryCodexHome.InvalidCode, directMissing.ErrorCode);
+        var directSame = await realProfile.ReadAsync(slot, primary, false, CancellationToken.None, primary)
+            .ConfigureAwait(false);
+        Assert.Equal(SecondaryCodexHome.SameCode, directSame.ErrorCode);
+        Assert.True(!directSame.SuppliesLocalAnalysis);
+
+        var otherSettings = SixSlotSettings(true, other);
+        var staleOther = coordinator.CurrentBoard(now, otherSettings);
+        Assert.True(staleOther.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent is null);
+        var otherBoard = await coordinator.RefreshAsync(otherSettings, PrimaryObservation(now), CancellationToken.None,
+            true, "primary-hash", primary).ConfigureAwait(false);
+        Assert.Equal(30d, otherBoard.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent);
+        Assert.True(otherBoard.Find(ProviderSlotIds.CodexSecondary)!.GlanceText.Contains("CLI other",
+            StringComparison.Ordinal));
+
+        identity = "primary-hash";
+        var collided = await coordinator.RefreshAsync(otherSettings, PrimaryObservation(now), CancellationToken.None,
+            true, "primary-hash", primary).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.IdentityCollision, collided.Find(ProviderSlotIds.CodexSecondary)!.Status);
+        Assert.Equal("identity_collision", collided.Find(ProviderSlotIds.CodexSecondary)!.ErrorCode);
+        Assert.Equal(0, collided.Find(ProviderSlotIds.CodexSecondary)!.Windows.Count);
+        Assert.True(collided.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent is null);
+        Assert.Equal(80d, collided.PrimaryCodex!.GlanceRemainingPercent);
+        Assert.True(collided.PrimaryCodex.Windows.Count > 0);
+
+        var disabledSettings = SixSlotSettings(false, other);
+        var disabled = await coordinator.RefreshAsync(disabledSettings, PrimaryObservation(now), CancellationToken.None,
+            true, "primary-hash", primary).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.Disabled, disabled.Find(ProviderSlotIds.CodexSecondary)!.Status);
+        Assert.True(disabled.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent is null);
+
+        var backToPi = await coordinator.RefreshAsync(blank, PrimaryObservation(now), CancellationToken.None, true,
+            "primary-hash", primary).ConfigureAwait(false);
+        Assert.Equal(2, piCalls);
+        Assert.Equal(89d, backToPi.Find(ProviderSlotIds.CodexSecondary)!.GlanceRemainingPercent);
+        Assert.True(backToPi.Find(ProviderSlotIds.CodexSecondary)!.SourceDescription.Contains("wham/usage",
+            StringComparison.Ordinal));
+        Assert.True(!backToPi.Find(ProviderSlotIds.CodexSecondary)!.GlanceText.Contains("CLI", StringComparison.Ordinal));
+
+        var normalized = SecondaryCodexHome.Normalize(cli);
+        var stored = ProviderSettingKeys.ToStored(SixSlotSettings(true, cli + Path.DirectorySeparatorChar));
+        stored[ProviderSettingKeys.Label(ProviderSlotIds.CodexPrimary)] = "Codex 当前改名";
+        stored[ProviderSettingKeys.CompactLayout] = CompactLayoutModes.Card;
+        var reloaded = ProviderSettingKeys.FromStored(AsNullableSettings(stored));
+        Assert.Equal(normalized, reloaded.Slot(ProviderSlotIds.CodexSecondary).CodexHome);
+        Assert.Equal(CompactLayoutModes.Card, reloaded.CompactLayout);
+        stored[ProviderSettingKeys.CodexHome(ProviderSlotIds.CodexSecondary)] = "  ";
+        Assert.True(ProviderSettingKeys.FromStored(AsNullableSettings(stored))
+            .Slot(ProviderSlotIds.CodexSecondary).CodexHome is null);
+
+        var database = Path.Combine(root, "usage.db");
+        var log = Path.Combine(root, "hud.log");
+        using (var engine = new UsageEngine(primary, database, log, providers: coordinator))
+        {
+            await engine.SaveSettingsAsync(ProviderSettingKeys.ToStored(SixSlotSettings(true, cli)))
+                .ConfigureAwait(false);
+            Assert.Equal(Path.GetFullPath(primary), engine.BoundCodexHome);
+        }
+
+        using var restarted = new UsageEngine(primary, database, log);
+        var keys = ProviderSettingKeys.ToStored(ProviderAccessSettings.Default()).Keys.ToArray();
+        var loaded = ProviderSettingKeys.FromStored(await restarted.LoadSettingsAsync(keys).ConfigureAwait(false));
+        Assert.Equal(normalized, loaded.Slot(ProviderSlotIds.CodexSecondary).CodexHome);
+        Assert.Equal(Path.GetFullPath(primary), restarted.BoundCodexHome);
+        Assert.True(!restarted.BoundCodexHome.Contains("cli-home", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static IReadOnlyDictionary<string, string?> AsNullableSettings(Dictionary<string, string> values) =>
+        values.ToDictionary(pair => pair.Key, pair => (string?)pair.Value, StringComparer.Ordinal);
+
+    private static ProviderAccessSettings SixSlotSettings(bool secondaryEnabled, string? secondaryHome)
+    {
+        var defaults = ProviderAccessSettings.Default();
+        var slots = defaults.Slots.Select(slot =>
+            slot.SlotId == ProviderSlotIds.CodexSecondary
+                ? slot with { Enabled = secondaryEnabled, CodexHome = secondaryHome }
+                : slot).ToArray();
+        return new ProviderAccessSettings(slots, defaults.CompactLayout, true);
+    }
+
+    private static string RenderSecondaryCliSynthetic(string outputDirectory)
+    {
+        const string syntheticHome = @"C:\synthetic\codex-cli-home";
+        Directory.CreateDirectory(outputDirectory);
+        var dataDirectory = Path.Combine(outputDirectory, "data");
+        var codexHome = Path.Combine(dataDirectory, "codex-home");
+        Directory.CreateDirectory(Path.Combine(codexHome, "sessions"));
+        EnsureWpfTestApplication();
+        using var engine = new UsageEngine(codexHome, Path.Combine(dataDirectory, "usage.db"),
+            Path.Combine(dataDirectory, "hud.log"));
+        using var window = new MainWindow(engine, () => Task.CompletedTask, false);
+        window.ShowActivated = false;
+        window.ShowInTaskbar = false;
+        window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+        window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(0, 0, 1920, 1080));
+        var restored = typeof(MainWindow).GetField("_restoredSettings",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("restored_settings_missing");
+        var values = (Dictionary<string, string?>)(restored.GetValue(window)
+            ?? throw new InvalidOperationException("restored_settings_empty"));
+        values[ProviderSettingKeys.Enabled(ProviderSlotIds.CodexSecondary)] = "1";
+        values[ProviderSettingKeys.CodexHome(ProviderSlotIds.CodexSecondary)] = syntheticHome;
+        values[ProviderSettingKeys.Label(ProviderSlotIds.CodexSecondary)] = "Codex 第二账户";
+        window.Show();
+        var viewModel = (MainViewModel)(typeof(MainWindow).GetField("_viewModel",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue(window) ?? throw new InvalidOperationException("view_model_missing"));
+        viewModel.IsExpanded = true;
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        InvokeWindowMethod(window, "SyncSettingsControls");
+        var homeBox = (System.Windows.Controls.TextBox)(window.FindName("SlotCodexSecondaryHome")
+            ?? throw new InvalidOperationException("home_box_missing"));
+        var presence = (System.Windows.Controls.TextBlock)(window.FindName("PiCodexPresenceText")
+            ?? throw new InvalidOperationException("presence_missing"));
+        Assert.Equal(syntheticHome, homeBox.Text);
+        var label = (System.Windows.Controls.TextBox)window.FindName("SlotCodexPrimaryLabel")!;
+        label.Text = "Codex 当前改名";
+        var captured = (Dictionary<string, string>)InvokeWindowReturning(window, "CaptureWindowSettings");
+        Assert.Equal(syntheticHome, captured[ProviderSettingKeys.CodexHome(ProviderSlotIds.CodexSecondary)]);
+        var layout = (System.Windows.Controls.ComboBox)window.FindName("CompactLayoutComboBox")!;
+        layout.SelectedIndex = 1;
+        captured = (Dictionary<string, string>)InvokeWindowReturning(window, "CaptureWindowSettings");
+        Assert.Equal(syntheticHome, captured[ProviderSettingKeys.CodexHome(ProviderSlotIds.CodexSecondary)]);
+        Assert.Equal(CompactLayoutModes.Card, captured[ProviderSettingKeys.CompactLayout]);
+        homeBox.Text = "  ";
+        captured = (Dictionary<string, string>)InvokeWindowReturning(window, "CaptureWindowSettings");
+        Assert.Equal(string.Empty, captured[ProviderSettingKeys.CodexHome(ProviderSlotIds.CodexSecondary)]);
+        homeBox.Text = syntheticHome;
+        InvokeWindowMethod(window, "UpdateSecondarySourcePresence");
+        var settingsPanel = (System.Windows.FrameworkElement)(window.FindName("SettingsPanel")
+            ?? throw new InvalidOperationException("settings_panel_missing"));
+        settingsPanel.Visibility = System.Windows.Visibility.Visible;
+        window.UpdateLayout();
+        var scroller = FindVisualChild<System.Windows.Controls.ScrollViewer>(settingsPanel);
+        if (scroller is not null)
+        {
+            var point = homeBox.TransformToAncestor(scroller).Transform(new System.Windows.Point(0, -48));
+            scroller.ScrollToVerticalOffset(Math.Max(0, point.Y));
+            window.UpdateLayout();
+        }
+        RenderWindow(window, Path.Combine(outputDirectory, "secondary-cli-settings.png"));
+        Assert.True(presence.Text.Contains("不会改回 PI", StringComparison.Ordinal));
+        Assert.True(VisualContainsText(settingsPanel, "可选 Codex CLI 主目录"));
+        Assert.True(VisualContainsText(settingsPanel, syntheticHome));
+        Assert.True(!VisualContainsText(settingsPanel, ".codex-plus-cli"));
+
+        var observed = DateTimeOffset.Parse("2026-08-05T02:38:24Z", CultureInfo.InvariantCulture);
+        var primarySlot = new ProviderSlotSnapshot(ProviderSlotIds.CodexPrimary, ProviderIds.Codex, "Codex 当前",
+            true, true, QuotaSlotStatus.Live, "官方 App Server", observed,
+            "Codex App Server account/rateLimits/read",
+            new[] { new QuotaWindowObservation("primary", "Codex 5h", 15, observed.AddHours(4), 300, true) },
+            "primary-only");
+        var secondarySlot = new ProviderSlotSnapshot(ProviderSlotIds.CodexSecondary, ProviderIds.Codex, "Codex 第二账户",
+            true, false, QuotaSlotStatus.Live, "官方 App Server", observed,
+            SecondaryCodexHome.CliSourceDescription,
+            new[]
+            {
+                new QuotaWindowObservation("session", "5 小时", 28, observed.AddHours(3), 300, true),
+                new QuotaWindowObservation("weekly", "每周", 60, observed.AddDays(4), 10080, true),
+            },
+            "secondary-only");
+        var quota = new QuotaObservation(new QuotaBucket("primary", "Codex 5h", 15, 300, observed.AddHours(4)),
+            Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, observed, false);
+        viewModel.Apply(new HudSnapshot(quota, Array.Empty<SessionAggregate>(), null, observed, false, "synthetic",
+            Array.Empty<string>(), Providers: new ProviderQuotaBoard(new[] { primarySlot, secondarySlot }, observed)));
+        viewModel.SelectSlot(ProviderSlotIds.CodexPrimary, true);
+        Assert.True(viewModel.SelectedSlotSuppliesAnalysis);
+        viewModel.SelectSlot(ProviderSlotIds.CodexSecondary, true);
+        Assert.True(!viewModel.SelectedSlotSuppliesAnalysis);
+        Assert.True(viewModel.SlotDetailSource.Contains("Codex CLI App Server", StringComparison.Ordinal));
+        Assert.Equal(2, viewModel.SlotDetailWindows.Count);
+        InvokeWindowMethod(window, "PlaceSlotDetailPopup");
+        window.UpdateLayout();
+        var popupHost = (System.Windows.FrameworkElement)(window.FindName("SlotDetailHost")
+            ?? throw new InvalidOperationException("detail_host_missing"));
+        var analysis = (System.Windows.UIElement)(window.FindName("OpenPrimaryAnalysisButton")
+            ?? throw new InvalidOperationException("analysis_button_missing"));
+        Assert.Equal(System.Windows.Visibility.Collapsed, analysis.Visibility);
+        RenderElement(popupHost, Path.Combine(outputDirectory, "secondary-cli-detail.png"));
+        Assert.True(VisualContainsText(popupHost, "5 小时"));
+        Assert.True(VisualContainsText(popupHost, "每周"));
+        Assert.True(VisualContainsText(popupHost, SecondaryCodexHome.CliSourceDescription));
+        File.WriteAllText(Path.Combine(outputDirectory, "INSPECTION.txt"),
+            "SYNTHETIC secondary CLI settings and detail. Fixture 2026-08-05T02:38:24Z is not live quota.\r\n" +
+            "settings_home=synthetic\r\n" +
+            "presence=" + presence.Text.Replace('\r', ' ').Replace('\n', ' ') + "\r\n" +
+            "detail_source=cli\r\n" +
+            "detail_title=" + viewModel.SlotDetailTitle + "\r\n" +
+            "windows=" + viewModel.SlotDetailWindows.Count + "\r\n" +
+            "analysis_button=collapsed\r\n");
+        return File.ReadAllText(Path.Combine(outputDirectory, "INSPECTION.txt"));
+    }
+
+    private static object InvokeWindowReturning(MainWindow window, string name)
+    {
+        var method = typeof(MainWindow).GetMethod(name,
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException("window_method_missing:" + name);
+        return method.Invoke(window, null) ?? throw new InvalidOperationException("window_method_null:" + name);
+    }
+
+    private static bool VisualContainsText(System.Windows.DependencyObject root, string text)
+    {
+        if (root is System.Windows.Controls.TextBlock block &&
+            block.Text.Contains(text, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        if (root is System.Windows.Controls.TextBox box &&
+            box.Text.Contains(text, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var count = System.Windows.Media.VisualTreeHelper.GetChildrenCount(root);
+        for (var index = 0; index < count; index++)
+        {
+            if (VisualContainsText(System.Windows.Media.VisualTreeHelper.GetChild(root, index), text))
+                return true;
+        }
+
+        return false;
+    }
+
     private sealed class ScriptedCodexProfile : CodexQuotaProfile
     {
         private readonly Func<ProviderSlotSettings, string?, CancellationToken, Task<ProviderSlotSnapshot>> _read;
@@ -5232,9 +5713,16 @@ internal static class Program
             Func<ProviderSlotSettings, string?, CancellationToken, Task<ProviderSlotSnapshot>> read) =>
             _read = read;
 
+        public bool? LastSuppliesLocalAnalysis { get; private set; }
+        public string? LastIsolatedHome { get; private set; }
+
         public override Task<ProviderSlotSnapshot> ReadAsync(ProviderSlotSettings settings, string? isolatedHome,
-            bool suppliesLocalAnalysis, CancellationToken cancellationToken, string? primaryHome = null) =>
-            _read(settings, isolatedHome, cancellationToken);
+            bool suppliesLocalAnalysis, CancellationToken cancellationToken, string? primaryHome = null)
+        {
+            LastSuppliesLocalAnalysis = suppliesLocalAnalysis;
+            LastIsolatedHome = isolatedHome;
+            return _read(settings, isolatedHome, cancellationToken);
+        }
     }
 
     private sealed class ScriptedPiCodexAdapter : PiCodexQuotaAdapter

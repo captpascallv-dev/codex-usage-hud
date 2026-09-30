@@ -234,6 +234,23 @@ public static class SecondaryCodexHome
     public const string SameStatusText = "与当前 Codex 主目录相同，不能作为第二账户";
     public const string SameDetail = "请选择另一个 Codex 目录";
     public const string SameCode = "codex_home_same_as_primary";
+    public const string CliSourceDescription = "Codex CLI App Server account/rateLimits/read · 第二账户主目录";
+
+    public static bool UsesCli(string? home) => !string.IsNullOrWhiteSpace(home);
+
+    public static string? Normalize(string? home)
+    {
+        if (string.IsNullOrWhiteSpace(home)) return null;
+        var trimmed = home.Trim();
+        try
+        {
+            return Path.GetFullPath(trimmed).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        }
+        catch (Exception)
+        {
+            return trimmed;
+        }
+    }
 
     public static SecondaryHomeStatus Classify(string? home, string? primaryHome)
     {
@@ -392,7 +409,7 @@ public static class ProviderSettingKeys
             {
                 Label = string.IsNullOrWhiteSpace(label) ? slot.Label : label.Trim(),
                 Enabled = enabled,
-                CodexHome = string.IsNullOrWhiteSpace(home) ? slot.CodexHome : home.Trim(),
+                CodexHome = SecondaryCodexHome.Normalize(string.IsNullOrWhiteSpace(home) ? slot.CodexHome : home),
             };
         }).ToArray();
         var layout = values.GetValueOrDefault(CompactLayout);
@@ -417,7 +434,9 @@ public static class ProviderSettingKeys
         {
             values[Label(slot.SlotId)] = slot.Label;
             values[Enabled(slot.SlotId)] = slot.Enabled ? "1" : "0";
-            if (!string.IsNullOrWhiteSpace(slot.CodexHome))
+            if (string.Equals(slot.SlotId, ProviderSlotIds.CodexSecondary, StringComparison.Ordinal))
+                values[CodexHome(slot.SlotId)] = slot.CodexHome ?? string.Empty;
+            else if (!string.IsNullOrWhiteSpace(slot.CodexHome))
                 values[CodexHome(slot.SlotId)] = slot.CodexHome;
         }
 

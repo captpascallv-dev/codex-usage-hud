@@ -343,7 +343,8 @@ public sealed record QuotaObservation(
     QuotaSource Source,
     DateTimeOffset ObservedAtUtc,
     bool IsStale,
-    string? ErrorCode = null);
+    string? ErrorCode = null,
+    string? PlanType = null);
 
 public sealed record ResetSignal(
     DateTimeOffset ObservedAtUtc,
@@ -519,7 +520,8 @@ public sealed record AppServerReadResult(
 public sealed record AppServerQuotaIdentityResult(
     AppServerReadResult Quota,
     BoundAccountIdentity? Identity,
-    AccountIdentityShape? IdentityShape = null);
+    AccountIdentityShape? IdentityShape = null,
+    string? PlanType = null);
 
 public sealed record HudSnapshot(
     QuotaObservation Quota,

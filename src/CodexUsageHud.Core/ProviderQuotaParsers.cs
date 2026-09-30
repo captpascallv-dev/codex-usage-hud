@@ -792,6 +792,29 @@ public static class AccountIdentityParser
 {
     public static string? ParseOpaqueHash(string? json) => Parse(json)?.Hash;
 
+    public static string? ReadPlanType(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        try
+        {
+            using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 16 });
+            var root = document.RootElement;
+            if (root.TryGetProperty("error", out _)) return null;
+            var result = root.TryGetProperty("result", out var resultElement) &&
+                         resultElement.ValueKind == JsonValueKind.Object
+                ? resultElement
+                : root;
+            var plan = JsonQuotaFields.GetString(result, "planType", "plan_type");
+            if (result.TryGetProperty("account", out var account) && account.ValueKind == JsonValueKind.Object)
+                plan ??= JsonQuotaFields.GetString(account, "planType", "plan_type");
+            return QuotaJsonParser.SanitizePlanType(plan);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     public static BoundAccountIdentity? Parse(string? json) => Parse(json, out _);
 
     public static BoundAccountIdentity? Parse(string? json, out AccountIdentityShape shape)

@@ -14,6 +14,7 @@ public static class AppServerProtocol
     public const string ReadOnlyFlag = "-s read-only -a never app-server";
 
     public const string AccountReadMethod = "account/read";
+    public const string InitializedMethod = "initialized";
 
     public static ProcessStartInfo CreateStartInfo(string executable,
         IReadOnlyDictionary<string, string>? isolatedEnvironment = null)
@@ -292,10 +293,7 @@ public sealed class AppServerClient
             stderrDrain = DrainAsync(stderr, drainCancellation.Token);
             using var startupTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             startupTimeout.CancelAfter(_startupTimeout);
-            await WriteRequestAsync(process, 1, AppServerProtocol.InitializeMethod,
-                new { clientInfo = new { name = "codex-usage-hud", version = _hudVersion } }, startupTimeout.Token);
-            var initialize = await ReadResponseAsync(stdout, 1, startupTimeout.Token);
-            if (initialize is null)
+            if (!await InitializeSessionAsync(process, stdout, startupTimeout.Token).ConfigureAwait(false))
             {
                 return Unavailable(HasExited(process) ? "app_server_initialize_exit" : "app_server_initialize_eof");
             }
@@ -361,10 +359,7 @@ public sealed class AppServerClient
             stderrDrain = DrainAsync(stderr, drainCancellation.Token);
             using var startupTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             startupTimeout.CancelAfter(_startupTimeout);
-            await WriteRequestAsync(process, 1, AppServerProtocol.InitializeMethod,
-                new { clientInfo = new { name = "codex-usage-hud", version = _hudVersion } }, startupTimeout.Token);
-            var initialize = await ReadResponseAsync(stdout, 1, startupTimeout.Token);
-            if (initialize is null)
+            if (!await InitializeSessionAsync(process, stdout, startupTimeout.Token).ConfigureAwait(false))
             {
                 return new AppServerQuotaIdentityResult(
                     Unavailable(HasExited(process) ? "app_server_initialize_exit" : "app_server_initialize_eof"),
@@ -391,11 +386,20 @@ public sealed class AppServerClient
             {
                 using var identityTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 identityTimeout.CancelAfter(_requestTimeout);
-                await WriteRequestAsync(process, 3, AppServerProtocol.AccountReadMethod, new { },
-                    identityTimeout.Token);
+                await WriteRequestAsync(process, 3, AppServerProtocol.AccountReadMethod,
+                    new { refreshToken = false }, identityTimeout.Token);
                 var identityResponse = await ReadResponseAsync(stdout, 3, identityTimeout.Token);
                 identity = AccountIdentityParser.Parse(identityResponse, out var identityShape);
-                return new AppServerQuotaIdentityResult(quota, identity, identityShape);
+                var accountPlan = AccountIdentityParser.ReadPlanType(identityResponse);
+                var planType = observation.PlanType;
+                if (string.IsNullOrWhiteSpace(planType))
+                    planType = accountPlan;
+                else if (!string.IsNullOrWhiteSpace(accountPlan) &&
+                         !string.Equals(planType, accountPlan, StringComparison.Ordinal))
+                    planType = null;
+                observation = observation with { PlanType = planType };
+                quota = quota with { Observation = observation };
+                return new AppServerQuotaIdentityResult(quota, identity, identityShape, planType);
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
@@ -446,10 +450,9 @@ public sealed class AppServerClient
             stderrDrain = DrainAsync(stderr, drainCancellation.Token);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(_requestTimeout);
-            await WriteRequestAsync(process, 1, AppServerProtocol.InitializeMethod,
-                new { clientInfo = new { name = "codex-usage-hud", version = _hudVersion } }, timeout.Token);
-            if (await ReadResponseAsync(stdout, 1, timeout.Token) is null) return null;
-            await WriteRequestAsync(process, 2, AppServerProtocol.AccountReadMethod, new { }, timeout.Token);
+            if (!await InitializeSessionAsync(process, stdout, timeout.Token).ConfigureAwait(false)) return null;
+            await WriteRequestAsync(process, 2, AppServerProtocol.AccountReadMethod,
+                new { refreshToken = false }, timeout.Token);
             var response = await ReadResponseAsync(stdout, 2, timeout.Token);
             return AccountIdentityParser.Parse(response)?.Hash;
         }
@@ -496,9 +499,7 @@ public sealed class AppServerClient
             stderrDrain = DrainAsync(stderr, drainCancellation.Token);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(_requestTimeout);
-            await WriteRequestAsync(process, 1, AppServerProtocol.InitializeMethod,
-                new { clientInfo = new { name = "codex-usage-hud", version = _hudVersion } }, timeout.Token);
-            if (await ReadResponseAsync(stdout, 1, timeout.Token) is null)
+            if (!await InitializeSessionAsync(process, stdout, timeout.Token).ConfigureAwait(false))
             {
                 return null;
             }
@@ -525,10 +526,31 @@ public sealed class AppServerClient
         }
     }
 
+    private async Task<bool> InitializeSessionAsync(Process process, BoundedLineReader stdout,
+        CancellationToken cancellationToken)
+    {
+        await WriteRequestAsync(process, 1, AppServerProtocol.InitializeMethod,
+            new { clientInfo = new { name = "codex-usage-hud", version = _hudVersion } }, cancellationToken)
+            .ConfigureAwait(false);
+        if (await ReadResponseAsync(stdout, 1, cancellationToken).ConfigureAwait(false) is null)
+            return false;
+        await WriteNotificationAsync(process, AppServerProtocol.InitializedMethod, new { }, cancellationToken)
+            .ConfigureAwait(false);
+        return true;
+    }
+
     private static async Task WriteRequestAsync(Process process, int id, string method, object parameters,
         CancellationToken cancellationToken)
     {
         var request = JsonSerializer.Serialize(new { jsonrpc = "2.0", id, method, @params = parameters });
+        await process.StandardInput.WriteLineAsync(request.AsMemory(), cancellationToken);
+        await process.StandardInput.FlushAsync(cancellationToken);
+    }
+
+    private static async Task WriteNotificationAsync(Process process, string method, object parameters,
+        CancellationToken cancellationToken)
+    {
+        var request = JsonSerializer.Serialize(new { jsonrpc = "2.0", method, @params = parameters });
         await process.StandardInput.WriteLineAsync(request.AsMemory(), cancellationToken);
         await process.StandardInput.FlushAsync(cancellationToken);
     }
@@ -702,6 +724,8 @@ public static class QuotaJsonParser
         try
         {
             using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 32 });
+            if (TryReadIndependentLimits(document.RootElement, observedAtUtc, out var independent))
+                return independent;
             var buckets = new List<QuotaBucket>();
             var invalidWindowDetected = false;
             CollectBuckets(document.RootElement, buckets, null, ref invalidWindowDetected);
@@ -721,6 +745,118 @@ public static class QuotaJsonParser
             return new QuotaObservation(null, Array.Empty<QuotaBucket>(), QuotaSource.Unavailable, observedAtUtc, false,
                 "quota_json_invalid");
         }
+    }
+
+    private static bool TryReadIndependentLimits(JsonElement root, DateTimeOffset observedAtUtc,
+        out QuotaObservation observation)
+    {
+        observation = null!;
+        var payload = root;
+        if (root.ValueKind == JsonValueKind.Object &&
+            root.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.Object)
+        {
+            payload = result;
+        }
+
+        if (payload.ValueKind != JsonValueKind.Object ||
+            !payload.TryGetProperty("rateLimitsByLimitId", out var map) ||
+            map.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var buckets = new List<QuotaBucket>();
+        var invalid = false;
+        string? plan = SanitizePlanType(GetString(payload, "planType") ?? GetString(payload, "plan_type"));
+        var planConflict = false;
+        foreach (var property in map.EnumerateObject())
+        {
+            if (property.Value.ValueKind != JsonValueKind.Object) continue;
+            ReadLimitEntry(property.Name, property.Value, buckets, ref invalid, ref plan, ref planConflict);
+        }
+
+        if (planConflict) plan = null;
+        if (invalid)
+        {
+            observation = new QuotaObservation(null, Array.Empty<QuotaBucket>(), QuotaSource.Unavailable,
+                observedAtUtc, false, "quota_window_invalid");
+            return true;
+        }
+
+        var distinct = buckets.GroupBy(bucket => bucket.Id, StringComparer.Ordinal)
+            .Select(group => group.First())
+            .OrderBy(bucket => bucket.Id, StringComparer.Ordinal)
+            .ToArray();
+        var primary = SelectPrimary(distinct, out var errorCode);
+        observation = new QuotaObservation(primary,
+            distinct.Where(bucket => primary is null || !string.Equals(bucket.Id, primary.Id, StringComparison.Ordinal))
+                .ToArray(),
+            primary is null ? QuotaSource.Unavailable : QuotaSource.OfficialAppServer,
+            observedAtUtc, false, errorCode, plan);
+        return true;
+    }
+
+    private static void ReadLimitEntry(string key, JsonElement entry, List<QuotaBucket> buckets,
+        ref bool invalid, ref string? plan, ref bool planConflict)
+    {
+        var limitId = GetString(entry, "limitId") ?? GetString(entry, "limit_id") ?? key;
+        if (string.IsNullOrWhiteSpace(limitId)) return;
+        var limitName = GetString(entry, "limitName") ?? GetString(entry, "limit_name");
+        var label = string.IsNullOrWhiteSpace(limitName) ? limitId : limitName;
+        NotePlan(GetString(entry, "planType") ?? GetString(entry, "plan_type"), ref plan, ref planConflict);
+        var hasPrimary = entry.TryGetProperty("primary", out var primary) &&
+                         primary.ValueKind == JsonValueKind.Object;
+        var hasSecondary = entry.TryGetProperty("secondary", out var secondary) &&
+                           secondary.ValueKind == JsonValueKind.Object;
+        if (!hasPrimary && !hasSecondary)
+        {
+            AddLimitWindow(entry, limitId, label, false, buckets, ref invalid);
+            return;
+        }
+
+        if (hasPrimary)
+            AddLimitWindow(primary, limitId, label, false, buckets, ref invalid);
+        if (hasSecondary)
+            AddLimitWindow(secondary, limitId + "/secondary", label, true, buckets, ref invalid);
+    }
+
+    private static void AddLimitWindow(JsonElement element, string id, string label, bool secondary,
+        List<QuotaBucket> buckets, ref bool invalid)
+    {
+        if (!TryReadBucket(element, id, out var bucket, out var windowInvalid))
+        {
+            invalid |= windowInvalid;
+            return;
+        }
+
+        var duration = bucket.WindowDurationMinutes.ToString(CultureInfo.InvariantCulture);
+        var name = secondary
+            ? label + " · secondary · " + duration + " 分钟"
+            : label + " · " + duration + " 分钟";
+        buckets.Add(bucket with { Id = id, Name = name });
+    }
+
+    private static void NotePlan(string? raw, ref string? plan, ref bool conflict)
+    {
+        var sanitized = SanitizePlanType(raw);
+        if (sanitized is null) return;
+        if (plan is null)
+            plan = sanitized;
+        else if (!string.Equals(plan, sanitized, StringComparison.Ordinal))
+            conflict = true;
+    }
+
+    internal static string? SanitizePlanType(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        var trimmed = value.Trim();
+        if (trimmed.Length is 0 or > 32) return null;
+        foreach (var character in trimmed)
+        {
+            if (character is not '_' and not '-' && !char.IsAsciiLetterOrDigit(character)) return null;
+        }
+
+        return trimmed;
     }
 
     private static void CollectBuckets(JsonElement element, List<QuotaBucket> buckets, string? nameHint,

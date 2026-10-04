@@ -28,6 +28,23 @@ Codex Usage HUD 是一个非官方的 Windows 10/11 x64 本地伴侣应用。它
 Windows 可能因为应用尚未购买代码签名证书而显示 SmartScreen 提示。Release 同时提供
 SHA-256 校验文件，用于确认下载内容没有发生变化。
 
+本仓库准备的公开版本是 1.1.2。下载 GitHub Releases 里的
+`CodexUsageHUD-win-x64.zip`，并用同页提供的 SHA-256 文件核对。
+
+已安装便携版时：先从托盘菜单选择“退出”，再解压新的 ZIP 并替换原来的程序文件，然后重新打开。
+已有的 `%LOCALAPPDATA%\CodexUsageHUD` 数据和设置不会被这次替换删除。ZIP 里没有安装程序，
+也不会重置登录、迁移数据，或写入任何额度槽的启用选择。
+
+### v1.1.2
+
+相对已公开的 v1.1.1，这一版包含三处已接受的使用变化：
+
+- 增加独立的 Claude 订阅额度槽，默认关闭。同一账户暂时读失败时保留上次观测，并标为“更新延迟”；接口返回的有效每周窗口和模型窗口在 `is_active` 为 false 时仍然显示。Claude Code 已有登录优先；没有可用访问令牌时，才使用当前 Claude Desktop 配置里的一个未过期访问令牌。
+- 第二 Codex 额度可以改用设置中明确填写的 CLI 主目录。留空时仍兼容本机 PI 的 ChatGPT/Codex 登录。填写后只读该目录，失败不回退、不混用账户，也不分析第二套会话。
+- 左、右、顶部自动隐藏被唤出时，卡片会升到与其重叠的窗口之上，且不取得键盘焦点。图钉和已保存的始终置顶不变；未开启置顶时，卡片再次隐藏后结束这次临时升层。
+
+隐私、本地数据保留、停靠、托盘和开机启动的既有语义保持不变。应用仍未签名。
+
 ### Claude 订阅额度槽
 
 在原有五个额度槽之外增加独立的 Claude 订阅槽，默认关闭，已有用户的启用状态保持不变。
@@ -163,7 +180,14 @@ treating the file timestamp as a logout. Prompts, responses, and credential
 values are never collected, logged, or shown.
 Download the ready-to-run Windows package from
 [Releases](https://github.com/captpascallv-dev/codex-usage-hud/releases/latest), or build
-the source with the project-local scripts below.
+the source with the project-local scripts below. This source package is v1.1.2.
+Since the published v1.1.1 download it adds an optional, default-off Claude
+subscription quota slot, an explicit secondary Codex CLI home that stays on PI
+when blank, and a no-focus raise when a docked auto-hidden card is revealed.
+To upgrade a portable copy, exit the old HUD from the tray, replace the program
+files from the new ZIP, and open it again. Existing data and settings under
+`%LOCALAPPDATA%\CodexUsageHUD` are left in place. The ZIP has no installer,
+login reset, data migration, or enabled-provider choices.
 
 ## 系统要求
 

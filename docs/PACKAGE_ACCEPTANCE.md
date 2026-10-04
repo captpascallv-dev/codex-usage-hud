@@ -1,6 +1,6 @@
 # Codex Usage HUD — package acceptance summary
 
-Build: `1.1.1` — PI-backed Codex renewal and Grok quota visibility fixes.
+Build: `1.1.2` — optional Claude subscription quota, an explicit secondary Codex CLI home, and no-focus edge reveal. The five original slots remain; Claude is a sixth slot and defaults off.
 
 This summary describes the published interface and its validation scope. It
 contains no real local usage, session identifiers, credentials or machine paths.
@@ -18,8 +18,8 @@ contains no real local usage, session identifiers, credentials or machine paths.
 - Continuation details and manual drift controls are expandable. Their
   underlying calculations and meanings are unchanged.
 - Vertical compact card remains 224 by 324 logical pixels; the top bar is 660 by 80.
-  The default collapsed layout is a five-slot rail, 252 logical pixels wide, with
-  height measured from the five provider rows and capped to the current work area
+  The default collapsed layout is a six-slot rail, 252 logical pixels wide, with
+  height measured from the six provider rows and capped to the current work area
   (scroll appears only when that cap is tighter than the content). The top rail
   prefers 1100 by 78 and stacks to a 96-high layout near 640; it does not force a
   640 minimum that would overflow a narrower work area. The previous card remains
@@ -29,7 +29,11 @@ contains no real local usage, session identifiers, credentials or machine paths.
 - The tray uses a dedicated system-font mark instead of a shrunken screenshot
   of the entire compact card.
 
-## Five quota slots
+## Quota slots
+
+The rail keeps the five original slots and adds one optional Claude subscription
+slot. Claude defaults off. Enabling it does not change the other slots' saved
+choices, and the ZIP does not write anyone's enabled-slot choices.
 
 - Primary Codex uses the local App Server `account/rateLimits/read`. Session
   analysis stays on the owner-confirmed primary home.
@@ -40,6 +44,12 @@ contains no real local usage, session identifiers, credentials or machine paths.
 - Cursor, Grok and Grok Bot default off. After the user enables a slot, the HUD
   reads only the necessary existing-login field and calls that service's own
   quota endpoint. Missing login is 未连接, never a fake 0% or 100%.
+- Claude is quota-only and defaults off. A transient failure for the same account
+  keeps the last observation and is marked 更新延迟. Valid weekly and model windows
+  stay visible when `is_active` is false. Existing Claude Code login is preferred;
+  when that file has no usable access token, the already accepted fallback uses
+  one unexpired token from the current Claude Desktop profile. There is no Claude
+  session analysis and no credential refresh.
 - Grok access-key expiry with a remaining refresh grant runs the official
   installed `grok models` CLI so Grok can lock and rewrite its own login file.
   The HUD does not write `auth.json` and does not treat a file timestamp as
@@ -71,6 +81,21 @@ with two windows. A real credential was not force-expired to exercise the HUD
 renewal branch. The local compact WPF rail was not visually targetable by the
 automation, so its text was not independently confirmed on-screen.
 
+v1.1.2 packages the accepted source after public v1.1.1. It does not replay the
+full automated catalog and does not treat the older catalog count as a product
+PASS. Accepted behavior covered here: the Claude slot stays off until enabled;
+a same-account transient failure keeps the last observation and is marked
+更新延迟; valid weekly and model windows stay visible when `is_active` is false.
+The second Codex slot uses an explicitly configured CLI home when one is saved;
+an empty home keeps the PI login, with no fallback, account mixing, or secondary
+conversation analysis. Auto-hidden left, right, and top reveal raises the card
+above overlapping windows without taking keyboard focus. The pin control and the
+saved always-on-top preference stay unchanged, and hide still respects that
+preference. Synthetic native product-event focus and z-order evidence was
+accepted for that raise. The maintainer personally confirmed the installed
+right-edge experience. This summary does not claim a new physical hover, a live
+provider read, an overnight soak, or a multi-monitor soak.
+
 A green test result does not replace the real window and interaction checks.
 
 ## Package and operating boundaries
@@ -81,6 +106,11 @@ manifest, starts and exits an isolated instance, extracts the ZIP and checks
 the SHA-256 sidecar. A source build or this document alone is not proof that a
 particular package passed those steps; retain the publishing result alongside
 the artifact.
+
+A normal portable upgrade is: exit the old HUD from the tray, unpack the new ZIP
+over the program files, and open the EXE again. Existing data and settings under
+`%LOCALAPPDATA%\CodexUsageHUD` are not deleted. The ZIP contains no installer,
+no authentication reset, no data migration, and no enabled-provider choices.
 
 Local installation and public GitHub publication are separate operations.
 
@@ -101,8 +131,9 @@ message bodies or browser storage. Runtime may keep an in-memory copy of an
 enabled provider's necessary login field for that request only. The v1.0.2
 lineage-aware deduplication and current-cycle filtering are retained.
 
-The automated catalog currently includes 127 checks. That count is evidence,
-not product PASS.
+The automated catalog was previously recorded at 127 checks. That historical
+count is evidence from earlier releases, not a product PASS for v1.1.2. This
+release preparation did not rerun the full suite.
 
 ## Limits
 

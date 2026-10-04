@@ -140,7 +140,8 @@ public partial class App : System.Windows.Application
             activationServer = new SingleInstanceActivationServer(localData, QueueActivationAsync);
             var codexHome = IsolatedPreviewLaunch.ResolveCodexHome(arguments);
             var engine = new UsageEngine(codexHome, Path.Combine(localData, "usage.db"),
-                Path.Combine(localData, "hud.log"));
+                Path.Combine(localData, "hud.log"),
+                productVersion: HudReleaseVersion.FromAssembly(typeof(App).Assembly));
             return new StartupRuntime(outcome, gateCode, localData, gate, engine, activationServer);
         }
         catch

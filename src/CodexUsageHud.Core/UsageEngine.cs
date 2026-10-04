@@ -28,6 +28,7 @@ public sealed class UsageEngine : IDisposable
     private readonly HashSet<string> _pendingPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<FileSystemWatcher> _watchers = new();
     private readonly AppIoQueue _appIo;
+    private readonly QuotaSnapshotWriter _quotaSnapshots;
     private IReadOnlyList<RolloutFile> _files = Array.Empty<RolloutFile>();
     private Dictionary<string, ThreadMetadataRow> _metadataByPath = new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<ThreadMetadataRow> _metadataRows = Array.Empty<ThreadMetadataRow>();
@@ -48,7 +49,8 @@ public sealed class UsageEngine : IDisposable
     private bool _disposed;
 
     public UsageEngine(string codexHome, string databasePath, string? logPath = null,
-        Action<string>? appIoBeforeOperation = null, ProviderQuotaCoordinator? providers = null)
+        Action<string>? appIoBeforeOperation = null, ProviderQuotaCoordinator? providers = null,
+        QuotaSnapshotWriter? quotaSnapshots = null, string? productVersion = null)
     {
         _codexHome = CodexHomeResolver.Resolve(codexHome);
         _database = new UsageDatabase(databasePath);
@@ -59,6 +61,10 @@ public sealed class UsageEngine : IDisposable
         _quotaState = new QuotaStateMachine(_database);
         _quota = _quotaState.RestoreForDisplay();
         _providers = providers ?? new ProviderQuotaCoordinator();
+        var dataDirectory = Path.GetDirectoryName(Path.GetFullPath(databasePath));
+        _quotaSnapshots = quotaSnapshots ?? new QuotaSnapshotWriter(
+            string.IsNullOrEmpty(dataDirectory) ? Path.GetFullPath(".") : dataDirectory,
+            string.IsNullOrWhiteSpace(productVersion) ? HudReleaseVersion.FromEntryAssembly() : productVersion);
         _providers.SlotPublished += OnProviderSlotPublished;
         _providersBoard = _providers.CurrentBoard(DateTimeOffset.UtcNow, _providerSettings);
         InitializeWatchers();
@@ -127,6 +133,12 @@ public sealed class UsageEngine : IDisposable
         _appIo.SetSessionDriftAssessmentAsync(threadId, level, DateTimeOffset.UtcNow);
     public Task WriteLogCodeAsync(string code, string? relativePath = null, long? offset = null) =>
         _appIo.WriteLogCodeAsync(code, relativePath, offset);
+    public void SetQuotaSnapshotExportEnabled(bool enabled) => _quotaSnapshots.SetEnabled(enabled);
+
+    public void ExportCurrentQuotaSnapshot() => TryExportQuotaSnapshot(_providersBoard);
+
+    public Task FlushQuotaSnapshotAsync() => _quotaSnapshots.WhenIdleAsync();
+
     public Task StopAcceptingAppIoAsync() => _appIo.StopAcceptingAsync();
     public Task CompleteAppIoAsync(IReadOnlyDictionary<string, string> finalSettings) =>
         _appIo.CompleteAsync(finalSettings);
@@ -358,6 +370,7 @@ public sealed class UsageEngine : IDisposable
                 _primaryIdentityHash, _codexHome)
                 .ConfigureAwait(false);
             _providersBoard = _providers.CurrentBoard(DateTimeOffset.UtcNow, _providerSettings);
+            TryExportQuotaSnapshot(_providersBoard);
         }
         catch (OperationCanceledException)
         {
@@ -366,6 +379,7 @@ public sealed class UsageEngine : IDisposable
         catch (Exception)
         {
             _providersBoard = _providers.CurrentBoard(DateTimeOffset.UtcNow, _providerSettings);
+            TryExportQuotaSnapshot(_providersBoard);
         }
 
         return _providersBoard;
@@ -383,7 +397,20 @@ public sealed class UsageEngine : IDisposable
     private void OnProviderSlotPublished(ProviderSlotSnapshot _)
     {
         _providersBoard = _providers.CurrentBoard(DateTimeOffset.UtcNow, _providerSettings);
+        TryExportQuotaSnapshot(_providersBoard);
         ProvidersUpdated?.Invoke();
+    }
+
+    private void TryExportQuotaSnapshot(ProviderQuotaBoard board)
+    {
+        try
+        {
+            _quotaSnapshots.Publish(board);
+        }
+        catch (Exception)
+        {
+            // Export failures stay off the quota refresh path.
+        }
     }
 
     private HudSnapshot BuildSnapshot(IReadOnlyList<string> refreshErrors)

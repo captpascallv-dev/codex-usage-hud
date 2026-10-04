@@ -550,6 +550,10 @@
                                     <CheckBox x:Name="StartupCheckBox" Content="随 Windows 登录启动" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,12" Click="OnStartupSettingClick" />
                                     <CheckBox x:Name="TopmostCheckBox" Content="窗口始终置顶" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,12" Click="OnTopmostSettingClick" />
                                     <CheckBox x:Name="AutoHideCheckBox" Content="停靠边缘时自动隐藏" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,12" Click="OnAutoHideSettingClick" />
+                                    <StackPanel x:Name="QuotaSnapshotSettingBlock" Margin="0,4,0,0">
+                                        <CheckBox x:Name="QuotaSnapshotCheckBox" Content="导出本机额度快照" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,8,0,4" Click="OnQuotaSnapshotSettingClick" />
+                                        <TextBlock Text="默认关闭。打开后，每次额度刷新把六个槽的窗口、剩余百分比和重置时间写入 %LOCALAPPDATA%\CodexUsageHUD\quota-snapshot.json。只写额度数字和时间，不写账号或凭据。关闭后不再写入。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                                    </StackPanel>
                                     <TextBlock Text="默认停靠方向" Style="{StaticResource Caption}" Margin="0,18,0,8" />
                                     <ComboBox x:Name="DockSideComboBox" Height="40" SelectionChanged="OnDockSideSettingChanged">
                                         <ComboBoxItem Content="屏幕右侧" Tag="right" /><ComboBoxItem Content="屏幕左侧" Tag="left" />

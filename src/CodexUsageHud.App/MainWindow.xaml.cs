@@ -738,6 +738,8 @@ public partial class MainWindow : Window, IDisposable
         StartupCheckBox.IsChecked = IsStartupEnabledSafely();
         TopmostCheckBox.IsChecked = Topmost;
         AutoHideCheckBox.IsChecked = _autoHide;
+        QuotaSnapshotCheckBox.IsChecked = QuotaSnapshotWriter.IsEnabledValue(
+            _restoredSettings.GetValueOrDefault(QuotaSnapshotWriter.SettingKey));
         DockSideComboBox.SelectedIndex = _dockSide switch
         {
             EdgeDock.Right => 0,
@@ -980,6 +982,16 @@ public partial class MainWindow : Window, IDisposable
         }
         await SaveSettingsSafelyAsync(CaptureWindowSettings());
         if (_autoHide) ScheduleEdgeHide();
+    }
+
+    private async void OnQuotaSnapshotSettingClick(object sender, RoutedEventArgs e)
+    {
+        if (!_settingsReady) return;
+        var enabled = QuotaSnapshotCheckBox.IsChecked == true;
+        _engine.SetQuotaSnapshotExportEnabled(enabled);
+        await SaveSettingsSafelyAsync(CaptureWindowSettings());
+        if (enabled && QuotaSnapshotCheckBox.IsChecked == true)
+            _engine.ExportCurrentQuotaSnapshot();
     }
 
     private async void OnDockSideSettingChanged(object sender, SelectionChangedEventArgs e)
@@ -1488,7 +1500,8 @@ public partial class MainWindow : Window, IDisposable
                 ProviderSettingKeys.Label(ProviderSlotIds.GrokBot),
                 ProviderSettingKeys.Enabled(ProviderSlotIds.GrokBot),
                 ProviderSettingKeys.Label(ProviderSlotIds.Claude),
-                ProviderSettingKeys.Enabled(ProviderSlotIds.Claude));
+                ProviderSettingKeys.Enabled(ProviderSlotIds.Claude),
+                QuotaSnapshotWriter.SettingKey);
         }
         catch (Exception)
         {
@@ -1509,6 +1522,8 @@ public partial class MainWindow : Window, IDisposable
             ? CompactLayoutModes.Card
             : CompactLayoutModes.Rail;
         _viewModel.CompactLayout = _compactLayout;
+        _engine.SetQuotaSnapshotExportEnabled(
+            QuotaSnapshotWriter.IsEnabledValue(settings.GetValueOrDefault(QuotaSnapshotWriter.SettingKey)));
         UpdateTopmostState();
         if (double.TryParse(settings.GetValueOrDefault("window_left"), NumberStyles.Float,
                 CultureInfo.InvariantCulture, out var left) &&
@@ -1623,6 +1638,16 @@ public partial class MainWindow : Window, IDisposable
             ["auto_hide"] = _autoHide ? "1" : "0",
             [ProviderSettingKeys.CompactLayout] = _compactLayout,
         };
+        if (_settingsReady)
+        {
+            var snapshot = QuotaSnapshotCheckBox.IsChecked == true ? "1" : "0";
+            values[QuotaSnapshotWriter.SettingKey] = snapshot;
+            _restoredSettings[QuotaSnapshotWriter.SettingKey] = snapshot;
+        }
+        else if (_restoredSettings.TryGetValue(QuotaSnapshotWriter.SettingKey, out var stored) && stored is not null)
+        {
+            values[QuotaSnapshotWriter.SettingKey] = stored;
+        }
         foreach (var pair in ProviderSettingKeys.ToStored(CaptureProviderSettings()))
         {
             values[pair.Key] = pair.Value;

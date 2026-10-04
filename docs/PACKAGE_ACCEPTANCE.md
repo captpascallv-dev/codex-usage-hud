@@ -1,6 +1,6 @@
 # Codex Usage HUD — package acceptance summary
 
-Build: `1.1.2` — optional Claude subscription quota, an explicit secondary Codex CLI home, and no-focus edge reveal. The five original slots remain; Claude is a sixth slot and defaults off.
+Build: `1.1.3` — opt-in local quota snapshot, default off. The accepted v1.1.2 behavior remains: optional Claude subscription quota, an explicit secondary Codex CLI home, and no-focus edge reveal. The five original slots remain; Claude is a sixth slot and defaults off.
 
 This summary describes the published interface and its validation scope. It
 contains no real local usage, session identifiers, credentials or machine paths.
@@ -96,6 +96,20 @@ accepted for that raise. The maintainer personally confirmed the installed
 right-edge experience. This summary does not claim a new physical hover, a live
 provider read, an overnight soak, or a multi-monitor soak.
 
+v1.1.3 adds a settings checkbox, "导出本机额度快照", stored as
+`quota_snapshot_export` in the existing `ui_settings` table. Missing or any value
+other than `1` is off, for both new and existing databases. While on, each quota
+publication writes schema `1` to `quota-snapshot.json` in the HUD data directory.
+The file lists all six fixed slots and keeps Codex, Claude, and Cursor windows
+separate. States are `ok`, `stale`, `unavailable`, and `disabled`. Null stays null.
+Claude update-delayed rows stay `stale` and keep the original observation time.
+The writer uses a temp file and replaces the snapshot only if the switch is still
+on. A failed slot does not clear the others, and a failed write does not stop
+refresh. The snapshot does not add a provider, a credential read, or an upload.
+Focused synthetic checks cover the allowlist, the six slots, nulls, the toggle,
+atomic readers, and an isolated IO failure. Those checks are not a live quota
+comparison and not a full-suite replay.
+
 A green test result does not replace the real window and interaction checks.
 
 ## Package and operating boundaries
@@ -132,7 +146,7 @@ enabled provider's necessary login field for that request only. The v1.0.2
 lineage-aware deduplication and current-cycle filtering are retained.
 
 The automated catalog was previously recorded at 127 checks. That historical
-count is evidence from earlier releases, not a product PASS for v1.1.2. This
+count is evidence from earlier releases, not a product PASS for v1.1.2 or v1.1.3. This
 release preparation did not rerun the full suite.
 
 ## Limits

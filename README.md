@@ -28,12 +28,25 @@ Codex Usage HUD 是一个非官方的 Windows 10/11 x64 本地伴侣应用。它
 Windows 可能因为应用尚未购买代码签名证书而显示 SmartScreen 提示。Release 同时提供
 SHA-256 校验文件，用于确认下载内容没有发生变化。
 
-本仓库准备的公开版本是 1.1.2。下载 GitHub Releases 里的
+本仓库准备的公开版本是 1.1.3。下载 GitHub Releases 里的
 `CodexUsageHUD-win-x64.zip`，并用同页提供的 SHA-256 文件核对。
 
 已安装便携版时：先从托盘菜单选择“退出”，再解压新的 ZIP 并替换原来的程序文件，然后重新打开。
 已有的 `%LOCALAPPDATA%\CodexUsageHUD` 数据和设置不会被这次替换删除。ZIP 里没有安装程序，
 也不会重置登录、迁移数据，或写入任何额度槽的启用选择。
+
+### v1.1.3
+
+设置里增加「导出本机额度快照」，默认关闭。打开后，每次额度刷新把当前六个槽的
+窗口、剩余百分比和重置时间写入 `%LOCALAPPDATA%\CodexUsageHUD\quota-snapshot.json`
+（与 `usage.db` 同一数据目录）。文件是完整 JSON：先写临时文件，再在开关仍为打开时
+原子替换。`state` 为 `ok`、`stale`、`unavailable` 或 `disabled`。多个窗口分开保留，
+缺少的百分比、重置时间或窗口长度写 `null`。关闭开关后不再写入；已经生成的文件可以留下，
+以 `written_at_utc`、`observed_at_utc` 和 `state` 判断新旧。
+
+快照只含固定槽位名（Codex主、Codex备、Cursor、Grok、Bot、Claude）、已知额度池标识和
+数字。不含自定义槽名、账号、邮箱、令牌、凭据、路径或会话内容。不新增额度来源，
+也不把 raw token 换算成额度。字段和消费者读法见技术规格的 “Opt-in local quota snapshot”。
 
 ### v1.1.2
 
@@ -150,6 +163,7 @@ Codex App Server 现会同时返回名为 `primary` 与 `secondary` 的额度窗
   不是逐行 `account_id` 机器核验。若运行时 App 身份后来改变，不会把旧历史改绑到新身份。
 - 不读取或保存 prompt、response、浏览器 Cookie 仓库；不把凭据写入 HUD 数据库、日志或界面。
 - 应用数据库默认位于 `%LOCALAPPDATA%\CodexUsageHUD\usage.db`。
+- 额度快照默认不写。打开设置中的开关后，同一目录会出现 `quota-snapshot.json`。
 - HUD 只观察 service tier，绝不修改 Standard、Fast 或其他运行设置。
 
 完整数据边界与算法见 [技术规格](docs/TECHNICAL_SPEC.md)。
@@ -180,10 +194,15 @@ treating the file timestamp as a logout. Prompts, responses, and credential
 values are never collected, logged, or shown.
 Download the ready-to-run Windows package from
 [Releases](https://github.com/captpascallv-dev/codex-usage-hud/releases/latest), or build
-the source with the project-local scripts below. This source package is v1.1.2.
-Since the published v1.1.1 download it adds an optional, default-off Claude
-subscription quota slot, an explicit secondary Codex CLI home that stays on PI
-when blank, and a no-focus raise when a docked auto-hidden card is revealed.
+the source with the project-local scripts below. This source package is v1.1.3.
+v1.1.3 adds an opt-in, default-off local quota snapshot at
+`%LOCALAPPDATA%\CodexUsageHUD\quota-snapshot.json`. While the setting is on, each
+quota publication atomically replaces that file with the six fixed slots and their
+separate windows. The file stores quota numbers and times only. Turning it off
+stops further writes. The v1.1.2 changes since the published v1.1.1 download remain:
+an optional, default-off Claude subscription quota slot, an explicit secondary Codex
+CLI home that stays on PI when blank, and a no-focus raise when a docked auto-hidden
+card is revealed.
 To upgrade a portable copy, exit the old HUD from the tray, replace the program
 files from the new ZIP, and open it again. Existing data and settings under
 `%LOCALAPPDATA%\CodexUsageHUD` are left in place. The ZIP has no installer,
@@ -255,7 +274,9 @@ file has none. Agents still must not open credential files, Claude
 `config.json`, or `Local State`.
 
 The default app database is `%LOCALAPPDATA%\CodexUsageHUD\usage.db`; settings
-always show that literal symbolic path, never its resolved private path. The app
+always show that literal symbolic path, never its resolved private path. The
+optional quota snapshot uses the same data directory and the file name
+`quota-snapshot.json`. It is off unless `quota_snapshot_export` is `1`. The app
 log contains only safe error codes, relative source paths, offsets, and
 timestamps. Test, diagnostic, package-smoke, and migration fixtures use fresh
 project-local databases and never open the user's real HUD database.

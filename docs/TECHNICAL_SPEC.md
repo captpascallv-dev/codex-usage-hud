@@ -37,6 +37,10 @@ It is quota-only, default off, and not aggregated with Codex or any other
 provider. It does not add Claude session, context, or token analysis, and it
 does not open a general provider catalogue. Direct Codex HTTP remains disabled.
 
+Pascal 2026-10-04 adds an opt-in local quota snapshot file. It is off by default,
+writes only the allowlisted numbers already on the HUD board, and does not add
+a provider, a timer, or any upload.
+
 ## 3. Solution shape
 
 Create this structure unless a small naming adjustment is needed by tooling:
@@ -411,8 +415,9 @@ do not invent a new observation or percentage. With no successful observation
 yet, the slot stays unavailable. Disabling the slot, a configuration or
 account change, unusable or ambiguous credentials, and identity rejection
 also clear the previous windows. Expired resets are not shown as available;
-a weekly window that has not reset stays separate. Nothing is written to a
-disk quota cache.
+a weekly window that has not reset stays separate. The Claude reader does not
+write its own quota cache. The only quota file is the opt-in snapshot in section 11,
+and that file stays unwritten until its setting is on.
 
 Claude automatic successful reads wait 5 minutes. HTTP 429 then waits 5, 10,
 and 20 minutes, capped at 30 minutes, and a manual refresh waits out that
@@ -516,7 +521,8 @@ At minimum model these durable concepts:
 - quota observations and suspected-reset events
 - metadata-only parser/source errors
 - local UI settings such as window position, collapse state, filters, pinned
-  thread, and optional pet companion mode
+  thread, optional pet companion mode, and `quota_snapshot_export` (`1` or `0`,
+  missing means off, stored in the existing `ui_settings` table with no new migration)
 - manual session drift assessment containing only thread id, enum level, and timestamp
 
 Use integer token columns and checked/saturating aggregation. Add indexes for
@@ -580,6 +586,88 @@ the approved mascot/anchor bounds from `.codex-global-state.json`. Validate
 coordinates, support negative-coordinate monitors and mixed DPI, and position
 the collapsed HUD near but not over the pet. On invalid/hidden state, retain
 the last safe independent HUD position rather than hiding.
+
+### Opt-in local quota snapshot
+
+Settings include "导出本机额度快照". The checkbox is off for a new install and
+when `quota_snapshot_export` is missing or any value other than `1`. Turning it
+on may write the board already in memory; it does not start a provider read.
+Each later quota publication, while the setting stays on, writes the same
+complete six-slot board the HUD is showing. Session indexing alone does not
+write the file. Ageing that the panel applies between publications appears on
+the next publication.
+
+The file is `%LOCALAPPDATA%\CodexUsageHUD\quota-snapshot.json`, beside `usage.db`
+in the HUD data directory (`--data-dir` included). The writer creates a temp
+file in that directory and replaces the snapshot only while the setting is still
+on, so a reader sees the previous complete document or the new one. Turning the
+setting off drops a queued replace. The previous file may remain; its
+`written_at_utc`, each window's `observed_at_utc`, and `state` say how fresh it
+is. File mtime is not a freshness signal. IO errors are contained and do not
+change refresh, tray, docking, or provider reads.
+
+Schema is `1`. UTF-8 JSON, no BOM. Root fields are `schema`, `written_at_utc`,
+`hud_version`, and `slots`. `hud_version` is the App assembly version
+`major.minor.build` (candidate `1.1.3`). `written_at_utc` is the replace time.
+`slots` always has these six entries, in this order:
+
+| `slot` | `label` |
+| --- | --- |
+| `codex_primary` | Codex主 |
+| `codex_secondary` | Codex备 |
+| `cursor` | Cursor |
+| `grok` | Grok |
+| `grok_bot` | Bot |
+| `claude` | Claude |
+
+Labels are those fixed names. A renamed slot label in settings is not written.
+A slot missing from the in-memory board is `unavailable`.
+
+`state` is `ok`, `stale`, `unavailable`, or `disabled`. `disabled` is a slot the
+board marks disabled, and its `windows` array is empty. `ok` is a live reading
+that is not update-delayed. `stale` is an aged reading or a retained older
+reading; Claude `UpdateDelayed` is always `stale` and keeps the original
+successful `observed_at_utc`. `unavailable` is not connected, not configured,
+no allowance, identity collision, unverified, or a failed read without a
+retained reading. That slot's `windows` array is empty, so a failure cannot
+wipe another slot.
+
+A window object has `pool`, `window_minutes`, `remaining_percent`,
+`resets_at_utc`, and `observed_at_utc`. Missing minutes, percent, or reset are
+JSON `null`. They are not replaced with 0, 100, or a guessed time.
+`observed_at_utc` is the successful observation time, not `written_at_utc`.
+`remaining_percent` is present only when that window still has a usable
+allowance. Known pools, and only these, are exported; any other window id is
+left out instead of copied:
+
+| Slot | Source window id | `pool` |
+| --- | --- | --- |
+| Codex主 or Codex备 | `primary`, `primary_window` | `codex_primary_window` |
+| Codex主 or Codex备 | `secondary`, `secondary_window` | `codex_secondary_window` |
+| Codex主 or Codex备 | `weekly` | `codex_weekly` |
+| Codex主 or Codex备 | `codex`, `codex-main`, `codex_main` | `codex` |
+| Cursor | `autoPercentUsed` | `cursor_auto` |
+| Cursor | `apiPercentUsed` | `cursor_api` |
+| Cursor | team pooled fallback | `cursor_team` |
+| Grok | `weekly` | `grok_weekly` |
+| Bot | `sand` | `grok_bot` |
+| Claude | `five_hour` | `claude_five_hour` |
+| Claude | `seven_day` | `claude_seven_day` |
+| Claude | `seven_day_` plus the HUD's validated model slug | `claude_` plus that id |
+
+Windows stay separate. The file does not collapse them into the single smallest
+glance percent. The same pool can appear more than once; `window_minutes` and
+`resets_at_utc` keep the entries distinct.
+
+The document is built from those fields only. It does not contain custom labels,
+account keys, identity hashes, config fingerprints, source or error text,
+delay text, paths, prompts, responses, or authentication data. Raw token totals
+are not converted into quota, and a percent jump is not reported as a reset.
+
+Consumers should treat `disabled` and `unavailable` as having no usable numbers,
+treat `stale` numbers as the last retained observation, and ignore a file whose
+`written_at_utc` or `observed_at_utc` is older than the decision they are making.
+`null` means the HUD did not have that value.
 
 ## 12. Reliability and resource behavior
 

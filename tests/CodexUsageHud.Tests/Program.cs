@@ -71,6 +71,8 @@ internal static class Program
             return RunSecondaryCliQuota(args.Skip(1).ToArray());
         if (args.Length > 0 && args[0].Equals("--secondary-cli-capture", StringComparison.Ordinal))
             return RunSecondaryCliCapture(args.Skip(1).ToArray());
+        if (args.Length > 0 && args[0].Equals("--quota-snapshot", StringComparison.Ordinal))
+            return QuotaSnapshotTests.Run(args.Skip(1).ToArray());
 
         var runRoot = NewRunRoot("test-run");
         var tests = new (string Name, Action Run)[]

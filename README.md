@@ -39,8 +39,9 @@ SHA-256 校验文件，用于确认下载内容没有发生变化。
 
 设置里增加「导出本机额度快照」，默认关闭。打开后，每次额度刷新把当前六个槽的
 窗口、剩余百分比和重置时间写入 `%LOCALAPPDATA%\CodexUsageHUD\quota-snapshot.json`
-（与 `usage.db` 同一数据目录）。文件是完整 JSON：先写临时文件，再在开关仍为打开时
-原子替换。`state` 为 `ok`、`stale`、`unavailable` 或 `disabled`。多个窗口分开保留，
+（与 `usage.db` 同一数据目录）。文件是完整 JSON：反复覆盖同一个临时文件，再在开关仍为打开时
+原子替换；失败或中断不会另起新的临时文件。Codex 的 `codex` 与 `codex/secondary` 分成两个窗口。
+`state` 为 `ok`、`stale`、`unavailable` 或 `disabled`。多个窗口分开保留，
 缺少的百分比、重置时间或窗口长度写 `null`。关闭开关后不再写入；已经生成的文件可以留下，
 以 `written_at_utc`、`observed_at_utc` 和 `state` 判断新旧。
 
@@ -197,8 +198,10 @@ Download the ready-to-run Windows package from
 the source with the project-local scripts below. This source package is v1.1.3.
 v1.1.3 adds an opt-in, default-off local quota snapshot at
 `%LOCALAPPDATA%\CodexUsageHUD\quota-snapshot.json`. While the setting is on, each
-quota publication atomically replaces that file with the six fixed slots and their
-separate windows. The file stores quota numbers and times only. Turning it off
+quota publication atomically replaces that one file with the six fixed slots and their
+separate windows, including the Codex `codex` and `codex/secondary` windows. The
+writer reuses one temp file and does not leave a new temp per refresh. The file
+stores quota numbers and times only. Turning it off
 stops further writes. The v1.1.2 changes since the published v1.1.1 download remain:
 an optional, default-off Claude subscription quota slot, an explicit secondary Codex
 CLI home that stays on PI when blank, and a no-focus raise when a docked auto-hidden

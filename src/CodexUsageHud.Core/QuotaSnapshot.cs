@@ -135,6 +135,7 @@ public static class QuotaSnapshotMapper
             "secondary" or "secondary_window" => "codex_secondary_window",
             "weekly" => "codex_weekly",
             "codex" or "codex-main" or "codex_main" => "codex",
+            "codex/secondary" or "codex-main/secondary" or "codex_main/secondary" => "codex_secondary_window",
             _ => string.Empty,
         };
         return pool.Length > 0;
@@ -240,6 +241,7 @@ public sealed class QuotaSnapshotWriter
 {
     public const int SchemaVersion = 1;
     public const string FileName = "quota-snapshot.json";
+    public const string TempFileName = FileName + ".tmp";
     public const string SettingKey = "quota_snapshot_export";
 
     private readonly string _directory;
@@ -369,8 +371,9 @@ public sealed class QuotaSnapshotWriter
             if (string.IsNullOrWhiteSpace(_directory)) return;
             Directory.CreateDirectory(_directory);
             var bytes = QuotaSnapshotJson.Serialize(pending.Slots, _clock(), _hudVersion);
-            tempPath = Path.Combine(_directory, FileName + "." + Guid.NewGuid().ToString("N") + ".tmp");
-            using (var stream = new FileStream(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096,
+            // One owned temp per directory. An interrupted write is overwritten here, not renamed aside.
+            tempPath = Path.Combine(_directory, TempFileName);
+            using (var stream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096,
                        FileOptions.WriteThrough))
             {
                 stream.Write(bytes, 0, bytes.Length);

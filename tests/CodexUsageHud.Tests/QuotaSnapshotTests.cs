@@ -31,11 +31,12 @@ internal static class QuotaSnapshotTests
             Directory.CreateDirectory(root);
             try
             {
-                SchemaPrivacyAndStates(root, output, log);
+                SchemaPrivacyAndStates(root, log);
                 TogglePendingAtomicAndFailure(root, log);
                 EngineSettingRoundTrip(root, log);
                 AssemblyVersion(log);
-                RenderSettings(root, output, log);
+                ParserCodexWindows(root, output, log);
+                BoundedOwnedTemp(root, log);
             }
             finally
             {
@@ -58,7 +59,7 @@ internal static class QuotaSnapshotTests
         }
     }
 
-    private static void SchemaPrivacyAndStates(string root, string output, StringBuilder log)
+    private static void SchemaPrivacyAndStates(string root, StringBuilder log)
     {
         var observed = DateTimeOffset.Parse("2026-10-04T11:58:00.0000000Z", CultureInfo.InvariantCulture);
         var retained = DateTimeOffset.Parse("2026-10-04T09:00:00.0000000Z", CultureInfo.InvariantCulture);
@@ -104,7 +105,6 @@ internal static class QuotaSnapshotTests
         writer.Publish(board);
         writer.WhenIdleAsync().GetAwaiter().GetResult();
         var json = File.ReadAllText(writer.FinalPath, Encoding.UTF8);
-        File.WriteAllText(Path.Combine(output, "SYNTHETIC_EXAMPLE.json"), json, new UTF8Encoding(false));
         using var document = JsonDocument.Parse(json);
         var rootElement = document.RootElement;
         Expect(rootElement.GetProperty("schema").GetInt32() == 1, "schema");
@@ -412,6 +412,142 @@ internal static class QuotaSnapshotTests
         window.DisposeResources();
         log.AppendLine("settings_ui=rendered default_off=true persisted_on_then_off=true");
     }
+
+    private static void ParserCodexWindows(string root, string output, StringBuilder log)
+    {
+        var observed = DateTimeOffset.Parse("2026-10-04T11:58:00.0000000Z", CultureInfo.InvariantCulture);
+        var written = DateTimeOffset.Parse("2026-10-04T12:00:00.0000000Z", CultureInfo.InvariantCulture);
+        var primaryReset = DateTimeOffset.Parse("2026-10-04T16:58:00.0000000Z", CultureInfo.InvariantCulture);
+        var secondaryReset = DateTimeOffset.Parse("2026-10-11T11:58:00.0000000Z", CultureInfo.InvariantCulture);
+        var parsed = QuotaJsonParser.Parse(CodexLimitJson("codex", Secret, 20, 300, primaryReset, 58, 10080, secondaryReset), observed);
+        Expect(parsed.Primary?.Id == "codex", "parser-primary-id");
+        Expect(parsed.Additional.Any(bucket => bucket.Id == "codex/secondary"), "parser-secondary-id");
+        var windows = ProviderQuotaPresentation.FromCodex(parsed);
+        Expect(windows.Any(window => window.WindowId == "codex"), "factory-primary");
+        Expect(windows.Any(window => window.WindowId == "codex/secondary"), "factory-secondary");
+        Expect(windows.Any(window => window.WindowId == Secret), "factory-keeps-unknown");
+
+        var directory = Path.Combine(root, "parser");
+        var writer = new QuotaSnapshotWriter(directory, "1.1.3", clock: () => written);
+        writer.SetEnabled(true);
+        writer.Publish(new ProviderQuotaBoard(new[]
+        {
+            Slot(ProviderSlotIds.CodexPrimary, ProviderIds.Codex, QuotaSlotStatus.Live, observed, windows),
+        }, written));
+        writer.WhenIdleAsync().GetAwaiter().GetResult();
+        var json = File.ReadAllText(writer.FinalPath, Encoding.UTF8);
+        File.WriteAllText(Path.Combine(output, "SYNTHETIC_EXAMPLE.json"), json, new UTF8Encoding(false));
+        using var document = JsonDocument.Parse(json);
+        var slot = document.RootElement.GetProperty("slots").EnumerateArray().Single(item => item.GetProperty("slot").GetString() == "codex_primary");
+        Expect(slot.GetProperty("state").GetString() == "ok", "parser-state");
+        var exported = slot.GetProperty("windows").EnumerateArray().ToArray();
+        Expect(exported.Length == 2, "parser-both-windows");
+        Expect(exported[0].GetProperty("pool").GetString() == "codex", "parser-pool-primary");
+        Expect(exported[0].GetProperty("window_minutes").GetInt32() == 300, "parser-primary-minutes");
+        Expect(exported[0].GetProperty("remaining_percent").GetDouble() == 80d, "parser-primary-remaining");
+        Expect(exported[0].GetProperty("resets_at_utc").GetString() == QuotaSnapshotJson.FormatUtc(primaryReset), "parser-primary-reset");
+        Expect(exported[0].GetProperty("observed_at_utc").GetString() == QuotaSnapshotJson.FormatUtc(observed), "parser-primary-observed");
+        Expect(exported[1].GetProperty("pool").GetString() == "codex_secondary_window", "parser-pool-secondary");
+        Expect(exported[1].GetProperty("window_minutes").GetInt32() == 10080, "parser-secondary-minutes");
+        Expect(exported[1].GetProperty("remaining_percent").GetDouble() == 42d, "parser-secondary-remaining");
+        Expect(exported[1].GetProperty("resets_at_utc").GetString() == QuotaSnapshotJson.FormatUtc(secondaryReset), "parser-secondary-reset");
+        Expect(exported[1].GetProperty("observed_at_utc").GetString() == QuotaSnapshotJson.FormatUtc(observed), "parser-secondary-observed");
+        Expect(document.RootElement.GetProperty("written_at_utc").GetString() == QuotaSnapshotJson.FormatUtc(written), "parser-written");
+        Expect(!json.Contains(Secret, StringComparison.Ordinal), "parser-secret");
+
+        var alias = QuotaJsonParser.Parse(CodexLimitJson("codex-main", "alias", 10, 300, primaryReset, 30, 10080, secondaryReset), observed);
+        var aliasWindows = ProviderQuotaPresentation.FromCodex(alias);
+        Expect(aliasWindows.Any(window => window.WindowId == "codex-main"), "alias-main");
+        Expect(aliasWindows.Any(window => window.WindowId == "codex-main/secondary"), "alias-secondary");
+        Expect(QuotaSnapshotMapper.TryMapPool(ProviderSlotIds.CodexPrimary, "codex-main", out var aliasPrimary) && aliasPrimary == "codex", "alias-pool");
+        Expect(QuotaSnapshotMapper.TryMapPool(ProviderSlotIds.CodexPrimary, "codex-main/secondary", out var aliasSecondary) &&
+               aliasSecondary == "codex_secondary_window", "alias-secondary-pool");
+        Expect(QuotaSnapshotMapper.TryMapPool(ProviderSlotIds.CodexSecondary, "codex_main", out var underscore) && underscore == "codex", "alias-underscore");
+        Expect(QuotaSnapshotMapper.TryMapPool(ProviderSlotIds.CodexSecondary, "codex_main/secondary", out var underscoreSecondary) &&
+               underscoreSecondary == "codex_secondary_window", "alias-underscore-secondary");
+        Expect(!QuotaSnapshotMapper.TryMapPool(ProviderSlotIds.CodexPrimary, Secret + "/secondary", out _), "unknown-secondary");
+        Expect(!QuotaSnapshotMapper.TryMapPool(ProviderSlotIds.CodexPrimary, "codex/secondary/extra", out _), "unknown-suffix");
+        log.AppendLine("parser_codex_windows=pass");
+    }
+
+    private static string CodexLimitJson(string limitId, string limitName, int primaryUsed, int primaryMinutes,
+        DateTimeOffset primaryReset, int secondaryUsed, int secondaryMinutes, DateTimeOffset secondaryReset)
+    {
+        var primaryUnix = primaryReset.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+        var secondaryUnix = secondaryReset.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture);
+        return "{\"result\":{\"rateLimitsByLimitId\":{\"" + limitId + "\":{\"limitId\":\"" + limitId +
+               "\",\"limitName\":\"" + limitName + "\",\"primary\":{\"usedPercent\":" +
+               primaryUsed.ToString(CultureInfo.InvariantCulture) + ",\"windowDurationMins\":" +
+               primaryMinutes.ToString(CultureInfo.InvariantCulture) + ",\"resetsAt\":" + primaryUnix +
+               "},\"secondary\":{\"usedPercent\":" + secondaryUsed.ToString(CultureInfo.InvariantCulture) +
+               ",\"windowDurationMins\":" + secondaryMinutes.ToString(CultureInfo.InvariantCulture) +
+               ",\"resetsAt\":" + secondaryUnix + "}},\"" + Secret + "\":{\"limitId\":\"" + Secret +
+               "\",\"limitName\":\"" + Secret + "\",\"primary\":{\"usedPercent\":1,\"windowDurationMins\":60,\"resetsAt\":" +
+               primaryUnix + "},\"secondary\":{\"usedPercent\":2,\"windowDurationMins\":120,\"resetsAt\":" +
+               secondaryUnix + "}}}}}";
+    }
+
+    private static void BoundedOwnedTemp(string root, StringBuilder log)
+    {
+        var successDir = Path.Combine(root, "temp-success");
+        Directory.CreateDirectory(successDir);
+        File.WriteAllText(Path.Combine(successDir, "keep-me.txt"), "keep");
+        var success = new QuotaSnapshotWriter(successDir, "1.1.3");
+        success.SetEnabled(true);
+        for (var index = 0; index < 8; index++)
+            success.Publish(OneBoard(index));
+        success.WhenIdleAsync().GetAwaiter().GetResult();
+        Expect(File.ReadAllText(Path.Combine(successDir, "keep-me.txt")) == "keep", "success-keeps-unrelated");
+        Expect(SnapshotTempNames(successDir).Length == 0, "success-no-temp");
+        using (var saved = JsonDocument.Parse(File.ReadAllText(success.FinalPath)))
+        {
+            Expect(saved.RootElement.GetProperty("schema").GetInt32() == 1, "success-schema");
+            Expect(saved.RootElement.GetProperty("slots").GetArrayLength() == 6, "success-slots");
+        }
+
+        var recoverDir = Path.Combine(root, "temp-recover");
+        Directory.CreateDirectory(recoverDir);
+        File.WriteAllText(Path.Combine(recoverDir, "keep-me.txt"), "keep");
+        File.WriteAllText(Path.Combine(recoverDir, QuotaSnapshotWriter.TempFileName), "INTERRUPTED-NOT-JSON");
+        var recover = new QuotaSnapshotWriter(recoverDir, "1.1.3");
+        recover.SetEnabled(true);
+        recover.Publish(OneBoard(20));
+        recover.WhenIdleAsync().GetAwaiter().GetResult();
+        var recovered = File.ReadAllText(recover.FinalPath, Encoding.UTF8);
+        Expect(!recovered.Contains("INTERRUPTED", StringComparison.Ordinal), "recovered-not-temp");
+        using (var saved = JsonDocument.Parse(recovered))
+        {
+            Expect(saved.RootElement.GetProperty("slots")[0].GetProperty("windows")[0]
+                .GetProperty("remaining_percent").GetDouble() == 80d, "recovered-last");
+        }
+        Expect(File.ReadAllText(Path.Combine(recoverDir, "keep-me.txt")) == "keep", "recover-keeps-unrelated");
+        Expect(SnapshotTempNames(recoverDir).Length == 0, "recover-no-orphan");
+
+        var failDir = Path.Combine(root, "temp-fail");
+        Directory.CreateDirectory(failDir);
+        Directory.CreateDirectory(Path.Combine(failDir, QuotaSnapshotWriter.FileName));
+        File.WriteAllText(Path.Combine(failDir, "keep-me.txt"), "keep");
+        var failing = new QuotaSnapshotWriter(failDir, "1.1.3");
+        failing.SetEnabled(true);
+        for (var index = 0; index < 6; index++)
+            failing.Publish(OneBoard(index));
+        failing.WhenIdleAsync().GetAwaiter().GetResult();
+        Expect(Directory.Exists(Path.Combine(failDir, QuotaSnapshotWriter.FileName)), "fail-leaves-blocker");
+        Expect(File.ReadAllText(Path.Combine(failDir, "keep-me.txt")) == "keep", "fail-keeps-unrelated");
+        var temps = SnapshotTempNames(failDir);
+        Expect(temps.Length <= 1, "fail-temp-bound");
+        Expect(temps.All(name => name == QuotaSnapshotWriter.TempFileName), "fail-only-owned-temp");
+        log.AppendLine("bounded_temp=pass temps=" + temps.Length.ToString(CultureInfo.InvariantCulture));
+    }
+
+    private static string[] SnapshotTempNames(string directory) =>
+        Directory.EnumerateFiles(directory)
+            .Select(Path.GetFileName)
+            .Where(name => name is not null &&
+                           name.StartsWith(QuotaSnapshotWriter.FileName, StringComparison.Ordinal) &&
+                           name.EndsWith(".tmp", StringComparison.Ordinal))
+            .Select(name => name!)
+            .ToArray();
 
     private static ProviderQuotaBoard OneBoard(int usedPercent) => new(new[]
     {

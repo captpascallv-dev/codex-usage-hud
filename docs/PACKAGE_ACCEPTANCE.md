@@ -103,9 +103,13 @@ publication writes schema `1` to `quota-snapshot.json` in the HUD data directory
 The file lists all six fixed slots and keeps Codex, Claude, and Cursor windows
 separate. States are `ok`, `stale`, `unavailable`, and `disabled`. Null stays null.
 Claude update-delayed rows stay `stale` and keep the original observation time.
-The writer uses a temp file and replaces the snapshot only if the switch is still
-on. A failed slot does not clear the others, and a failed write does not stop
-refresh. The snapshot does not add a provider, a credential read, or an upload.
+The writer reuses one owned temp, `quota-snapshot.json.tmp`, and replaces the
+snapshot only if the switch is still on. It does not allocate a new temp per
+attempt or delete unrelated files. The Codex app-server windows `codex` and
+`codex/secondary` stay separate (`codex` and `codex_secondary_window`); an
+unknown limit id is omitted. A failed slot does not clear the others, and a
+failed write does not stop refresh. The snapshot does not add a provider, a
+credential read, or an upload.
 Focused synthetic checks cover the allowlist, the six slots, nulls, the toggle,
 atomic readers, and an isolated IO failure. Those checks are not a live quota
 comparison and not a full-suite replay.

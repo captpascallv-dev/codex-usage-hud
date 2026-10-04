@@ -598,10 +598,13 @@ write the file. Ageing that the panel applies between publications appears on
 the next publication.
 
 The file is `%LOCALAPPDATA%\CodexUsageHUD\quota-snapshot.json`, beside `usage.db`
-in the HUD data directory (`--data-dir` included). The writer creates a temp
-file in that directory and replaces the snapshot only while the setting is still
-on, so a reader sees the previous complete document or the new one. Turning the
-setting off drops a queued replace. The previous file may remain; its
+in the HUD data directory (`--data-dir` included). The writer reuses one owned
+temp, `quota-snapshot.json.tmp`, in that directory and replaces the snapshot
+only while the setting is still on, so a reader sees the previous complete
+document or the new one. A failed or interrupted write does not create another
+temp name; the next write overwrites that same temp. The writer does not delete
+unrelated files. Turning the setting off drops a queued replace. The previous
+file may remain; its
 `written_at_utc`, each window's `observed_at_utc`, and `state` say how fresh it
 is. File mtime is not a freshness signal. IO errors are contained and do not
 change refresh, tray, docking, or provider reads.
@@ -646,9 +649,10 @@ left out instead of copied:
 | Codex主 or Codex备 | `secondary`, `secondary_window` | `codex_secondary_window` |
 | Codex主 or Codex备 | `weekly` | `codex_weekly` |
 | Codex主 or Codex备 | `codex`, `codex-main`, `codex_main` | `codex` |
+| Codex主 or Codex备 | `codex/secondary`, `codex-main/secondary`, `codex_main/secondary` | `codex_secondary_window` |
 | Cursor | `autoPercentUsed` | `cursor_auto` |
 | Cursor | `apiPercentUsed` | `cursor_api` |
-| Cursor | team pooled fallback | `cursor_team` |
+| Cursor | `团队共用` | `cursor_team` |
 | Grok | `weekly` | `grok_weekly` |
 | Bot | `sand` | `grok_bot` |
 | Claude | `five_hour` | `claude_five_hour` |

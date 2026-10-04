@@ -3,6 +3,7 @@ using CodexUsageHud.Core;
 using Microsoft.Data.Sqlite;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Windows.Media;
@@ -150,6 +151,7 @@ internal static class Program
             ("hud_wpf_runtime_interactions", () => HudWpfRuntimeInteractions(runRoot)),
             ("hud_v2_1000_row_interaction_stress", () => HudV2InteractionStress(runRoot)),
             ("hud_v2_left_right_top_dock_and_handle", () => HudV2DockGeometry(runRoot)),
+            ("edge_reveal_z_order", () => EdgeRevealZOrder(runRoot)),
             ("hud_screen_recovery_geometry", HudScreenRecoveryGeometry),
             ("package_publication_privacy_contract", PackagePublicationPrivacyContract),
             ("lineage_semantic_contract_v9_and_live_replay", () => LineageSemanticContractV9AndLiveReplay(runRoot)),
@@ -6536,6 +6538,588 @@ internal static class Program
                           $"toggle_30_pairs_ms={toggleWatch.ElapsedMilliseconds} " +
                           $"refresh_30_submit_ms={clickWatch.ElapsedMilliseconds} row_events={rowNotifications}");
         window.Hide();
+    }
+
+    private static void EdgeRevealZOrder(string runRoot)
+    {
+        EnsureWpfTestApplication();
+        var output = Path.Combine(ProjectRoot(), ".artifacts", "edge-reveal-20261004", "zorder-capture");
+        Directory.CreateDirectory(output);
+        var log = new StringBuilder();
+        log.AppendLine("SYNTHETIC edge-reveal z-order. Fixture GeneratedAtUtc=2026-08-05T02:38:24Z.");
+        log.AppendLine("No live quota, accounts, prompts, or chat text. Captures are the fixture and HUD only.");
+        MainWindow? window = null;
+        System.Windows.Window? fixture = null;
+        System.Windows.Window? ordinary = null;
+        UsageEngine? engine = null;
+        try
+        {
+            var directory = Path.Combine(runRoot, "edge-reveal");
+            var codexHome = Path.Combine(directory, "codex-home");
+            Directory.CreateDirectory(Path.Combine(codexHome, "sessions"));
+            engine = new UsageEngine(codexHome, Path.Combine(directory, "usage.db"),
+                Path.Combine(directory, "hud.log"));
+            window = new MainWindow(engine, () => Task.CompletedTask, false)
+            {
+                ShowActivated = false,
+                ShowInTaskbar = false,
+            };
+            var screen = System.Windows.SystemParameters.WorkArea;
+            var work = new System.Windows.Rect(
+                screen.Left + 48,
+                screen.Top + 48,
+                Math.Min(920, Math.Max(640, screen.Width - 160)),
+                Math.Min(760, Math.Max(560, screen.Height - 160)));
+            window.OverrideWorkAreaForTests(work);
+            window.Left = work.Left + 80;
+            window.Top = work.Top + 80;
+            var viewModel = (MainViewModel)(typeof(MainWindow).GetField("_viewModel",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .GetValue(window) ?? throw new InvalidOperationException("view_model_missing"));
+            viewModel.Apply(CreateUiCaptureSnapshot());
+            viewModel.IsExpanded = false;
+            var dockField = typeof(MainWindow).GetField("_dockSide",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("dock_field_missing");
+            var hiddenField = typeof(MainWindow).GetField("_isEdgeHidden",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("hidden_field_missing");
+            var elevatedField = typeof(MainWindow).GetField("_edgeRevealElevated",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("elevated_field_missing");
+            var hideTimerField = typeof(MainWindow).GetField("_hideTimer",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("hide_timer_field_missing");
+            var revealTimerField = typeof(MainWindow).GetField("_revealTimer",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("reveal_timer_field_missing");
+            var settingsReadyField = typeof(MainWindow).GetField("_settingsReady",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("settings_ready_field_missing");
+            var workMethod = typeof(MainWindow).GetMethod("GetWorkAreaLogical",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException("work_area_method_missing");
+            bool Hidden() => (bool)(hiddenField.GetValue(window) ?? false);
+            bool Elevated() => (bool)(elevatedField.GetValue(window) ?? false);
+            void StopHideTimer() =>
+                ((DispatcherTimer)(hideTimerField.GetValue(window)
+                    ?? throw new InvalidOperationException("hide_timer_missing"))).Stop();
+            void Pump(int milliseconds) =>
+                AwaitWithDispatcher(Task.Delay(milliseconds), window.Dispatcher, TimeSpan.FromSeconds(3));
+            System.Windows.Rect Work() => (System.Windows.Rect)(workMethod.Invoke(window, null)
+                ?? throw new InvalidOperationException("work_area_missing"));
+            IntPtr HudHandle() => new System.Windows.Interop.WindowInteropHelper(window).Handle;
+            Dictionary<string, string> Captured() =>
+                (Dictionary<string, string>)InvokeWindowReturning(window, "CaptureWindowSettings");
+            var pin = (System.Windows.Controls.Button)(window.FindName("RailTopmostButton")
+                ?? throw new InvalidOperationException("rail_pin_missing"));
+            var pinBox = (System.Windows.Controls.CheckBox)(window.FindName("TopmostCheckBox")
+                ?? throw new InvalidOperationException("topmost_checkbox_missing"));
+            bool PinShowsOn() => pin.ToolTip?.ToString()?.Contains("取消", StringComparison.Ordinal) == true;
+
+            window.Show();
+            Pump(80);
+            fixture = CreateOverlapWindow("SYNTHETIC OVERLAP", System.Windows.Media.Colors.Magenta, topmost: true);
+            ordinary = CreateOverlapWindow("SYNTHETIC ORDINARY", System.Windows.Media.Colors.DodgerBlue, topmost: false);
+            ordinary.Show();
+            fixture.Show();
+            Pump(80);
+
+            void PlaceOverlaps(System.Windows.Rect revealed)
+            {
+                ordinary.Left = revealed.Left;
+                ordinary.Top = revealed.Top;
+                ordinary.Width = Math.Max(48, revealed.Width);
+                ordinary.Height = Math.Max(48, revealed.Height);
+                fixture.Left = revealed.Left - 36;
+                fixture.Top = revealed.Top - 28;
+                fixture.Width = revealed.Width + 36;
+                fixture.Height = revealed.Height + 56;
+                ordinary.Topmost = false;
+                fixture.Topmost = false;
+                fixture.Topmost = true;
+                var plain = new System.Windows.Interop.WindowInteropHelper(ordinary).Handle;
+                EdgeSetWindowPos(plain, IntPtr.Zero, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
+            }
+
+            System.Windows.Rect RevealedBounds()
+            {
+                var area = Work();
+                var dock = dockField.GetValue(window)?.ToString();
+                return dock switch
+                {
+                    "Left" => new System.Windows.Rect(area.Left, window.Top, window.Width, window.Height),
+                    "Top" => new System.Windows.Rect(window.Left, area.Top, window.Width, window.Height),
+                    _ => new System.Windows.Rect(area.Right - window.Width, window.Top, window.Width, window.Height),
+                };
+            }
+
+            void Prepare(string dock, bool pinOn)
+            {
+                InvokeWindowMethod(window, "SetEdgeHidden", true);
+                StopHideTimer();
+                window.Topmost = pinOn;
+                InvokeWindowMethod(window, "UpdateTopmostState");
+                viewModel.IsExpanded = false;
+                dockField.SetValue(window, Enum.Parse(dockField.FieldType, dock));
+                hiddenField.SetValue(window, false);
+                InvokeWindowMethod(window, "ApplyExpansionState", false);
+                InvokeWindowMethod(window, "SetEdgeHidden", true);
+                StopHideTimer();
+                Assert.True(Hidden(), "expected_hidden:" + dock);
+                var revealed = RevealedBounds();
+                PlaceOverlaps(revealed);
+                Pump(120);
+            }
+
+            (IntPtr Foreground, bool Active) FocusNow() => (GetForegroundWindow(), window.IsActive);
+
+            void RevealFromHover()
+            {
+                var enter = new System.Windows.Input.MouseEventArgs(
+                    System.Windows.Input.Mouse.PrimaryDevice, Environment.TickCount)
+                {
+                    RoutedEvent = System.Windows.Input.Mouse.MouseEnterEvent,
+                };
+                window.RaiseEvent(enter);
+            }
+
+            void AssertFocusPreserved((IntPtr Foreground, bool Active) before, string label)
+            {
+                var after = FocusNow();
+                log.AppendLine(label + " foreground_same=" + (before.Foreground == after.Foreground)
+                    + " foreground_is_hud_before=" + (before.Foreground == HudHandle())
+                    + " foreground_is_hud_after=" + (after.Foreground == HudHandle())
+                    + " active_before=" + before.Active + " active_after=" + after.Active);
+                Assert.Equal(before.Foreground, after.Foreground);
+                Assert.Equal(before.Active, after.Active);
+            }
+
+            void AssertBand(bool pinOn, bool revealed, string label)
+            {
+                var hud = HudHandle();
+                var cover = new System.Windows.Interop.WindowInteropHelper(fixture).Handle;
+                var plain = new System.Windows.Interop.WindowInteropHelper(ordinary).Handle;
+                var native = EdgeNativeTopmost(hud);
+                var aboveFixture = EdgeWindowIsAbove(hud, cover);
+                var aboveOrdinary = EdgeWindowIsAbove(hud, plain);
+                var settings = Captured();
+                log.AppendLine(label
+                    + " pin=" + window.Topmost
+                    + " native_topmost=" + native
+                    + " above_fixture=" + aboveFixture
+                    + " above_ordinary=" + aboveOrdinary
+                    + " elevated=" + Elevated()
+                    + " hidden=" + Hidden()
+                    + " saved=" + settings["always_on_top"]
+                    + " checkbox=" + pinBox.IsChecked
+                    + " pin_button_on=" + PinShowsOn());
+                Assert.Equal(pinOn, window.Topmost);
+                Assert.Equal(pinOn ? "1" : "0", settings["always_on_top"]);
+                Assert.Equal(pinOn, pinBox.IsChecked == true);
+                Assert.Equal(pinOn, PinShowsOn());
+                Assert.Equal(revealed, !Hidden());
+                Assert.Equal(revealed, Elevated());
+                Assert.Equal(pinOn || revealed, native);
+                if (revealed)
+                {
+                    Assert.True(aboveFixture, label + "_not_above_topmost_fixture");
+                    Assert.True(aboveOrdinary, label + "_not_above_ordinary");
+                }
+                else if (!pinOn)
+                {
+                    Assert.True(EdgeWindowIsAbove(cover, hud), label + "_fixture_not_above_after_hide");
+                }
+                else
+                {
+                    Assert.True(aboveFixture, label + "_persistent_pin_lost_topmost_band");
+                }
+            }
+
+            void CaptureOverlap(string name, System.Windows.Rect revealed, bool expectHudBody)
+            {
+                Pump(180);
+                var origin = EdgeDevicePoint(fixture, new System.Windows.Point(fixture.Left, fixture.Top));
+                var bottom = EdgeDevicePoint(fixture, new System.Windows.Point(fixture.Left + fixture.Width, fixture.Top + fixture.Height));
+                var x = (int)Math.Floor(origin.X);
+                var y = (int)Math.Floor(origin.Y);
+                var width = Math.Max(1, (int)Math.Ceiling(bottom.X) - x);
+                var height = Math.Max(1, (int)Math.Ceiling(bottom.Y) - y);
+                var pixels = CaptureScreenBgra(x, y, width, height);
+                var path = Path.Combine(output, name + ".png");
+                SaveBgraPng(pixels, width, height, path);
+                var margin = EdgeDevicePoint(fixture, new System.Windows.Point(fixture.Left + 10, fixture.Top + 10));
+                var body = EdgeDevicePoint(window, new System.Windows.Point(
+                    revealed.Left + Math.Min(48, revealed.Width / 2),
+                    revealed.Top + Math.Min(36, revealed.Height / 2)));
+                var marginColor = EdgePixel(pixels, width, height, (int)Math.Round(margin.X) - x, (int)Math.Round(margin.Y) - y);
+                var bodyColor = EdgePixel(pixels, width, height, (int)Math.Round(body.X) - x, (int)Math.Round(body.Y) - y);
+                log.AppendLine(name + " file=" + path
+                    + " margin=" + FormatColor(marginColor)
+                    + " body=" + FormatColor(bodyColor)
+                    + " expect_hud_body=" + expectHudBody);
+                Assert.True(IsMagenta(marginColor), name + "_margin_not_fixture:" + FormatColor(marginColor));
+                Assert.Equal(expectHudBody, !IsMagenta(bodyColor));
+            }
+
+            void Cycle(string dock, bool pinOn, bool capture, int repeats)
+            {
+                Prepare(dock, pinOn);
+                var revealed = RevealedBounds();
+                var cover = new System.Windows.Interop.WindowInteropHelper(fixture).Handle;
+                Assert.True(EdgeWindowIsAbove(cover, HudHandle()), dock + "_fixture_not_covering_before");
+                if (!pinOn)
+                {
+                    var plain = new System.Windows.Interop.WindowInteropHelper(ordinary).Handle;
+                    Assert.True(EdgeWindowIsAbove(plain, HudHandle()), dock + "_ordinary_not_covering_before");
+                }
+                if (capture) CaptureOverlap("pin-" + (pinOn ? "on" : "off") + "-before", revealed, false);
+                for (var index = 0; index < repeats; index++)
+                {
+                    if (index > 0)
+                    {
+                        InvokeWindowMethod(window, "SetEdgeHidden", true);
+                        StopHideTimer();
+                        Prepare(dock, pinOn);
+                        revealed = RevealedBounds();
+                    }
+                    var beforeFocus = FocusNow();
+                    RevealFromHover();
+                    AssertFocusPreserved(beforeFocus, dock + " pin=" + pinOn + " hover" + index);
+                    Pump(60);
+                    window.UpdateLayout();
+                    AssertBand(pinOn, revealed: true, dock + " revealed" + index);
+                    if (capture && index == 0)
+                        CaptureOverlap("pin-" + (pinOn ? "on" : "off") + "-revealed", revealed, true);
+                    InvokeWindowMethod(window, "SetEdgeHidden", true);
+                    StopHideTimer();
+                    AssertBand(pinOn, revealed: false, dock + " hidden" + index);
+                    if (capture && index == 0)
+                        CaptureOverlap("pin-" + (pinOn ? "on" : "off") + "-hidden", revealed, false);
+                }
+            }
+
+            Cycle("Right", pinOn: true, capture: true, repeats: 3);
+            Cycle("Right", pinOn: false, capture: true, repeats: 3);
+            Cycle("Left", pinOn: false, capture: false, repeats: 1);
+            Cycle("Top", pinOn: true, capture: false, repeats: 1);
+
+            Prepare("Right", pinOn: false);
+            RevealFromHover();
+            AssertBand(pinOn: false, revealed: true, "toggle-off-baseline");
+            var duringTransient = Captured();
+            engine.SaveSettingsAsync(duringTransient).GetAwaiter().GetResult();
+            var reloadedTransient = engine.LoadSettingsAsync("always_on_top").GetAwaiter().GetResult();
+            Assert.Equal("0", reloadedTransient["always_on_top"]);
+            log.AppendLine("save_during_transient_off reloaded=0");
+            InvokeWindowMethod(window, "OnToggleTopmost", window, new System.Windows.RoutedEventArgs());
+            Pump(250);
+            Assert.True(window.Topmost);
+            Assert.Equal("1", Captured()["always_on_top"]);
+            Assert.True(PinShowsOn());
+            var savedOn = engine.LoadSettingsAsync("always_on_top").GetAwaiter().GetResult();
+            Assert.Equal("1", savedOn["always_on_top"]);
+            InvokeWindowMethod(window, "SetEdgeHidden", true);
+            StopHideTimer();
+            Assert.True(window.Topmost);
+            Assert.True(EdgeNativeTopmost(HudHandle()));
+            Assert.Equal("1", Captured()["always_on_top"]);
+            log.AppendLine("toggle_on_during_reveal stayed_after_hide=1");
+
+            RevealFromHover();
+            InvokeWindowMethod(window, "OnToggleTopmost", window, new System.Windows.RoutedEventArgs());
+            Pump(250);
+            Assert.True(!window.Topmost);
+            Assert.Equal("0", Captured()["always_on_top"]);
+            Assert.True(!PinShowsOn());
+            InvokeWindowMethod(window, "SetEdgeHidden", true);
+            StopHideTimer();
+            Assert.True(!window.Topmost);
+            Assert.True(!EdgeNativeTopmost(HudHandle()));
+            Assert.Equal("0", Captured()["always_on_top"]);
+            var savedOff = engine.LoadSettingsAsync("always_on_top").GetAwaiter().GetResult();
+            Assert.Equal("0", savedOff["always_on_top"]);
+            log.AppendLine("toggle_off_during_reveal stayed_after_hide=0");
+
+            Prepare("Right", pinOn: false);
+            var revealTimer = (DispatcherTimer)(revealTimerField.GetValue(window)
+                ?? throw new InvalidOperationException("reveal_timer_missing"));
+            var timerFocus = FocusNow();
+            revealTimer.Start();
+            Pump(220);
+            AssertFocusPreserved(timerFocus, "reveal_timer");
+            AssertBand(pinOn: false, revealed: true, "reveal_timer");
+            InvokeWindowMethod(window, "SetEdgeHidden", true);
+            StopHideTimer();
+
+            Prepare("Right", pinOn: false);
+            InvokeWindowMethod(window, "SetEdgeHidden", false);
+            StopHideTimer();
+            Assert.True(!Hidden());
+            Assert.True(!Elevated());
+            Assert.True(!window.Topmost);
+            Assert.True(!EdgeNativeTopmost(HudHandle()));
+            Assert.Equal("0", Captured()["always_on_top"]);
+            log.AppendLine("location_only_reveal native_topmost=false saved=0");
+            InvokeWindowMethod(window, "SetEdgeHidden", true);
+            StopHideTimer();
+
+            dockField.SetValue(window, Enum.Parse(dockField.FieldType, "None"));
+            hiddenField.SetValue(window, false);
+            InvokeWindowMethod(window, "ApplyExpansionState", false);
+            var undockedFocus = FocusNow();
+            RevealFromHover();
+            AssertFocusPreserved(undockedFocus, "undocked");
+            Assert.True(!Elevated());
+            Assert.True(!window.Topmost);
+            Assert.Equal("0", Captured()["always_on_top"]);
+            log.AppendLine("undocked_hover elevated=false");
+
+            Prepare("Right", pinOn: false);
+            RevealFromHover();
+            var slot = new System.Windows.Controls.Button { Tag = "codex-primary" };
+            InvokeWindowMethod(window, "OnRailSlotMouseEnter", slot,
+                new System.Windows.Input.MouseEventArgs(System.Windows.Input.Mouse.PrimaryDevice, Environment.TickCount));
+            var popup = (System.Windows.Controls.Primitives.Popup)(window.FindName("SlotDetailPopup")
+                ?? throw new InvalidOperationException("slot_popup_missing"));
+            Assert.True(popup.IsOpen);
+            var leaveFocus = FocusNow();
+            window.RaiseEvent(new System.Windows.Input.MouseEventArgs(
+                System.Windows.Input.Mouse.PrimaryDevice, Environment.TickCount)
+            {
+                RoutedEvent = System.Windows.Input.Mouse.MouseLeaveEvent,
+            });
+            StopHideTimer();
+            AssertFocusPreserved(leaveFocus, "detail_mouse_leave");
+            Assert.True(!popup.IsOpen);
+            Assert.True(!Hidden());
+            Assert.True(Elevated());
+            Assert.Equal("0", Captured()["always_on_top"]);
+            log.AppendLine("detail_leave closed_popup kept_transient_raise saved=0");
+            InvokeWindowMethod(window, "SetEdgeHidden", true);
+            StopHideTimer();
+            Assert.True(!Elevated());
+
+            Prepare("Right", pinOn: true);
+            RevealFromHover();
+            settingsReadyField.SetValue(window, true);
+            var autoHide = (System.Windows.Controls.CheckBox)(window.FindName("AutoHideCheckBox")
+                ?? throw new InvalidOperationException("auto_hide_checkbox_missing"));
+            autoHide.IsChecked = false;
+            InvokeWindowMethod(window, "OnAutoHideSettingClick", autoHide, new System.Windows.RoutedEventArgs());
+            Pump(200);
+            Assert.True(!Hidden());
+            Assert.True(!Elevated());
+            Assert.True(window.Topmost);
+            Assert.True(EdgeNativeTopmost(HudHandle()));
+            Assert.Equal("1", Captured()["always_on_top"]);
+            log.AppendLine("disable_autohide_while_revealed_pin_on kept_persistent=1");
+            autoHide.IsChecked = true;
+            InvokeWindowMethod(window, "OnAutoHideSettingClick", autoHide, new System.Windows.RoutedEventArgs());
+            Pump(200);
+            StopHideTimer();
+            settingsReadyField.SetValue(window, false);
+
+            Prepare("Right", pinOn: false);
+            RevealFromHover();
+            settingsReadyField.SetValue(window, true);
+            autoHide.IsChecked = false;
+            InvokeWindowMethod(window, "OnAutoHideSettingClick", autoHide, new System.Windows.RoutedEventArgs());
+            Pump(200);
+            Assert.True(!Hidden());
+            Assert.True(!Elevated());
+            Assert.True(!window.Topmost);
+            Assert.True(!EdgeNativeTopmost(HudHandle()));
+            Assert.Equal("0", Captured()["always_on_top"]);
+            log.AppendLine("disable_autohide_while_revealed_pin_off cleared_transient=0");
+            settingsReadyField.SetValue(window, false);
+
+            log.AppendLine("EDGE_REVEAL_Z_ORDER passed");
+            Console.WriteLine("EDGE_REVEAL_Z_ORDER passed");
+        }
+        finally
+        {
+            try { fixture?.Close(); } catch (Exception) { }
+            try { ordinary?.Close(); } catch (Exception) { }
+            if (window is not null)
+            {
+                window.Hide();
+                window.Dispose();
+            }
+            engine?.Dispose();
+            File.WriteAllText(Path.Combine(output, "ZORDER_LOG.txt"), log.ToString());
+        }
+    }
+
+    private static System.Windows.Window CreateOverlapWindow(string caption, System.Windows.Media.Color color, bool topmost)
+    {
+        var brush = new System.Windows.Media.SolidColorBrush(color);
+        if (brush.CanFreeze) brush.Freeze();
+        return new System.Windows.Window
+        {
+            Title = caption,
+            WindowStyle = System.Windows.WindowStyle.None,
+            ResizeMode = System.Windows.ResizeMode.NoResize,
+            ShowActivated = false,
+            ShowInTaskbar = false,
+            Topmost = topmost,
+            Background = brush,
+            Width = 80,
+            Height = 80,
+            Content = new System.Windows.Controls.TextBlock
+            {
+                Text = caption,
+                Margin = new System.Windows.Thickness(8, 0, 8, 8),
+                VerticalAlignment = System.Windows.VerticalAlignment.Bottom,
+                Foreground = System.Windows.Media.Brushes.Black,
+                FontSize = 16,
+            },
+        };
+    }
+
+    private static System.Windows.Point EdgeDevicePoint(System.Windows.Window window, System.Windows.Point dip)
+    {
+        if (System.Windows.PresentationSource.FromVisual(window)?.CompositionTarget is not { } target)
+            return dip;
+        return target.TransformToDevice.Transform(dip);
+    }
+
+    private static bool IsMagenta((byte B, byte G, byte R) color) =>
+        color.R > 240 && color.B > 240 && color.G < 20;
+
+    private static string FormatColor((byte B, byte G, byte R) color) =>
+        "B" + color.B.ToString(CultureInfo.InvariantCulture)
+        + "G" + color.G.ToString(CultureInfo.InvariantCulture)
+        + "R" + color.R.ToString(CultureInfo.InvariantCulture);
+
+    private static (byte B, byte G, byte R) EdgePixel(byte[] pixels, int width, int height, int x, int y)
+    {
+        if (x < 0 || y < 0 || x >= width || y >= height)
+            throw new InvalidOperationException($"pixel_outside:{x},{y} size={width}x{height}");
+        var index = (y * width + x) * 4;
+        return (pixels[index], pixels[index + 1], pixels[index + 2]);
+    }
+
+    private static void SaveBgraPng(byte[] pixels, int width, int height, string path)
+    {
+        var bitmap = BitmapSource.Create(width, height, 96, 96, PixelFormats.Bgra32, null, pixels, width * 4);
+        var encoder = new PngBitmapEncoder();
+        encoder.Frames.Add(BitmapFrame.Create(bitmap));
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var stream = File.Create(path);
+        encoder.Save(stream);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct EdgeBitmapInfo
+    {
+        public int biSize;
+        public int biWidth;
+        public int biHeight;
+        public short biPlanes;
+        public short biBitCount;
+        public int biCompression;
+        public int biSizeImage;
+        public int biXPelsPerMeter;
+        public int biYPelsPerMeter;
+        public int biClrUsed;
+        public int biClrImportant;
+    }
+
+    [DllImport("user32.dll", EntryPoint = "SetWindowPos")]
+    private static extern bool EdgeSetWindowPos(IntPtr hWnd, IntPtr insertAfter,
+        int x, int y, int cx, int cy, uint flags);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetTopWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr hWnd, uint command);
+
+    [DllImport("user32.dll", EntryPoint = "GetWindowLong")]
+    private static extern int GetWindowLong32(IntPtr hWnd, int index);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetDC(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern int ReleaseDC(IntPtr hWnd, IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateCompatibleBitmap(IntPtr hdc, int width, int height);
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool BitBlt(IntPtr dest, int x, int y, int width, int height,
+        IntPtr source, int sourceX, int sourceY, uint rop);
+
+    [DllImport("gdi32.dll")]
+    private static extern int GetDIBits(IntPtr hdc, IntPtr bitmap, uint start, uint lines,
+        byte[] bits, ref EdgeBitmapInfo info, uint usage);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr obj);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteDC(IntPtr hdc);
+
+    private static bool EdgeNativeTopmost(IntPtr hwnd) => (GetWindowLong32(hwnd, -20) & 0x00000008) != 0;
+
+    private static bool EdgeWindowIsAbove(IntPtr above, IntPtr below)
+    {
+        if (above == IntPtr.Zero || below == IntPtr.Zero || above == below) return false;
+        for (var hwnd = GetTopWindow(IntPtr.Zero); hwnd != IntPtr.Zero; hwnd = GetWindow(hwnd, 2))
+        {
+            if (hwnd == above) return true;
+            if (hwnd == below) return false;
+        }
+        return false;
+    }
+
+    private static byte[] CaptureScreenBgra(int x, int y, int width, int height)
+    {
+        var screen = GetDC(IntPtr.Zero);
+        if (screen == IntPtr.Zero) throw new InvalidOperationException("screen_dc_missing");
+        var memory = IntPtr.Zero;
+        var bitmap = IntPtr.Zero;
+        var old = IntPtr.Zero;
+        try
+        {
+            memory = CreateCompatibleDC(screen);
+            bitmap = CreateCompatibleBitmap(screen, width, height);
+            if (memory == IntPtr.Zero || bitmap == IntPtr.Zero)
+                throw new InvalidOperationException("capture_bitmap_missing");
+            old = SelectObject(memory, bitmap);
+            if (!BitBlt(memory, 0, 0, width, height, screen, x, y, 0x00CC0020 | 0x40000000))
+                throw new InvalidOperationException("capture_blit_failed");
+            var info = new EdgeBitmapInfo
+            {
+                biSize = 40,
+                biWidth = width,
+                biHeight = -height,
+                biPlanes = 1,
+                biBitCount = 32,
+            };
+            var pixels = new byte[width * height * 4];
+            if (GetDIBits(memory, bitmap, 0, (uint)height, pixels, ref info, 0) == 0)
+                throw new InvalidOperationException("capture_dib_failed");
+            return pixels;
+        }
+        finally
+        {
+            if (old != IntPtr.Zero && memory != IntPtr.Zero) SelectObject(memory, old);
+            if (bitmap != IntPtr.Zero) DeleteObject(bitmap);
+            if (memory != IntPtr.Zero) DeleteDC(memory);
+            ReleaseDC(IntPtr.Zero, screen);
+        }
     }
 
     private static void HudV2DockGeometry(string runRoot)

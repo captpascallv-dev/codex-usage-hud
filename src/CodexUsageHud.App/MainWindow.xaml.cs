@@ -53,6 +53,7 @@ public partial class MainWindow : Window, IDisposable
     private bool _autoHide = true;
     private bool _restoreHiddenOnNextCompact;
     private bool _topmostPointerInvocation;
+    private bool _edgeRevealElevated;
     private bool _isExpandedFullscreen;
     private EdgeDock _dockSide = EdgeDock.Right;
     private string _compactLayout = CompactLayoutModes.Rail;
@@ -129,7 +130,7 @@ public partial class MainWindow : Window, IDisposable
         _revealTimer.Tick += (_, _) =>
         {
             _revealTimer.Stop();
-            SetEdgeHidden(false);
+            RevealEdgeFromPointer();
         };
         MouseEnter += OnWindowMouseEnter;
         MouseLeave += OnWindowMouseLeave;
@@ -444,6 +445,7 @@ public partial class MainWindow : Window, IDisposable
     private void ShowCompact()
     {
         CollapseToCompact();
+        EndEdgeRevealElevation();
         _isEdgeHidden = false;
         Show();
         WindowState = WindowState.Normal;
@@ -466,6 +468,7 @@ public partial class MainWindow : Window, IDisposable
 
     private async Task HideToTrayAsync(bool showBalloon)
     {
+        EndEdgeRevealElevation();
         CollapseToCompact();
         Hide();
         if (showBalloon)
@@ -504,6 +507,7 @@ public partial class MainWindow : Window, IDisposable
         var work = GetWorkAreaLogical();
         if (_viewModel.IsExpanded)
         {
+            EndEdgeRevealElevation();
             CloseSlotDetail();
             if (!preserveCompactPosition || !double.IsFinite(_compactAxis))
                 _compactAxis = _dockSide == EdgeDock.Top ? Left : Top;
@@ -567,6 +571,8 @@ public partial class MainWindow : Window, IDisposable
             _restoreHiddenOnNextCompact = false;
             _isEdgeHidden = restoreHidden;
             PlaceCompact(work, hidden: restoreHidden);
+            if (restoreHidden)
+                EndEdgeRevealElevation();
             if (!restoreHidden)
             {
                 UIElement shell = card
@@ -967,7 +973,11 @@ public partial class MainWindow : Window, IDisposable
     {
         if (!_settingsReady) return;
         _autoHide = AutoHideCheckBox.IsChecked == true;
-        if (!_autoHide) SetEdgeHidden(false);
+        if (!_autoHide)
+        {
+            EndEdgeRevealElevation();
+            SetEdgeHidden(false);
+        }
         await SaveSettingsSafelyAsync(CaptureWindowSettings());
         if (_autoHide) ScheduleEdgeHide();
     }
@@ -975,6 +985,7 @@ public partial class MainWindow : Window, IDisposable
     private async void OnDockSideSettingChanged(object sender, SelectionChangedEventArgs e)
     {
         if (!_settingsReady || DockSideComboBox.SelectedItem is not ComboBoxItem { Tag: string tag }) return;
+        EndEdgeRevealElevation();
         _dockSide = ParseDock(tag);
         _isEdgeHidden = false;
         ApplyExpansionState(true);
@@ -1139,6 +1150,8 @@ public partial class MainWindow : Window, IDisposable
         {
             _dockSide = ResolveDockSide(work, new Rect(Left, Top, Width, Height), GetCursorLogical());
             _compactAxis = _dockSide == EdgeDock.Top ? Left : Top;
+            if (_dockSide == EdgeDock.None)
+                EndEdgeRevealElevation();
             ApplyExpansionState(true);
             ScheduleEdgeHide();
         }
@@ -1206,8 +1219,48 @@ public partial class MainWindow : Window, IDisposable
         if (_isEdgeHidden)
         {
             _revealTimer.Stop();
-            SetEdgeHidden(false);
+            RevealEdgeFromPointer();
         }
+    }
+
+    private void RevealEdgeFromPointer()
+    {
+        if (!_isEdgeHidden)
+        {
+            SetEdgeHidden(false);
+            return;
+        }
+
+        SetEdgeHidden(false);
+        BeginEdgeRevealElevation();
+    }
+
+    private void BeginEdgeRevealElevation()
+    {
+        if (_edgeRevealElevated || _isEdgeHidden || _viewModel.IsExpanded ||
+            _dockSide == EdgeDock.None || !_autoHide)
+            return;
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+        // Keep Window.Topmost as the saved pin. Reordering here must not activate or focus.
+        _edgeRevealElevated = true;
+        RaiseWindowBand(handle, topmost: true);
+    }
+
+    private void EndEdgeRevealElevation()
+    {
+        if (!_edgeRevealElevated) return;
+        _edgeRevealElevated = false;
+        if (Topmost) return;
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+        RaiseWindowBand(handle, topmost: false);
+    }
+
+    private static void RaiseWindowBand(IntPtr handle, bool topmost)
+    {
+        _ = SetWindowPos(handle, topmost ? HwndTopmost : HwndNotTopmost,
+            0, 0, 0, 0, SwpNoMove | SwpNoSize | SwpNoActivate);
     }
 
     private void OnWindowMouseLeave(object sender, System.Windows.Input.MouseEventArgs e)
@@ -1229,10 +1282,15 @@ public partial class MainWindow : Window, IDisposable
     {
         if (_viewModel.IsExpanded || _dockSide == EdgeDock.None || !_autoHide)
             hidden = false;
-        if (_isEdgeHidden == hidden) return;
+        if (_isEdgeHidden == hidden)
+        {
+            if (hidden) EndEdgeRevealElevation();
+            return;
+        }
         _isEdgeHidden = hidden;
         if (hidden) CloseSlotDetail();
         PlaceCompact(GetWorkAreaLogical(), hidden);
+        if (hidden) EndEdgeRevealElevation();
     }
 
     private async void OnClosing(object? sender, CancelEventArgs e)
@@ -1522,6 +1580,7 @@ public partial class MainWindow : Window, IDisposable
         _dockSide = EdgeDock.Right;
         _compactAxis = double.NaN;
         _isEdgeHidden = false;
+        EndEdgeRevealElevation();
         ApplyExpansionState();
     }
 
@@ -1626,6 +1685,16 @@ public partial class MainWindow : Window, IDisposable
         var preference = 2; // DWMWCP_ROUND
         _ = DwmSetWindowAttribute(handle, 33, ref preference, sizeof(int));
     }
+
+    private const uint SwpNoSize = 0x0001;
+    private const uint SwpNoMove = 0x0002;
+    private const uint SwpNoActivate = 0x0010;
+    private static readonly IntPtr HwndTopmost = new(-1);
+    private static readonly IntPtr HwndNotTopmost = new(-2);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter,
+        int x, int y, int cx, int cy, uint flags);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool DestroyIcon(IntPtr handle);

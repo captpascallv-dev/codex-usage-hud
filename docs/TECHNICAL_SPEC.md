@@ -527,7 +527,9 @@ full exception dumps.
 ## 11. UI contract
 
 The borderless WPF window supports optional always-on-top, dragging, DPI awareness, and remembers
-position. Closing hides to the system tray; tray commands are Show/Hide,
+position. Pointer reveal of an auto-hidden docked card raises it above overlapping ordinary and
+topmost windows without activation or keyboard focus, and does not change the saved always-on-top
+preference. That temporary raise ends when the card hides if always-on-top is off. Closing hides to the system tray; tray commands are Show/Hide,
 Refresh, Settings, and Exit. Exit cancels workers and closes SQLite cleanly.
 
 The top-level HUD window is opaque so Windows can use ClearType text rendering.

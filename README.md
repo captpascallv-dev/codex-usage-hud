@@ -181,7 +181,9 @@ the source with the project-local scripts below.
    图钉切换窗口置顶。展开页右上角箭头收回，全屏按钮可在工作区全屏与原窗口大小之间切换。
 4. 紧凑卡可拖到桌面左、右或上边缘。程序同时依据鼠标与卡片位置识别停靠意图，左右侧
    不要求把卡片边缘精确拖进很窄的命中区。停靠后自动隐藏，只保留约 9 像素状态把手；鼠标移入
-   会自动唤出。右边向左展开、左边向右展开、顶部向下展开。
+   会自动唤出，并把卡片升到与其重叠的普通窗口和其他置顶窗口之上，且不取得键盘焦点。这次升层不改写图钉、
+   勾选或已保存的始终置顶。未开启始终置顶时，卡片再次隐藏后结束临时升层；已开启时保持置顶，并在每次唤出时
+   重新排到置顶层最前。右边向左展开、左边向右展开、顶部向下展开。
 5. 设置面板可切换始终置顶、靠边自动隐藏、随 Windows 登录启动，并可创建/修复桌面快捷方式。
    窗口关闭按钮只隐藏到系统托盘；从托盘菜单选择“退出”才会彻底结束。
 6. Windows 可能把托盘图标放进右下角的 `^` 隐藏区；如果一时找不到，再双击同一个 EXE
@@ -410,7 +412,7 @@ The former decorative ellipsis is a real settings button. Both compact layouts
 also expose the same persisted window-topmost toggle as the expanded header. The card can be dragged,
 kept on top, docked to the left/right/top work-area edge, and auto-hidden to a
 9-pixel recovery handle. Pointer-at-edge intent supplements window-edge distance,
-so left and right docking do not require pixel-perfect placement. Hover reveals the card; its expand button opens the
+so left and right docking do not require pixel-perfect placement. Hover reveals the card above overlapping ordinary and other topmost windows without activating it or taking keyboard focus, and without changing the saved always-on-top pin. If that pin is off, the temporary raise ends when the card hides again; if it is on, the card stays topmost and each reveal places it ahead of newer topmost windows. Its expand button opens the
 full panel away from the docked edge. The panel and compact card remember their
 safe screen position and recover after display-topology changes. Closing hides
 the HUD to the tray. The tray provides show/hide, refresh, settings, desktop

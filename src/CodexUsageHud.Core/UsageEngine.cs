@@ -18,7 +18,10 @@ public sealed class UsageEngine : IDisposable
     private readonly StateMetadataReader _stateReader = new();
     private readonly SessionIndexReader _indexReader = new();
     private readonly CodexExecutableDiscovery _executableDiscovery = new();
-    private readonly AppServerClient _appServerClient = new(HudProduct.Version);
+    // A normal primary quota read can approach five seconds. Leave enough time
+    // for the authenticated read to finish before invalidating the account pair.
+    private readonly AppServerClient _appServerClient = new(HudProduct.Version,
+        requestTimeout: TimeSpan.FromSeconds(15));
     private readonly ProviderQuotaCoordinator _providers;
     private readonly QuotaStateMachine _quotaState;
     private readonly RefreshCadence _cadence = new();

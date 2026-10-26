@@ -25,10 +25,38 @@ async function saveOwnedTab(tabId) {
 
 function sendNative(message) {
   const payload = parser.sanitizeNativeMessage(message);
-  if (payload.source !== BILLING_URL || (payload.kind !== "observation" && payload.kind !== "status")) return;
-  const port = chrome.runtime.connectNative(HOST_NAME);
-  port.onDisconnect.addListener(() => {});
-  port.postMessage(payload);
+  if (payload.source !== BILLING_URL || (payload.kind !== "observation" && payload.kind !== "status")) {
+    return Promise.resolve(false);
+  }
+  return new Promise(resolve => {
+    let settled = false;
+    let timer = 0;
+    const finish = accepted => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(accepted === true);
+    };
+    let port;
+    try { port = chrome.runtime.connectNative(HOST_NAME); }
+    catch { finish(false); return; }
+    timer = setTimeout(() => finish(false), 4000);
+    port.onMessage.addListener(reply => finish(Boolean(reply && reply.ok === true)));
+    port.onDisconnect.addListener(() => finish(false));
+    try { port.postMessage(payload); }
+    catch { finish(false); }
+  });
+}
+
+async function publishNative(message) {
+  const accepted = await sendNative(message);
+  if (!accepted) {
+    await rememberPopup({ kind: "status", state: "unavailable", observed_at_utc: message && message.observed_at_utc || "" });
+    return false;
+  }
+  await rememberPopup(message);
+  await rememberSession(message);
+  return true;
 }
 
 async function sessionBinding() {
@@ -64,9 +92,7 @@ async function sendStatus(reason) {
     read.organizationBinding = binding;
   }
   const message = parser.toNativeMessage(read, new Date().toISOString());
-  sendNative(message);
-  await rememberPopup(message);
-  await rememberSession(message);
+  await publishNative(message);
 }
 
 async function openOwnedTab() {
@@ -74,22 +100,29 @@ async function openOwnedTab() {
   await saveOwnedTab(created.id);
 }
 
+async function validOwnedTab() {
+  if (!Number.isInteger(ownedTabId)) return null;
+  try {
+    const tab = await chrome.tabs.get(ownedTabId);
+    return tab && tab.url === BILLING_URL ? tab : null;
+  } catch {
+    return null;
+  }
+}
+
 async function reloadOwnedTab() {
   await loadState();
-  if (!enabled || !Number.isInteger(ownedTabId)) {
+  if (!enabled) return;
+  const tab = await validOwnedTab();
+  if (!tab) {
+    if (Number.isInteger(ownedTabId)) {
+      await sendStatus("login_changed");
+      await saveOwnedTab(null);
+    }
     await openOwnedTab();
     return;
   }
-  let tab;
-  try { tab = await chrome.tabs.get(ownedTabId); }
-  catch { tab = null; }
-  if (!tab || tab.url !== BILLING_URL) {
-    await sendStatus("login_changed");
-    await saveOwnedTab(null);
-    await openOwnedTab();
-    return;
-  }
-  await chrome.tabs.reload(ownedTabId);
+  await chrome.tabs.reload(tab.id);
 }
 
 async function readOwnedTab(tabId) {
@@ -126,9 +159,11 @@ async function closeOwnedTab() {
 }
 
 async function startReader() {
+  await loadState();
   enabled = true;
   await chrome.storage.local.set({ enabled: true });
   await chrome.alarms.create(ALARM, { periodInMinutes: PERIOD_MINUTES });
+  if (await validOwnedTab()) return;
   await openOwnedTab();
 }
 
@@ -165,16 +200,23 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.type !== "claude-api-credit-read" || !sender.tab) return;
   loadState().then(async () => {
-    if (!enabled || sender.tab.id !== ownedTabId) return;
-    if (!message.navigationToken || message.navigationToken === lastNavigationToken) return;
+    if (!enabled || sender.tab.id !== ownedTabId) {
+      sendResponse({ accepted: false });
+      return;
+    }
+    if (!message.navigationToken || message.navigationToken === lastNavigationToken) {
+      sendResponse({ accepted: false });
+      return;
+    }
     lastNavigationToken = message.navigationToken;
     const nativeMessage = parser.sanitizeNativeMessage(message.message || {});
-    if (nativeMessage.source !== BILLING_URL) return;
-    sendNative(nativeMessage);
-    await rememberPopup(nativeMessage);
-    await rememberSession(nativeMessage);
-    sendResponse({ accepted: true });
-  }).catch(() => {});
+    if (nativeMessage.source !== BILLING_URL) {
+      sendResponse({ accepted: false });
+      return;
+    }
+    const accepted = await publishNative(nativeMessage);
+    sendResponse({ accepted });
+  }).catch(() => sendResponse({ accepted: false }));
   return true;
 });
 

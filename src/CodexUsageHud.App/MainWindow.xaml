@@ -581,7 +581,7 @@
                                     <TextBox x:Name="SlotGrokLabel" Height="34" Margin="0,0,0,8" Padding="8,6" LostFocus="OnProviderSettingsChanged" />
                                     <CheckBox x:Name="SlotGrokBotEnabled" Content="启用 Grok Bot 额度" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,6" Click="OnProviderSettingsChanged" />
                                     <TextBox x:Name="SlotGrokBotLabel" Height="34" Margin="0,0,0,8" Padding="8,6" LostFocus="OnProviderSettingsChanged" />
-                                    <TextBlock Text="Grok Bot 走 Cursor 登录，与 Grok 周池、Cursor 月度池分开。缺少重置时间时不会按 7 天推算。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                                    <TextBlock Text="Grok Bot 与 Cursor 使用同一个 Cursor 登录。同一付费席位上，Cursor、Grok、Bot 和 Build 共用一份每周额度；Cursor 和 Bot 上的共享周额度是这一份的两个视图，不要相加。Grok 这一格仍显示该登录自己的官方读数。它有时是整数，Cursor 有时带小数，这不代表另一份额度，也不会把数字抄到另一格。另一套登录或旧计划仍各自显示。缺少重置时间时不会按 7 天推算。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,8" />
                                     <CheckBox x:Name="SlotClaudeEnabled" Content="启用 Claude 订阅额度（仅额度）" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,6" Click="OnProviderSettingsChanged" />
                                     <TextBox x:Name="SlotClaudeLabel" Height="34" Margin="0,0,0,8" Padding="8,6" LostFocus="OnProviderSettingsChanged" />
                                     <TextBlock Text="Claude 只读本机 Claude Code 已有 OAuth 登录，请求订阅用量。显示 5 小时和每周全部模型的剩余百分比，以及接口实际返回的模型窗口和重置时间。不分析会话，不从 raw token 或 API key 账单推算。未登录显示未连接；限流或格式不支持时显示不可用。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,8" />
@@ -737,6 +737,9 @@
                         </DataTemplate>
                     </ItemsControl.ItemTemplate>
                 </ItemsControl>
+                <TextBlock x:Name="SlotDetailShareNoteText" Text="{Binding SlotDetailShareNote}" FontSize="12"
+                           Margin="0,0,0,8" TextWrapping="Wrap" Foreground="{StaticResource HudMuted}"
+                           Visibility="{Binding SlotDetailShareNoteVisible, Converter={StaticResource BoolVisibility}}" />
                 <Border x:Name="ClaudeApiCreditRow" Margin="0,0,0,8" Padding="0"
                         Visibility="{Binding ClaudeApiCreditVisible, Converter={StaticResource BoolVisibility}}"
                         AutomationProperties.Name="Claude API赠送额度">

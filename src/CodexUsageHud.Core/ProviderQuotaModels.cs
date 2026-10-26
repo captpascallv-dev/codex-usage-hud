@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -25,6 +26,18 @@ public static class ProviderIds
     public const string Grok = "grok";
     public const string GrokBot = "grok-bot";
     public const string Claude = "claude";
+}
+
+public static class SharedWeeklyQuota
+{
+    public const string WindowId = "shared_weekly";
+    public const string PoolId = "x_shared_weekly";
+    public const string DisplayName = "Cursor/Grok/Bot 共享周额度";
+    public const string RailCaption = "共享周额度";
+    public const string StatusText = "Cursor/Grok/Bot 共享周额度";
+    public const string SharedSeatNote = "同一付费席位的 Cursor、Grok、Bot 和 Build 共用这份每周额度，不是几份额度相加。Grok 仍显示该登录自己的官方读数；小数位数不同也不表示另一份，也不会互相抄数。";
+    public const string GrokSeatNote = "若这是同一付费席位，这里的每周读数就是 Cursor 那份共享额度的官方数字，不是额外额度。这一格仍只用这个登录自己的读数，不抄另一格。";
+    public const string SourceUrl = "https://cursor.com/api/dashboard/get-sand-usage-status";
 }
 
 public enum QuotaSlotStatus
@@ -128,12 +141,16 @@ public sealed record ProviderSlotSnapshot(
             if (Status == QuotaSlotStatus.SetupRequired) return "未配置";
             if (Status == QuotaSlotStatus.NotConnected) return "未连接";
             return GlanceRemainingPercent is { } remaining
-                ? remaining.ToString("0", System.Globalization.CultureInfo.InvariantCulture) + "%"
+                ? ProviderQuotaPresentation.FormatPercent(GlanceWindow!, remaining)
                 : "—";
         }
     }
 
-    public string GlanceWindowCaption => GlanceWindow?.DisplayName ?? string.Empty;
+    public string GlanceWindowCaption => GlanceWindow is null
+        ? string.Empty
+        : string.Equals(GlanceWindow.WindowId, SharedWeeklyQuota.WindowId, StringComparison.Ordinal)
+            ? SharedWeeklyQuota.RailCaption
+            : GlanceWindow.DisplayName;
 
     public string GlanceText
     {
@@ -148,13 +165,13 @@ public sealed record ProviderSlotSnapshot(
             if (UpdateDelayed)
             {
                 return GlanceWindow is { } delayed && delayed.RemainingPercent is { } delayedRemaining
-                    ? $"{delayed.DisplayName} {delayedRemaining:0}% · 更新延迟"
+                    ? $"{delayed.DisplayName} {ProviderQuotaPresentation.FormatPercent(delayed, delayedRemaining)} · 更新延迟"
                     : "更新延迟";
             }
 
             if (GlanceWindow is { } window && window.RemainingPercent is { } remaining)
             {
-                var named = $"{window.DisplayName} {remaining:0}%";
+                var named = $"{window.DisplayName} {ProviderQuotaPresentation.FormatPercent(window, remaining)}";
                 return Status == QuotaSlotStatus.Stale ? named + " · 陈旧" : named;
             }
 
@@ -316,8 +333,35 @@ public static class ProviderQuotaPresentation
         if (!window.ResetsAtUtc.HasValue)
             return window.MissingResetText ?? "重置时间不可用";
         if (window.ResetsAtUtc.Value <= nowUtc) return "已到期（陈旧）";
-        return $"重置 {window.ResetsAtUtc.Value.ToLocalTime():MM月dd日 HH:mm} · " +
-               HudPresentation.FormatCountdown(window.ResetsAtUtc.Value - nowUtc);
+        var text = $"重置 {window.ResetsAtUtc.Value.ToLocalTime():MM月dd日 HH:mm} · " +
+                   HudPresentation.FormatCountdown(window.ResetsAtUtc.Value - nowUtc);
+        if (window.WindowId == SharedWeeklyQuota.WindowId && window.WindowDurationMinutes is > 0)
+            text += " · 周期 " + FormatDuration(window.WindowDurationMinutes.Value);
+        return text;
+    }
+
+    public static string FormatPercent(QuotaWindowObservation window, double value)
+    {
+        _ = window;
+        return FormatFinePercent(value) + "%";
+    }
+
+    public static string FormatFinePercent(double value)
+    {
+        if (!double.IsFinite(value)) return "0";
+        var rounded = Math.Round(value, 2, MidpointRounding.AwayFromZero);
+        if (Math.Abs(rounded - Math.Truncate(rounded)) < 0.001)
+            return Math.Truncate(rounded).ToString("0", CultureInfo.InvariantCulture);
+        return rounded.ToString("0.##", CultureInfo.InvariantCulture);
+    }
+
+    public static string FormatDuration(int minutes)
+    {
+        if (minutes % 1440 == 0 && minutes / 1440 > 0)
+            return (minutes / 1440).ToString(CultureInfo.InvariantCulture) + " 天";
+        if (minutes % 60 == 0 && minutes / 60 > 0)
+            return (minutes / 60).ToString(CultureInfo.InvariantCulture) + " 小时";
+        return minutes.ToString(CultureInfo.InvariantCulture) + " 分钟";
     }
 
     public static string FormatWindowLine(QuotaWindowObservation window, DateTimeOffset nowUtc)
@@ -328,7 +372,7 @@ public static class ProviderQuotaPresentation
             return $"{window.DisplayName}：无可用额度，不显示剩余百分比";
         if (!window.UsedPercent.HasValue)
             return $"{window.DisplayName}：缺少用量字段，不显示 100% 可用";
-        return $"{window.DisplayName}：剩余 {window.RemainingPercent:0}% · 已用 {window.UsedPercent:0}% · " +
+        return $"{window.DisplayName}：剩余 {FormatPercent(window, window.RemainingPercent!.Value)} · 已用 {FormatPercent(window, window.UsedPercent.Value)} · " +
                FormatReset(window, nowUtc);
     }
 

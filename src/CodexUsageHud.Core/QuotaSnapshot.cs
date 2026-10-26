@@ -120,6 +120,8 @@ public static class QuotaSnapshotMapper
             return TryCursorPool(windowId, out pool);
         if (slotId == ProviderSlotIds.Grok && windowId == "weekly")
             return Assign("grok_weekly", out pool);
+        if (slotId == ProviderSlotIds.GrokBot && windowId == SharedWeeklyQuota.WindowId)
+            return Assign(SharedWeeklyQuota.PoolId, out pool);
         if (slotId == ProviderSlotIds.GrokBot && windowId == "sand")
             return Assign("grok_bot", out pool);
         if (slotId == ProviderSlotIds.Claude)
@@ -148,6 +150,7 @@ public static class QuotaSnapshotMapper
             "autoPercentUsed" => "cursor_auto",
             "apiPercentUsed" => "cursor_api",
             "团队共用" => "cursor_team",
+            SharedWeeklyQuota.WindowId => SharedWeeklyQuota.PoolId,
             _ => string.Empty,
         };
         return pool.Length > 0;

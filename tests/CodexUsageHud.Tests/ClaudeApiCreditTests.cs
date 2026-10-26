@@ -37,6 +37,7 @@ internal static class ClaudeApiCreditTests
             FramingAndValidation(root, log);
             AccountFreshnessAndBounds(root, log);
             ExportGlanceAndPrivacy(root, log);
+            DecimalCaptions(root, log);
             StaticPackage(log);
             HostProcess(root, log);
             RenderMoneyRow(root, output, log);
@@ -273,6 +274,65 @@ internal static class ClaudeApiCreditTests
         log.AppendLine("export_glance_privacy=pass");
     }
 
+    private static void DecimalCaptions(string root, StringBuilder log)
+    {
+        Expect(ProviderQuotaPresentation.FormatFinePercent(96) == "96", "fine-whole");
+        Expect(ProviderQuotaPresentation.FormatFinePercent(4) == "4", "fine-four");
+        Expect(ProviderQuotaPresentation.FormatFinePercent(97.5) == "97.5", "fine-one");
+        var now = new DateTimeOffset(2026, 10, 27, 2, 0, 0, TimeSpan.Zero);
+        const double fractionalUsed = 4.639407888798628;
+        var provider = new QuotaWindowObservation("weekly", "每周额度", fractionalUsed, now.AddDays(7), 10080, true);
+        var providerRemaining = provider.RemainingPercent!.Value;
+        Expect(ProviderQuotaPresentation.FormatPercent(provider, providerRemaining) == "95.36%", "provider-fraction");
+        var whole = new QuotaWindowObservation("weekly", "每周额度", 4, now.AddDays(7), 10080, true);
+        Expect(ProviderQuotaPresentation.FormatPercent(whole, whole.RemainingPercent!.Value) == "96%", "provider-whole");
+        var shared = new QuotaWindowObservation(SharedWeeklyQuota.WindowId, SharedWeeklyQuota.DisplayName, 4.606914, now.AddDays(7), 10080, true);
+        Expect(ProviderQuotaPresentation.FormatPercent(shared, shared.RemainingPercent!.Value) == "95.39%", "shared-fraction");
+
+        var fractionBucket = new QuotaBucket("primary", "5小时", fractionalUsed, 300, now.AddHours(5));
+        var fractionSnapshot = new HudSnapshot(
+            new QuotaObservation(fractionBucket, Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false),
+            Array.Empty<SessionAggregate>(), null, now, false, null, Array.Empty<string>());
+        var collapsed = HudPresentation.BuildCollapsedText(fractionSnapshot);
+        Expect(collapsed.Contains("95.36%", StringComparison.Ordinal), "codex-fraction " + collapsed);
+        Expect(!collapsed.Contains("95.360", StringComparison.Ordinal), "codex-not-raw");
+        var overview = HudPresentation.BuildFrame(fractionSnapshot).OverviewText;
+        Expect(overview.Contains("已用 4.64%", StringComparison.Ordinal) &&
+               overview.Contains("剩余 95.36%", StringComparison.Ordinal), "overview-fraction " + overview);
+        var wholeBucket = new QuotaBucket("primary", "5小时", 4, 300, now.AddHours(5));
+        var wholeText = HudPresentation.BuildCollapsedText(fractionSnapshot with
+        {
+            Quota = new QuotaObservation(wholeBucket, Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false),
+        });
+        Expect(wholeText.Contains("96%", StringComparison.Ordinal) &&
+               !wholeText.Contains("96.00", StringComparison.Ordinal), "codex-whole " + wholeText);
+
+        var directory = Path.Combine(root, "decimals");
+        Directory.CreateDirectory(directory);
+        var grok = new ProviderSlotSnapshot(ProviderSlotIds.Grok, ProviderIds.Grok, "Grok", true, false,
+            QuotaSlotStatus.Live, "正常", now, "Grok", new[] { provider });
+        var board = new ProviderQuotaBoard(new[]
+        {
+            Placeholder(ProviderSlotIds.CodexPrimary, ProviderIds.Codex),
+            Placeholder(ProviderSlotIds.CodexSecondary, ProviderIds.Codex),
+            Placeholder(ProviderSlotIds.Cursor, ProviderIds.Cursor),
+            grok,
+            Placeholder(ProviderSlotIds.GrokBot, ProviderIds.GrokBot),
+            Placeholder(ProviderSlotIds.Claude, ProviderIds.Claude),
+        }, now);
+        var writer = new QuotaSnapshotWriter(directory, "1.1.3", clock: () => now);
+        writer.SetEnabled(true);
+        writer.Publish(board);
+        writer.WhenIdleAsync().GetAwaiter().GetResult();
+        using var document = JsonDocument.Parse(File.ReadAllText(writer.FinalPath, Encoding.UTF8));
+        var exported = document.RootElement.GetProperty("slots").EnumerateArray()
+            .Single(slot => slot.GetProperty("slot").GetString() == "grok")
+            .GetProperty("windows")[0].GetProperty("remaining_percent").GetDouble();
+        Expect(Math.Abs(exported - providerRemaining) < 0.000000001d, "export-raw");
+        Expect(exported != 95.36d, "export-not-rounded");
+        log.AppendLine("decimal_text=pass");
+    }
+
     private static void StaticPackage(StringBuilder log)
     {
         var repo = RepoRoot();
@@ -305,15 +365,38 @@ internal static class ClaudeApiCreditTests
         Expect(parser.Contains("促銷額度", StringComparison.Ordinal) &&
                parser.Contains("促销额度", StringComparison.Ordinal) &&
                parser.Contains("Promotional credits", StringComparison.Ordinal), "header-aliases");
+        Expect(parser.Contains("主要導覽", StringComparison.Ordinal) &&
+               parser.Contains("aria-hidden", StringComparison.Ordinal), "observed-dom");
+        Expect(!parser.Contains("organization-switcher", StringComparison.Ordinal) &&
+               !parser.Contains("organization-menu-button", StringComparison.Ordinal), "no-guessed-selector");
+        Expect(background.Contains("reply.ok === true", StringComparison.Ordinal), "native-ack");
+        Expect(background.Contains("if (!enabled) return;", StringComparison.Ordinal), "disabled-alarm");
 
         var install = File.ReadAllText(Path.Combine(extension, "install", "Install-ClaudeApiCreditHost.ps1"), Encoding.UTF8);
         var uninstall = File.ReadAllText(Path.Combine(extension, "install", "Uninstall-ClaudeApiCreditHost.ps1"), Encoding.UTF8);
+        var plan = File.ReadAllText(Path.Combine(extension, "install", "ClaudeApiCreditUninstallPlan.ps1"), Encoding.UTF8);
         Expect(install.Contains("HKCU:\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.codexusagehud.claude_api_credit", StringComparison.Ordinal), "hkcu");
         Expect(!install.Contains("HKLM", StringComparison.Ordinal) && !uninstall.Contains("HKLM", StringComparison.Ordinal), "no-hklm");
         Expect(!install.Contains("chrome.exe", StringComparison.OrdinalIgnoreCase), "install-does-not-launch");
-        Expect(uninstall.Contains("claude-api-credit-bridge", StringComparison.Ordinal), "uninstall-bridge");
-        Expect(uninstall.Contains("claude-api-credit.json", StringComparison.Ordinal), "uninstall-cache");
-        Expect(!uninstall.Contains("usage.db", StringComparison.Ordinal), "uninstall-keeps-database-name");
+        Expect(install.Contains("'manifest.json'", StringComparison.Ordinal) &&
+               install.Contains("'popup.js'", StringComparison.Ordinal), "install-enumerated");
+        Expect(!install.Contains("extension\\*", StringComparison.Ordinal) &&
+               !install.Contains("extension/*", StringComparison.Ordinal), "install-no-wildcard");
+        Expect(plan.Contains("claude-api-credit-bridge", StringComparison.Ordinal), "uninstall-bridge");
+        Expect(plan.Contains("claude-api-credit.json", StringComparison.Ordinal), "uninstall-cache");
+        Expect(plan.Contains("reparse_point", StringComparison.Ordinal), "uninstall-reparse");
+        Expect(uninstall.Contains("file_guard.py", StringComparison.Ordinal), "uninstall-recycler");
+        Expect(!uninstall.Contains("-Recurse", StringComparison.Ordinal) &&
+               !plan.Contains("-Recurse", StringComparison.Ordinal), "uninstall-no-recurse");
+        Expect(!uninstall.Contains("usage.db", StringComparison.Ordinal) &&
+               !plan.Contains("usage.db", StringComparison.Ordinal), "uninstall-keeps-database-name");
+        var settings = File.ReadAllText(Path.Combine(repo, "src", "CodexUsageHud.App", "MainWindow.xaml"), Encoding.UTF8);
+        var captionAt = settings.IndexOf("同一付费席位上，Cursor、Grok、Bot 和 Build", StringComparison.Ordinal);
+        Expect(captionAt >= 0, "shared-seat-caption");
+        var caption = settings.Substring(captionAt, Math.Min(500, settings.Length - captionAt));
+        Expect(!caption.Contains("isUnified", StringComparison.Ordinal) &&
+               !caption.Contains("x_shared_weekly", StringComparison.Ordinal), "settings-no-raw-fields");
+        Expect(settings.Contains("Text=\"{Binding SlotDetailShareNote}\"", StringComparison.Ordinal), "share-note-bound");
 
         var engine = File.ReadAllText(Path.Combine(repo, "src", "CodexUsageHud.Core", "UsageEngine.cs"), Encoding.UTF8);
         Expect(engine.Contains("requestTimeout: TimeSpan.FromSeconds(15)", StringComparison.Ordinal), "primary-timeout");
@@ -364,6 +447,13 @@ internal static class ClaudeApiCreditTests
         {
             var application = new CodexUsageHud.App.App();
             application.InitializeComponent();
+            var startup = typeof(CodexUsageHud.App.App).GetMethod("OnStartup",
+                BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
+            if (startup is not null && Application.Current is CodexUsageHud.App.App app)
+            {
+                app.Startup -= (StartupEventHandler)Delegate.CreateDelegate(typeof(StartupEventHandler), app, startup);
+                app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+            }
         }
 
         var directory = Path.Combine(root, "ui");
@@ -386,27 +476,41 @@ internal static class ClaudeApiCreditTests
                exported.Contains("\"remaining\":\"99.20\"", StringComparison.Ordinal), "engine-export");
         Expect(!exported.Contains(binding, StringComparison.Ordinal), "engine-export-no-binding");
 
+        var offLeft = SystemParameters.VirtualScreenLeft - 4000;
+        var offTop = SystemParameters.VirtualScreenTop - 1600;
         using var window = new MainWindow(engine, () => Task.CompletedTask, false)
         {
             ShowActivated = false,
             ShowInTaskbar = false,
-            Left = -12000,
-            Top = -12000,
+            Left = offLeft + 40,
+            Top = offTop + 40,
             Opacity = 1,
         };
-        window.OverrideWorkAreaForTests(new Rect(-12000, -12000, 1600, 1000));
+        window.OverrideWorkAreaForTests(new Rect(offLeft, offTop, 1800, 1200));
+        typeof(MainWindow).GetField("_autoHide", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(window, false);
         var trayField = typeof(MainWindow).GetField("_tray", BindingFlags.Instance | BindingFlags.NonPublic);
         if (trayField?.GetValue(window) is System.Windows.Forms.NotifyIcon tray)
             tray.Visible = false;
+        _ = new System.Windows.Interop.WindowInteropHelper(window).EnsureHandle();
         window.Show();
         window.Dispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+        Expect(window.IsLoaded, "window-loaded");
         var viewModel = (MainViewModel)typeof(MainWindow).GetField("_viewModel", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(window)!;
         var cursor = new ProviderSlotSnapshot(ProviderSlotIds.Cursor, ProviderIds.Cursor, "Cursor", true, false,
             QuotaSlotStatus.Live, "正常", observed, "Cursor",
-            new[] { new QuotaWindowObservation("autoPercentUsed", "每周", 3, observed.AddDays(7), 10080, true) });
+            new[]
+            {
+                new QuotaWindowObservation(SharedWeeklyQuota.WindowId, SharedWeeklyQuota.DisplayName, 3,
+                    observed.AddDays(7), 10080, true),
+            });
+        var grok = new ProviderSlotSnapshot(ProviderSlotIds.Grok, ProviderIds.Grok, "Grok", true, false,
+            QuotaSlotStatus.Live, "正常", observed, "Grok",
+            new[] { new QuotaWindowObservation("weekly", "每周额度", 4, observed.AddDays(7), 10080, true) });
         viewModel.Apply(new HudSnapshot(
-            new QuotaObservation(null, Array.Empty<QuotaBucket>(), QuotaSource.Unavailable, observed, false),
+            new QuotaObservation(new QuotaBucket("primary", "5小时", 4.639407888798628, 300, observed.AddHours(5)),
+                Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, observed, false),
             Array.Empty<SessionAggregate>(), null, observed, false, null, Array.Empty<string>(),
             Array.Empty<HudEvent>(),
             Providers: new ProviderQuotaBoard(new[]
@@ -414,24 +518,72 @@ internal static class ClaudeApiCreditTests
                 Placeholder(ProviderSlotIds.CodexPrimary, ProviderIds.Codex),
                 Placeholder(ProviderSlotIds.CodexSecondary, ProviderIds.Codex),
                 cursor,
-                Placeholder(ProviderSlotIds.Grok, ProviderIds.Grok),
+                grok,
                 Placeholder(ProviderSlotIds.GrokBot, ProviderIds.GrokBot),
                 Placeholder(ProviderSlotIds.Claude, ProviderIds.Claude),
             }, observed)));
         typeof(MainWindow).GetMethod("RefreshClaudeApiCredit", BindingFlags.Instance | BindingFlags.NonPublic)!
             .Invoke(window, null);
         viewModel.SelectSlot(ProviderSlotIds.Cursor, true);
+        Expect(viewModel.RemainingText == "95.36%", "ui-codex-fraction");
+        Expect(viewModel.UsedText == "4.64%", "ui-codex-used");
         Expect(viewModel.SlotDetailPercent == "97%", "ui-glance");
+        Expect(viewModel.SlotDetailShareNote == SharedWeeklyQuota.SharedSeatNote, "ui-shared-note");
+        Expect(viewModel.SlotDetailBody.Contains(SharedWeeklyQuota.SharedSeatNote, StringComparison.Ordinal), "ui-shared-body");
+        Expect(!viewModel.SlotDetailShareNote.Contains("isUnified", StringComparison.Ordinal) &&
+               !viewModel.SlotDetailShareNote.Contains("x_shared_weekly", StringComparison.Ordinal), "ui-note-no-raw-fields");
         Expect(viewModel.ClaudeApiCreditVisible, "ui-visible");
         Expect(viewModel.ClaudeApiCreditAmount == "US$99.20 / US$100.00", "ui-amount");
         Expect(viewModel.ClaudeApiCreditDetail.Contains("2026-10-15", StringComparison.Ordinal) &&
                viewModel.ClaudeApiCreditDetail.Contains("2026-11-12", StringComparison.Ordinal), "ui-dates");
         Expect(!string.Join('\n', viewModel.RenderedStrings()).Contains(binding, StringComparison.Ordinal), "ui-no-binding");
         Expect(!string.Join('\n', viewModel.RenderedStrings()).Contains(Label, StringComparison.Ordinal), "ui-no-label");
+        viewModel.IsExpanded = true;
+        typeof(MainWindow).GetMethod("ApplyExpansionState", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(window, new object[] { false });
+        window.UpdateLayout();
+        window.Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+        var percent = (FrameworkElement)(window.FindName("ExpandedRemainingText")
+            ?? throw new InvalidOperationException("percent_missing"));
+        var shell = (FrameworkElement)(window.FindName("ExpandedShell")
+            ?? throw new InvalidOperationException("shell_missing"));
+        if (shell.Visibility != Visibility.Visible || shell.ActualWidth < 200 || percent.ActualWidth < 20)
+            throw new InvalidOperationException(
+                "expand shell=" + shell.Visibility +
+                " shellW=" + shell.ActualWidth.ToString("0", CultureInfo.InvariantCulture) +
+                " text=" + percent.ActualWidth.ToString("0", CultureInfo.InvariantCulture) +
+                "x" + percent.ActualHeight.ToString("0", CultureInfo.InvariantCulture) +
+                " win=" + window.ActualWidth.ToString("0", CultureInfo.InvariantCulture) +
+                "x" + window.ActualHeight.ToString("0", CultureInfo.InvariantCulture) +
+                " loaded=" + window.IsLoaded +
+                " left=" + window.Left.ToString("0", CultureInfo.InvariantCulture));
+        SaveElementPng(OverviewCard(percent), Path.Combine(output, "codex-decimal.png"));
+        viewModel.IsExpanded = false;
+        typeof(MainWindow).GetMethod("ApplyExpansionState", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(window, new object[] { false });
+        window.UpdateLayout();
+        window.Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+        OpenSlotDetail(window);
+        var popup = window.FindName("SlotDetailPopup") as System.Windows.Controls.Primitives.Popup
+            ?? throw new InvalidOperationException("popup_missing");
+        Expect(popup.IsOpen, "popup-open");
         var host = (FrameworkElement)(window.FindName("SlotDetailHost")
             ?? throw new InvalidOperationException("detail_missing"));
+        Expect(host.ActualWidth >= 300 && host.ActualHeight >= 40, "popup-laid-out");
+        var note = window.FindName("SlotDetailShareNoteText") as System.Windows.Controls.TextBlock
+            ?? throw new InvalidOperationException("share_note_missing");
+        Expect(note.Text == SharedWeeklyQuota.SharedSeatNote && note.Visibility == Visibility.Visible, "ui-share-visible");
         var png = Path.Combine(output, "claude-api-credit-row.png");
         SaveElementPng(host, png);
+        viewModel.SelectSlot(ProviderSlotIds.Grok, true);
+        window.UpdateLayout();
+        window.Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+        Expect(viewModel.SlotDetailPercent == "96%", "ui-grok-whole");
+        Expect(viewModel.SlotDetailShareNote == SharedWeeklyQuota.GrokSeatNote, "ui-grok-note");
+        Expect(note.Text == SharedWeeklyQuota.GrokSeatNote && note.Visibility == Visibility.Visible, "ui-grok-visible");
+        Expect(!viewModel.SlotDetailPercent.Equals(viewModel.RemainingText, StringComparison.Ordinal), "ui-values-not-copied");
+        SaveElementPng(host, Path.Combine(output, "grok-shared-note.png"));
+        viewModel.SelectSlot(ProviderSlotIds.Cursor, true);
         viewModel.SelectSlot(ProviderSlotIds.CodexPrimary, true);
         Expect(!viewModel.ClaudeApiCreditVisible, "hidden-on-codex");
         viewModel.SetClaudeApiCredit(null);
@@ -549,13 +701,43 @@ internal static class ClaudeApiCreditTests
         throw new InvalidOperationException("repo_root");
     }
 
+    private static FrameworkElement OverviewCard(FrameworkElement text)
+    {
+        DependencyObject? node = text;
+        while (node is not null)
+        {
+            if (node is System.Windows.Controls.Border border &&
+                border.Name != "ExpandedShell" &&
+                border.Background is not null)
+                return border;
+            node = VisualTreeHelper.GetParent(node);
+        }
+
+        return text;
+    }
+
+    private static void OpenSlotDetail(MainWindow window)
+    {
+        typeof(MainWindow).GetField("_slotDetailOpen", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(window, true);
+        typeof(MainWindow).GetMethod("PlaceSlotDetailPopup", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(window, null);
+        window.UpdateLayout();
+        window.Dispatcher.Invoke(() => { }, DispatcherPriority.Render);
+    }
+
     private static void SaveElementPng(FrameworkElement element, string outputPath)
     {
-        element.Measure(new Size(320, 900));
-        element.Arrange(new Rect(0, 0, 320, Math.Max(element.DesiredSize.Height, 1)));
         element.UpdateLayout();
-        var width = Math.Max(element.RenderSize.Width, element.DesiredSize.Width);
-        var height = Math.Max(element.RenderSize.Height, element.DesiredSize.Height);
+        var width = element.ActualWidth;
+        var height = element.ActualHeight;
+        if (width < 1 || height < 1)
+        {
+            element.Measure(new Size(320, double.PositiveInfinity));
+            element.Arrange(new Rect(0, 0, Math.Max(element.DesiredSize.Width, 1), Math.Max(element.DesiredSize.Height, 1)));
+            width = Math.Max(element.RenderSize.Width, element.DesiredSize.Width);
+            height = Math.Max(element.RenderSize.Height, element.DesiredSize.Height);
+        }
         var pixelWidth = Math.Max(1, (int)Math.Ceiling(width));
         var pixelHeight = Math.Max(1, (int)Math.Ceiling(height));
         var bitmap = new RenderTargetBitmap(pixelWidth, pixelHeight, 96, 96, PixelFormats.Pbgra32);
@@ -568,7 +750,10 @@ internal static class ClaudeApiCreditTests
             if (pixels[index] > 0) ink++;
         }
 
-        Expect(ink > 500, "png-ink");
+        Expect(ink > 500, "png-ink ink=" + ink.ToString(CultureInfo.InvariantCulture) +
+            " w=" + pixelWidth.ToString(CultureInfo.InvariantCulture) +
+            " h=" + pixelHeight.ToString(CultureInfo.InvariantCulture) +
+            " path=" + outputPath);
         var encoder = new PngBitmapEncoder();
         encoder.Frames.Add(BitmapFrame.Create(bitmap));
         using var stream = new FileStream(outputPath, FileMode.Create, FileAccess.Write, FileShare.None);

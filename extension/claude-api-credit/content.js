@@ -9,10 +9,15 @@
     return;
   }
 
+  const deadline = performance.now() + parser.READY_TIMEOUT_MS;
+  while (!parser.surfaceReady(document) && performance.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, parser.READY_INTERVAL_MS));
+  }
+
   const read = parser.readPromotionalCredit(document, location.href);
-  if (read.organizationLabel) {
-    read.organizationBinding = await parser.organizationBinding(read.organizationLabel);
-    delete read.organizationLabel;
+  if (Array.isArray(read.organizationLabels)) {
+    read.organizationBinding = await parser.organizationBinding(read.organizationLabels);
+    delete read.organizationLabels;
   }
   const message = parser.toNativeMessage(read, new Date().toISOString());
   await chrome.runtime.sendMessage({

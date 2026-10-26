@@ -2,12 +2,16 @@ const assert = require("node:assert/strict");
 const parser = require("./parser.js");
 
 const ORG = "Example Organization";
+const DISPLAY = "Ada Example";
 const APPLIES = "Agent SDK API 批次 API Playground 託管代理程式";
 const SECRET = "COOKIE_SECRET_SHOULD_NOT_EXPORT";
+const AVATAR_GLYPH = "AVATAR_GLYPH";
+const DECORATION_GLYPH = "DECORATION_GLYPH";
 
 function node(tag, attrs, children, text) {
   const element = {
     tag,
+    tagName: String(tag).toUpperCase(),
     attrs: attrs || {},
     children: children || [],
     _text: text,
@@ -49,23 +53,45 @@ function cell(tag, text) {
   return node(tag, {}, [], text);
 }
 
-function row(values, tag) {
-  return node("tr", {}, values.map(value => cell(tag, value)));
+function headerCell(text, glyph) {
+  if (!glyph) return cell("th", text);
+  return node("th", {}, [
+    node("text", {}, [], text),
+    node("span", { "aria-hidden": "true" }, [], glyph),
+  ]);
 }
 
-function table(label, headers, rows) {
-  const head = node("thead", {}, [row(headers, "th")]);
+function row(values, tag, glyphs) {
+  return node("tr", {}, values.map((value, index) =>
+    tag === "th" && glyphs && glyphs[index] ? headerCell(value, glyphs[index]) : cell(tag, value)));
+}
+
+function table(label, headers, rows, headerGlyphs) {
+  const head = node("thead", {}, [row(headers, "th", headerGlyphs)]);
   const body = node("tbody", {}, rows.map(values => row(values, "td")));
   return node("table", { "aria-label": label }, [head, body]);
 }
 
+function identityButton(display, organization) {
+  const avatar = node("div", {}, [node("span", { "aria-hidden": "true" }, [], AVATAR_GLYPH)]);
+  const column = node("div", {}, [
+    node("span", {}, [], display),
+    node("span", {}, [], organization),
+  ]);
+  const decoration = node("span", {}, [], DECORATION_GLYPH);
+  return node("button", { "aria-haspopup": "menu" }, [avatar, column, decoration]);
+}
+
 function page(tables, labels) {
-  const orgNodes = (labels || [ORG]).map(label =>
-    node("button", { "data-testid": "organization-switcher" }, [], label));
+  const identities = (labels || [ORG]).map(label =>
+    typeof label === "string" ? { display: DISPLAY, organization: label } : label);
+  const nav = node("div", { "aria-label": "主要導覽" }, identities.map(person =>
+    identityButton(person.display, person.organization)));
   return {
     querySelectorAll(selector) {
       const found = [];
-      for (const element of [...tables, ...orgNodes]) collect(element, selector, found);
+      collect(nav, selector, found);
+      for (const element of tables) collect(element, selector, found);
       return found;
     },
   };
@@ -79,9 +105,9 @@ const zhTw = ["剩餘餘額", "適用範圍", "到期日", "授予日期"];
 const observed = "2026-10-26T08:00:00.000Z";
 
 async function bind(read) {
-  if (read.organizationLabel) {
-    read.organizationBinding = await parser.organizationBinding(read.organizationLabel);
-    delete read.organizationLabel;
+  if (Array.isArray(read.organizationLabels)) {
+    read.organizationBinding = await parser.organizationBinding(read.organizationLabels);
+    delete read.organizationLabels;
   }
   return read;
 }
@@ -113,6 +139,12 @@ async function bind(read) {
   assert.equal(encoded.includes(APPLIES), false);
   assert.equal(encoded.includes(SECRET), false);
   assert.equal(Object.hasOwn(message, "organizationLabel"), false);
+  assert.equal(Object.hasOwn(message, "organizationLabels"), false);
+  assert.equal(encoded.includes(DISPLAY), false);
+  assert.equal(encoded.includes(AVATAR_GLYPH), false);
+  assert.equal(encoded.includes(DECORATION_GLYPH), false);
+  const displayOnly = await parser.organizationBinding(DISPLAY);
+  assert.notEqual(message.organization_binding, displayOnly);
   assert.equal(Object.hasOwn(message, "html"), false);
 
   const english = await bind(parser.readPromotionalCredit(page([
@@ -250,6 +282,41 @@ async function bind(read) {
   const stopped = parser.toNativeMessage({ ok: false, reason: "stopped" }, observed);
   assert.equal(stopped.reason, "stopped");
   assert.equal(Object.hasOwn(stopped, "organization_binding"), false);
+
+  const glyphs = [null, "\ue08f", null, null];
+  const observedDom = page([
+    table("促銷額度", zhTw, [["US$99.20 / US$100.00", APPLIES, "2026/11/12", "2026/10/15"]], glyphs),
+  ]);
+  assert.equal(parser.surfaceReady(observedDom), true);
+  const observedRead = await bind(parser.readPromotionalCredit(observedDom, parser.SOURCE_URL));
+  assert.equal(observedRead.ok, true);
+  assert.equal(observedRead.remaining, "99.20");
+  assert.equal(JSON.stringify(parser.toNativeMessage(observedRead, observed)).includes("\ue08f"), false);
+  assert.equal(JSON.stringify(parser.toNativeMessage(observedRead, observed)).includes(AVATAR_GLYPH), false);
+
+  const guessed = {
+    querySelectorAll(selector) {
+      if (selector === '[data-testid="organization-switcher"]' || selector === '[data-testid="organization-menu-button"]') {
+        return [node("button", { "data-testid": "organization-switcher" }, [], ORG)];
+      }
+      return [];
+    },
+  };
+  assert.equal(parser.readPromotionalCredit(guessed, parser.SOURCE_URL).reason, "binding_missing");
+
+  const loading = page([]);
+  assert.equal(parser.surfaceReady(loading), false);
+  loading.querySelectorAll = function query(selector) {
+    const found = [];
+    collect(node("div", { "aria-label": "主要導覽" }, [identityButton(DISPLAY, ORG)]), selector, found);
+    if (loading.table) collect(loading.table, selector, found);
+    return found;
+  };
+  assert.equal(parser.surfaceReady(loading), false);
+  loading.table = table("促銷額度", zhTw, [["US$99.20 / US$100.00", APPLIES, "2026/11/12", "2026/10/15"]], glyphs);
+  assert.equal(parser.surfaceReady(loading), true);
+  const late = await bind(parser.readPromotionalCredit(loading, parser.SOURCE_URL));
+  assert.equal(late.remaining, "99.20");
 
   console.log("parser tests passed");
 })().catch(error => {

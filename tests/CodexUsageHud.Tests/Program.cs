@@ -6,6 +6,7 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -168,6 +169,11 @@ internal static class Program
             ("provider_identity_does_not_masquerade", ProviderIdentityCollision),
             ("primary_binding_unknown_history", PrimaryBindingUnknownHistory),
             ("provider_missing_fields_no_allowance_stale_reset", ProviderParserTruthfulness),
+            ("unified_weekly_shared_pool", () =>
+            {
+                var board = UnifiedWeeklySharedPool(runRoot).GetAwaiter().GetResult();
+                RenderSharedPool(runRoot, board);
+            }),
             ("claude_subscription_quota_slot", () => ClaudeSubscriptionQuotaSlot().GetAwaiter().GetResult()),
             ("claude_refresh_stability", () => ClaudeRefreshStability(runRoot)),
             ("failed_provider_does_not_block_ui", () => FailedProviderDoesNotBlock(runRoot).GetAwaiter().GetResult()),
@@ -3698,6 +3704,404 @@ internal static class Program
         Assert.True(bound != OpaqueIdentity.Hash("codex|acct-2"));
     }
 
+    private static async Task<ProviderQuotaBoard> UnifiedWeeklySharedPool(string runRoot)
+    {
+        const string UsedLiteral = "2.4749526130517197";
+        const string SecretLabel = "SNAPSHOT_SECRET_LABEL_9c3e";
+        var used = double.Parse(UsedLiteral, CultureInfo.InvariantCulture);
+        var remaining = 100d - used;
+        var start = DateTimeOffset.UtcNow.AddHours(-2);
+        var end = start.AddDays(7);
+        var unifiedBody = SandBody(true, UsedLiteral, start, end, included: true);
+        var parsed = GrokBotQuotaParser.Read(unifiedBody, DateTimeOffset.UtcNow);
+        Assert.Equal(CursorAllowanceMode.Unified, parsed.Mode);
+        Assert.Equal(SharedWeeklyQuota.WindowId, parsed.Windows[0].WindowId);
+        Assert.Equal(SharedWeeklyQuota.DisplayName, parsed.Windows[0].DisplayName);
+        Assert.Equal(used, parsed.Windows[0].UsedPercent);
+        Assert.Equal(10080, parsed.Windows[0].WindowDurationMinutes);
+        Assert.True(parsed.Windows[0].ResetsAtUtc.HasValue &&
+                    Math.Abs((parsed.Windows[0].ResetsAtUtc!.Value - end).TotalSeconds) < 1, "parser_reset");
+
+        var summaryCalls = 0;
+        var phase = "unified";
+        var cursorTokens = new MutableCursorTokens { Token = SyntheticJwt("auth0|unified-user") };
+        var http = new ScriptedHttpSender((request, _) =>
+        {
+            if (request.Url.AbsolutePath.Contains("get-sand-usage-status", StringComparison.Ordinal))
+                return Task.FromResult(SandResponse(request.Url, phase, UsedLiteral, start, end));
+            if (request.Url.AbsolutePath.Contains("usage-summary", StringComparison.Ordinal))
+            {
+                Interlocked.Increment(ref summaryCalls);
+                return Task.FromResult(new AllowlistedHttpResponse(200, MonthlyZeros, request.Url));
+            }
+
+            if (request.Url.AbsolutePath.Contains("billing", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new AllowlistedHttpResponse(200, GrokBody(start, end), request.Url));
+            }
+
+            return Task.FromResult(new AllowlistedHttpResponse(200, "{}", request.Url));
+        });
+        var coordinator = new ProviderQuotaCoordinator(http: http, cursorTokens: cursorTokens,
+            grokTokens: new InjectedTokenSource(SyntheticJwt("auth0|grok-user")));
+        var settings = SharedPoolSettings(SecretLabel, cursor: true, bot: true, grok: true);
+        var board = await coordinator.RefreshAsync(settings, PrimaryObservation(DateTimeOffset.UtcNow),
+            CancellationToken.None, true).ConfigureAwait(false);
+        Assert.Equal(0, summaryCalls);
+        var cursor = board.Find(ProviderSlotIds.Cursor)!;
+        var bot = board.Find(ProviderSlotIds.GrokBot)!;
+        var grok = board.Find(ProviderSlotIds.Grok)!;
+        Assert.Equal(QuotaSlotStatus.Live, cursor.Status);
+        Assert.Equal(QuotaSlotStatus.Live, bot.Status);
+        Assert.Equal(QuotaSlotStatus.Live, grok.Status);
+        Assert.Equal(1, cursor.Windows.Count);
+        Assert.Equal(SharedWeeklyQuota.WindowId, cursor.Windows[0].WindowId);
+        Assert.Equal(used, cursor.Windows[0].UsedPercent);
+        Assert.Equal(10080, cursor.Windows[0].WindowDurationMinutes);
+        Assert.Equal(SharedWeeklyQuota.DisplayName, bot.Windows[0].DisplayName);
+        Assert.Equal(used, bot.Windows[0].UsedPercent);
+        Assert.True(Math.Abs(cursor.GlanceRemainingPercent!.Value - remaining) < 0.0000001, "cursor_remaining");
+        Assert.True(Math.Abs(bot.GlanceRemainingPercent!.Value - remaining) < 0.0000001, "bot_remaining");
+        Assert.Equal(98d, grok.GlanceRemainingPercent);
+        Assert.Equal("weekly", grok.Windows[0].WindowId);
+        Assert.True(cursor.GlancePercentText.Contains("97.53", StringComparison.Ordinal), cursor.GlancePercentText);
+        Assert.True(!cursor.GlancePercentText.Contains("100", StringComparison.Ordinal), "cursor_not_100");
+        Assert.True(cursor.GlanceText.Contains("共享", StringComparison.Ordinal), cursor.GlanceText);
+        Assert.True(!grok.GlanceText.Contains("共享", StringComparison.Ordinal), "grok_independent");
+        var reset = ProviderQuotaPresentation.FormatReset(cursor.Windows[0], DateTimeOffset.UtcNow);
+        Assert.True(reset.Contains("周期 7 天", StringComparison.Ordinal), reset);
+        Assert.True(!string.Equals(cursor.OpaqueIdentityHash, grok.OpaqueIdentityHash, StringComparison.Ordinal));
+
+        var exportDir = Path.Combine(runRoot, "unified-snapshot");
+        var written = DateTimeOffset.Parse("2026-10-26T13:00:00Z", CultureInfo.InvariantCulture);
+        var exporter = new QuotaSnapshotWriter(exportDir, "1.1.3", clock: () => written);
+        exporter.SetEnabled(true);
+        exporter.Publish(board);
+        exporter.WhenIdleAsync().GetAwaiter().GetResult();
+        var json = File.ReadAllText(exporter.FinalPath, Encoding.UTF8);
+        using (var document = JsonDocument.Parse(json))
+        {
+            var slots = document.RootElement.GetProperty("slots").EnumerateArray().ToArray();
+            Assert.Equal(6, slots.Length);
+            Assert.Equal("cursor", slots[2].GetProperty("slot").GetString());
+            Assert.Equal("Cursor", slots[2].GetProperty("label").GetString());
+            Assert.Equal("ok", slots[2].GetProperty("state").GetString());
+            var cursorWindows = slots[2].GetProperty("windows").EnumerateArray().ToArray();
+            Assert.Equal(1, cursorWindows.Length);
+            Assert.Equal(SharedWeeklyQuota.PoolId, cursorWindows[0].GetProperty("pool").GetString());
+            Assert.Equal(10080, cursorWindows[0].GetProperty("window_minutes").GetInt32());
+            var exportedRemaining = cursorWindows[0].GetProperty("remaining_percent").GetDouble();
+            Assert.True(Math.Abs(exportedRemaining - remaining) < 0.0000001, "export_remaining");
+            Assert.Equal(SharedWeeklyQuota.PoolId,
+                slots[4].GetProperty("windows")[0].GetProperty("pool").GetString());
+            Assert.Equal("grok_weekly", slots[3].GetProperty("windows")[0].GetProperty("pool").GetString());
+            Assert.Equal(98d, slots[3].GetProperty("windows")[0].GetProperty("remaining_percent").GetDouble());
+        }
+
+        Assert.True(!json.Contains("cursor_auto", StringComparison.Ordinal), "no_cursor_auto");
+        Assert.True(!json.Contains("cursor_api", StringComparison.Ordinal), "no_cursor_api");
+        Assert.True(!json.Contains("\"pool\": \"grok_bot\"", StringComparison.Ordinal), "no_bot_only_pool");
+        Assert.True(!json.Contains(SecretLabel, StringComparison.Ordinal), "no_custom_label");
+        Assert.True(!json.Contains("unified-user", StringComparison.Ordinal), "no_subject");
+        Assert.True(!json.Contains("isUnified", StringComparison.Ordinal), "no_raw_flag");
+        Assert.True(!json.Contains(cursorTokens.Token!, StringComparison.Ordinal), "no_token");
+        Assert.Equal(0, Directory.EnumerateFiles(exportDir, "*.tmp").Count());
+        var offDir = Path.Combine(runRoot, "unified-snapshot-off");
+        var off = new QuotaSnapshotWriter(offDir, "1.1.3");
+        off.Publish(board);
+        off.WhenIdleAsync().GetAwaiter().GetResult();
+        Assert.True(!File.Exists(off.FinalPath), "default_off");
+
+        phase = "legacy";
+        cursorTokens.Token = SyntheticJwt("auth0|legacy-user");
+        var legacy = await coordinator.RefreshAsync(settings, PrimaryObservation(DateTimeOffset.UtcNow),
+            CancellationToken.None, true).ConfigureAwait(false);
+        var legacyCursor = legacy.Find(ProviderSlotIds.Cursor)!;
+        var legacyBot = legacy.Find(ProviderSlotIds.GrokBot)!;
+        Assert.Equal(2, legacyCursor.Windows.Count);
+        Assert.Equal("autoPercentUsed", legacyCursor.Windows[0].WindowId);
+        Assert.Equal("apiPercentUsed", legacyCursor.Windows[1].WindowId);
+        Assert.Equal(100d, legacyCursor.GlanceRemainingPercent);
+        Assert.Equal("sand", legacyBot.Windows[0].WindowId);
+        Assert.Equal("Grok Bot 周额度", legacyBot.Windows[0].DisplayName);
+        Assert.True(!string.Equals(cursor.OpaqueIdentityHash, legacyCursor.OpaqueIdentityHash, StringComparison.Ordinal),
+            "account_changed");
+        Assert.True(!legacyCursor.Windows.Any(window => window.WindowId == SharedWeeklyQuota.WindowId));
+
+        phase = "unauthorized";
+        var denied = await coordinator.RefreshAsync(settings, PrimaryObservation(DateTimeOffset.UtcNow),
+            CancellationToken.None, true).ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.NotConnected, denied.Find(ProviderSlotIds.Cursor)!.Status);
+        Assert.Equal(0, denied.Find(ProviderSlotIds.Cursor)!.Windows.Count);
+        Assert.True(denied.Find(ProviderSlotIds.Cursor)!.GlanceRemainingPercent is null, "denied_drops_old");
+        Assert.Equal(QuotaSlotStatus.Live, denied.Find(ProviderSlotIds.Grok)!.Status);
+
+        await AssertFreshCase("missing", QuotaSlotStatus.Unavailable, "cursor_mode_unconfirmed",
+            expectSummary: false, expectBotLegacy: true).ConfigureAwait(false);
+        await AssertFreshCase("badflag", QuotaSlotStatus.Unavailable, "cursor_sand_mode_invalid",
+            expectSummary: false, expectBotLegacy: false).ConfigureAwait(false);
+        await AssertFreshCase("invalid", QuotaSlotStatus.Unavailable, "shared_weekly_usage_invalid",
+            expectSummary: false, expectBotLegacy: false).ConfigureAwait(false);
+        await AssertFreshCase("missing-percent", QuotaSlotStatus.Unavailable, "shared_weekly_usage_missing",
+            expectSummary: false, expectBotLegacy: false).ConfigureAwait(false);
+        await AssertFreshCase("expired", QuotaSlotStatus.Stale, "shared_weekly_period_elapsed",
+            expectSummary: false, expectBotLegacy: false).ConfigureAwait(false);
+        await AssertFreshCase("future", QuotaSlotStatus.Unavailable, "shared_weekly_period_not_current",
+            expectSummary: false, expectBotLegacy: false).ConfigureAwait(false);
+        await AssertFreshCase("excluded", QuotaSlotStatus.NoAllowance, "shared_weekly_not_included",
+            expectSummary: false, expectBotLegacy: false).ConfigureAwait(false);
+        await AssertFreshCase("network", QuotaSlotStatus.Unavailable, "cursor_network",
+            expectSummary: false, expectBotLegacy: false).ConfigureAwait(false);
+        await AssertFreshCase("unauthorized", QuotaSlotStatus.NotConnected, "cursor_sand_unauthorized",
+            expectSummary: false, expectBotLegacy: false).ConfigureAwait(false);
+
+        var botOffSummary = 0;
+        var botOff = new ProviderQuotaCoordinator(http: new ScriptedHttpSender((request, _) =>
+        {
+            if (request.Url.AbsolutePath.Contains("get-sand-usage-status", StringComparison.Ordinal))
+                return Task.FromResult(new AllowlistedHttpResponse(200, unifiedBody, request.Url));
+            if (request.Url.AbsolutePath.Contains("usage-summary", StringComparison.Ordinal))
+            {
+                Interlocked.Increment(ref botOffSummary);
+                return Task.FromResult(new AllowlistedHttpResponse(200, MonthlyZeros, request.Url));
+            }
+
+            return Task.FromResult(new AllowlistedHttpResponse(404, "{}", request.Url));
+        }), cursorTokens: new InjectedTokenSource(SyntheticJwt("auth0|unified-user")));
+        var botOffBoard = await botOff.RefreshAsync(SharedPoolSettings(SecretLabel, true, false, false),
+            PrimaryObservation(DateTimeOffset.UtcNow), CancellationToken.None, true).ConfigureAwait(false);
+        Assert.Equal(0, botOffSummary);
+        Assert.Equal(QuotaSlotStatus.Live, botOffBoard.Find(ProviderSlotIds.Cursor)!.Status);
+        Assert.Equal(SharedWeeklyQuota.WindowId, botOffBoard.Find(ProviderSlotIds.Cursor)!.Windows[0].WindowId);
+        Assert.Equal(QuotaSlotStatus.Disabled, botOffBoard.Find(ProviderSlotIds.GrokBot)!.Status);
+        Assert.Equal(0, botOffBoard.Find(ProviderSlotIds.GrokBot)!.Windows.Count);
+
+        var cursorCts = new CancellationTokenSource();
+        var cursorAdapter = new CursorQuotaAdapter(new ScriptedHttpSender(async (_, token) =>
+        {
+            await Task.Delay(Timeout.Infinite, token).ConfigureAwait(false);
+            throw new InvalidOperationException("cursor_cancel_unreachable");
+        }), new InjectedTokenSource(SyntheticJwt("auth0|unified-user")));
+        var botAdapter = new GrokBotQuotaAdapter(new ScriptedHttpSender((_, _) =>
+            Task.FromResult(new AllowlistedHttpResponse(200, unifiedBody, ProviderHttpAllowlist.CursorSandUsage))),
+            new InjectedTokenSource(SyntheticJwt("auth0|unified-user")));
+        var cancelled = cursorAdapter.ReadAsync(settings.Slot(ProviderSlotIds.Cursor), cursorCts.Token);
+        var botLive = botAdapter.ReadAsync(settings.Slot(ProviderSlotIds.GrokBot), CancellationToken.None);
+        await Task.Delay(40).ConfigureAwait(false);
+        cursorCts.Cancel();
+        try
+        {
+            await cancelled.ConfigureAwait(false);
+            Assert.True(false, "cursor_cancel_should_throw");
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        var isolatedBot = await botLive.ConfigureAwait(false);
+        Assert.Equal(QuotaSlotStatus.Live, isolatedBot.Status);
+        Assert.Equal(used, isolatedBot.Windows[0].UsedPercent);
+
+        return board;
+
+        async Task AssertFreshCase(string name, QuotaSlotStatus expected, string code, bool expectSummary,
+            bool expectBotLegacy)
+        {
+            var calls = 0;
+            var fresh = new ProviderQuotaCoordinator(http: new ScriptedHttpSender((request, _) =>
+            {
+                if (request.Url.AbsolutePath.Contains("get-sand-usage-status", StringComparison.Ordinal))
+                {
+                    if (name == "network") throw new HttpRequestException("synthetic_down");
+                    return Task.FromResult(SandResponse(request.Url, name, UsedLiteral, start, end));
+                }
+
+                if (request.Url.AbsolutePath.Contains("usage-summary", StringComparison.Ordinal))
+                {
+                    Interlocked.Increment(ref calls);
+                    return Task.FromResult(new AllowlistedHttpResponse(200, MonthlyZeros, request.Url));
+                }
+
+                if (request.Url.AbsolutePath.Contains("billing", StringComparison.Ordinal))
+                    return Task.FromResult(new AllowlistedHttpResponse(200, GrokBody(start, end), request.Url));
+                return Task.FromResult(new AllowlistedHttpResponse(200, "{}", request.Url));
+            }), cursorTokens: new InjectedTokenSource(SyntheticJwt("auth0|case-" + name)),
+                grokTokens: new InjectedTokenSource(SyntheticJwt("auth0|grok-user")));
+            var result = await fresh.RefreshAsync(SharedPoolSettings(SecretLabel, true, true, true),
+                PrimaryObservation(DateTimeOffset.UtcNow), CancellationToken.None, true).ConfigureAwait(false);
+            var cursorSlot = result.Find(ProviderSlotIds.Cursor)!;
+            var botSlot = result.Find(ProviderSlotIds.GrokBot)!;
+            Assert.Equal(expected, cursorSlot.Status);
+            Assert.Equal(code, cursorSlot.ErrorCode);
+            Assert.Equal(0, cursorSlot.Windows.Count);
+            Assert.True(cursorSlot.GlanceRemainingPercent is null, name + "_no_percent");
+            Assert.Equal(expectSummary ? 1 : 0, calls);
+            Assert.Equal(QuotaSlotStatus.Live, result.Find(ProviderSlotIds.Grok)!.Status);
+            Assert.Equal(98d, result.Find(ProviderSlotIds.Grok)!.GlanceRemainingPercent);
+            if (expectBotLegacy)
+            {
+                Assert.Equal(QuotaSlotStatus.Live, botSlot.Status);
+                Assert.Equal("Grok Bot 周额度", botSlot.Windows[0].DisplayName);
+                Assert.Equal("sand", botSlot.Windows[0].WindowId);
+            }
+            else if (name == "network")
+            {
+                Assert.Equal(QuotaSlotStatus.Unavailable, botSlot.Status);
+                Assert.Equal("grok_bot_network", botSlot.ErrorCode);
+                Assert.Equal(0, botSlot.Windows.Count);
+            }
+            else if (name == "unauthorized")
+            {
+                Assert.Equal(QuotaSlotStatus.NotConnected, botSlot.Status);
+                Assert.Equal(0, botSlot.Windows.Count);
+            }
+            else
+            {
+                Assert.Equal(expected, botSlot.Status);
+                Assert.Equal(0, botSlot.Windows.Count);
+                Assert.True(botSlot.GlanceRemainingPercent is null, name + "_bot_no_percent");
+            }
+        }
+    }
+
+    private const string MonthlyZeros =
+        """{"billingCycleEnd":"2026-11-01T00:00:00Z","individualUsage":{"plan":{"enabled":true,"used":0,"autoPercentUsed":0,"apiPercentUsed":0,"totalPercentUsed":0}}}""";
+
+    private static string SandBody(bool? unified, string? usedLiteral, DateTimeOffset start, DateTimeOffset end,
+        bool? included)
+    {
+        var stampStart = start.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+        var stampEnd = end.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+        var mode = unified switch
+        {
+            true => "\"isUnified\":true",
+            false => "\"isUnified\":false",
+            _ => "\"isUnified\":\"false\"",
+        };
+        var usage = usedLiteral is null ? "" : ",\"usagePercent\":" + usedLiteral;
+        var limit = included switch
+        {
+            true => ",\"hasAvailableUsage\":true,\"hasNonZeroIncludedLimit\":true",
+            false => ",\"hasNonZeroIncludedLimit\":false,\"includedLimitZero\":true",
+            _ => "",
+        };
+        return "{" + mode + usage + ",\"currentPeriodStart\":\"" + stampStart +
+               "\",\"nextResetTimestampUtc\":\"" + stampEnd + "\"" + limit + "}";
+    }
+
+    private static AllowlistedHttpResponse SandResponse(Uri url, string phase, string usedLiteral,
+        DateTimeOffset start, DateTimeOffset end)
+    {
+        var body = phase switch
+        {
+            "unified" => SandBody(true, usedLiteral, start, end, true),
+            "legacy" => SandBody(false, "18", start, end, true),
+            "missing" => "{\"usagePercent\":" + usedLiteral +
+                         ",\"hasNonZeroIncludedLimit\":true,\"includedLimitZero\":false}",
+            "badflag" => SandBody(null, usedLiteral, start, end, true),
+            "invalid" => SandBody(true, "140", start, end, true),
+            "missing-percent" => SandBody(true, null, start, end, true),
+            "expired" => SandBody(true, usedLiteral, DateTimeOffset.UtcNow.AddDays(-8),
+                DateTimeOffset.UtcNow.AddMinutes(-1), true),
+            "future" => SandBody(true, usedLiteral, DateTimeOffset.UtcNow.AddHours(2),
+                DateTimeOffset.UtcNow.AddDays(7), true),
+            "excluded" => SandBody(true, "0", start, end, false),
+            "unauthorized" => "{}",
+            _ => SandBody(true, usedLiteral, start, end, true),
+        };
+        var status = phase == "unauthorized" ? 401 : 200;
+        return new AllowlistedHttpResponse(status, body, url);
+    }
+
+    private static string CurrentGrokBillingBody(double usagePercent)
+    {
+        var end = DateTimeOffset.UtcNow.AddDays(14);
+        var start = end.AddDays(-14);
+        var culture = CultureInfo.InvariantCulture;
+        return "{\"usagePercent\":" + usagePercent.ToString(culture) +
+               ",\"currentPeriod\":{\"start\":\"" +
+               start.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", culture) +
+               "\",\"end\":\"" + end.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", culture) + "\"}}";
+    }
+
+    private static string GrokBody(DateTimeOffset start, DateTimeOffset end)
+    {
+        var stampStart = start.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+        var stampEnd = end.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+        return "{\"config\":{\"creditUsagePercent\":2.0,\"currentPeriod\":{\"start\":\"" + stampStart +
+               "\",\"end\":\"" + stampEnd + "\"}},\"productUsage\":[{\"usagePercent\":2.0}]}";
+    }
+
+    private static ProviderAccessSettings SharedPoolSettings(string cursorLabel, bool cursor, bool bot, bool grok) =>
+        new(new[]
+        {
+            new ProviderSlotSettings(ProviderSlotIds.CodexPrimary, "Codex 当前", true),
+            new ProviderSlotSettings(ProviderSlotIds.CodexSecondary, "Codex 第二账户", false),
+            new ProviderSlotSettings(ProviderSlotIds.Cursor, cursorLabel, cursor),
+            new ProviderSlotSettings(ProviderSlotIds.Grok, "Grok", grok),
+            new ProviderSlotSettings(ProviderSlotIds.GrokBot, "Grok Bot", bot),
+            new ProviderSlotSettings(ProviderSlotIds.Claude, "Claude 订阅", false),
+        }, CompactLayoutModes.Rail, true);
+
+    private static void RenderSharedPool(string runRoot, ProviderQuotaBoard board)
+    {
+        EnsureWpfTestApplication();
+        var directory = Path.Combine(runRoot, "unified-render");
+        Directory.CreateDirectory(Path.Combine(directory, "codex-home", "sessions"));
+        using var engine = new UsageEngine(Path.Combine(directory, "codex-home"), Path.Combine(directory, "usage.db"),
+            Path.Combine(directory, "hud.log"));
+        using var window = new MainWindow(engine, () => Task.CompletedTask, false);
+        window.ShowActivated = false;
+        window.ShowInTaskbar = false;
+        window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+        window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
+        window.Show();
+        var viewModel = (MainViewModel)typeof(MainWindow).GetField("_viewModel",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(window)!;
+        var now = board.GeneratedAtUtc;
+        viewModel.Apply(new HudSnapshot(PrimaryObservation(now), Array.Empty<SessionAggregate>(), null, now, false,
+            "合成共享周额度", Array.Empty<string>(), Providers: board));
+        InvokeWindowMethod(window, "ApplyExpansionState", false);
+        window.UpdateLayout();
+        var output = Path.Combine(ProjectRoot(), ".artifacts", "unified-pools-20261026");
+        Directory.CreateDirectory(output);
+        var rail = (System.Windows.FrameworkElement)window.FindName("RailVerticalShell")!;
+        RenderElement(rail, Path.Combine(output, "rail.png"));
+        viewModel.SelectSlot(ProviderSlotIds.Cursor, true);
+        InvokeWindowMethod(window, "PlaceSlotDetailPopup");
+        window.UpdateLayout();
+        var detail = (System.Windows.FrameworkElement)window.FindName("SlotDetailHost")!;
+        RenderElement(detail, Path.Combine(output, "cursor-detail.png"));
+        var detailText = string.Join("\n", FindVisualChildren<System.Windows.Controls.TextBlock>(detail)
+            .Select(block => block.Text));
+        Assert.True(detailText.Contains("97.53%", StringComparison.Ordinal), detailText);
+        Assert.True(detailText.Contains("共享周额度", StringComparison.Ordinal), detailText);
+        Assert.True(detailText.Contains("周期 7 天", StringComparison.Ordinal), detailText);
+        Assert.True(!detailText.Contains("100%", StringComparison.Ordinal), "detail_not_100");
+        viewModel.SelectSlot(ProviderSlotIds.GrokBot, true);
+        InvokeWindowMethod(window, "PlaceSlotDetailPopup");
+        window.UpdateLayout();
+        RenderElement(detail, Path.Combine(output, "bot-detail.png"));
+        var botText = string.Join("\n", FindVisualChildren<System.Windows.Controls.TextBlock>(detail)
+            .Select(block => block.Text));
+        Assert.True(botText.Contains("共享周额度", StringComparison.Ordinal), botText);
+        Assert.True(!botText.Contains("Grok Bot 周额度", StringComparison.Ordinal), "bot_not_legacy_label");
+        var railText = string.Join("\n", FindVisualChildren<System.Windows.Controls.TextBlock>(rail)
+            .Select(block => block.Text));
+        Assert.True(railText.Contains("97.53%", StringComparison.Ordinal), railText);
+        Assert.True(railText.Contains("98%", StringComparison.Ordinal), railText);
+        Assert.True(railText.Contains(SharedWeeklyQuota.RailCaption, StringComparison.Ordinal), railText);
+        Assert.True(railText.Contains("每周额度", StringComparison.Ordinal), railText);
+        window.Hide();
+        System.Threading.SynchronizationContext.SetSynchronizationContext(null);
+    }
+
+    private sealed class MutableCursorTokens : ICursorTokenSource
+    {
+        public string? Token { get; set; }
+        public string? ReadAccessToken() => Token;
+    }
+
     private static void ProviderParserTruthfulness()
     {
         var now = DateTimeOffset.UtcNow;
@@ -3793,9 +4197,7 @@ internal static class Program
                 throw new System.Net.Http.HttpRequestException("cursor_down");
             if (request.Url.AbsolutePath.Contains("billing", StringComparison.Ordinal))
             {
-                return Task.FromResult(new AllowlistedHttpResponse(200,
-                    """{"usagePercent":11,"currentPeriod":{"start":"2026-09-14T00:00:00Z","end":"2026-09-28T00:00:00Z"}}""",
-                    request.Url));
+                return Task.FromResult(new AllowlistedHttpResponse(200, CurrentGrokBillingBody(11), request.Url));
             }
 
             if (request.Url.AbsolutePath.Contains("settings", StringComparison.Ordinal))
@@ -4113,8 +4515,16 @@ internal static class Program
     {
         var now = DateTimeOffset.UtcNow;
         var token = SyntheticJwt("auth0|user-one");
-        var http = new ScriptedHttpSender((_, _) => Task.FromResult(new AllowlistedHttpResponse(200,
-            """{"autoPercentUsed":12.5,"apiPercentUsed":4}""", ProviderHttpAllowlist.CursorUsageSummary)));
+        var http = new ScriptedHttpSender((request, _) =>
+        {
+            if (request.Url.AbsolutePath.Contains("get-sand-usage-status", StringComparison.Ordinal))
+            {
+                return Task.FromResult(new AllowlistedHttpResponse(200, """{"isUnified":false}""", request.Url));
+            }
+
+            return Task.FromResult(new AllowlistedHttpResponse(200,
+                """{"autoPercentUsed":12.5,"apiPercentUsed":4}""", request.Url));
+        });
         var coordinator = new ProviderQuotaCoordinator(http: http, cursorTokens: new InjectedTokenSource(token));
         var enabled = FiveSlotSettings(cursorEnabled: true);
         var live = await coordinator.RefreshAsync(enabled, PrimaryObservation(now), CancellationToken.None, true);
@@ -4157,9 +4567,7 @@ internal static class Program
 
             if (request.Url.AbsolutePath.Contains("billing", StringComparison.Ordinal))
             {
-                return new AllowlistedHttpResponse(200,
-                    """{"usagePercent":11,"currentPeriod":{"start":"2026-09-14T00:00:00Z","end":"2026-09-28T00:00:00Z"}}""",
-                    request.Url);
+                return new AllowlistedHttpResponse(200, CurrentGrokBillingBody(11), request.Url);
             }
 
             if (request.Url.AbsolutePath.Contains("settings", StringComparison.Ordinal))
@@ -4167,7 +4575,7 @@ internal static class Program
             if (request.Url.AbsolutePath.Contains("get-sand-usage-status", StringComparison.Ordinal))
             {
                 return new AllowlistedHttpResponse(200,
-                    """{"usagePercent":9,"hasNonZeroIncludedLimit":true,"includedLimitZero":false,"usesPooledEnterpriseAllowance":false}""",
+                    """{"isUnified":false,"usagePercent":9,"hasNonZeroIncludedLimit":true,"includedLimitZero":false,"usesPooledEnterpriseAllowance":false}""",
                     request.Url);
             }
 
@@ -4337,6 +4745,8 @@ internal static class Program
         var calls = 0;
         var http = new ScriptedHttpSender(async (request, cancellationToken) =>
         {
+            if (request.Url.AbsolutePath.Contains("get-sand-usage-status", StringComparison.Ordinal))
+                return new AllowlistedHttpResponse(200, """{"isUnified":false}""", request.Url);
             if (!request.Url.AbsolutePath.Contains("usage-summary", StringComparison.Ordinal))
                 return new AllowlistedHttpResponse(404, "{}", request.Url);
             var n = Interlocked.Increment(ref calls);
@@ -4384,11 +4794,16 @@ internal static class Program
             if (request.Url.AbsolutePath.Contains("usage-summary", StringComparison.Ordinal))
             {
                 await Task.Delay(900, cancellationToken).ConfigureAwait(false);
+                var cycleEnd = DateTimeOffset.UtcNow.AddDays(18).UtcDateTime.ToString(
+                    "yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture);
                 return new AllowlistedHttpResponse(200,
-                    """{"billingCycleEnd":"2026-10-15T00:00:00Z","individualUsage":{"plan":{"autoPercentUsed":12.5,"apiPercentUsed":4}}}""",
+                    "{\"billingCycleEnd\":\"" + cycleEnd +
+                    "\",\"individualUsage\":{\"plan\":{\"autoPercentUsed\":12.5,\"apiPercentUsed\":4}}}",
                     request.Url);
             }
 
+            if (request.Url.AbsolutePath.Contains("get-sand-usage-status", StringComparison.Ordinal))
+                return new AllowlistedHttpResponse(200, """{"isUnified":false}""", request.Url);
             return new AllowlistedHttpResponse(404, "{}", request.Url);
         });
         var coordinator = new ProviderQuotaCoordinator(
@@ -12073,6 +12488,11 @@ internal static class Program
                         ? """{"billingCycleEnd":"2026-12-15T00:00:00Z","individualUsage":{"plan":{"autoPercentUsed":12.5,"apiPercentUsed":4}}}"""
                         : "{}";
                     return Task.FromResult(new AllowlistedHttpResponse(status, body, request.Url));
+                }
+
+                if (request.Url.AbsolutePath.Contains("get-sand-usage-status", StringComparison.Ordinal))
+                {
+                    return Task.FromResult(new AllowlistedHttpResponse(200, """{"isUnified":false}""", request.Url));
                 }
 
                 return Task.FromResult(new AllowlistedHttpResponse(404, "{}", request.Url));

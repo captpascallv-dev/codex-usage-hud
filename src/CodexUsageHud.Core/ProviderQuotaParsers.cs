@@ -411,13 +411,30 @@ public static class GrokQuotaParser
     }
 }
 
+public enum CursorAllowanceMode
+{
+    Unconfirmed,
+    Legacy,
+    Unified,
+}
+
+public sealed record CursorSandParse(
+    CursorAllowanceMode Mode,
+    IReadOnlyList<QuotaWindowObservation> Windows,
+    string? ErrorCode);
+
 public static class GrokBotQuotaParser
 {
     public static IReadOnlyList<QuotaWindowObservation> Parse(string json, DateTimeOffset nowUtc,
         out string? errorCode)
     {
-        errorCode = null;
-        _ = nowUtc;
+        var read = Read(json, nowUtc);
+        errorCode = read.ErrorCode;
+        return read.Windows;
+    }
+
+    public static CursorSandParse Read(string json, DateTimeOffset nowUtc)
+    {
         try
         {
             using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 32 });
@@ -428,52 +445,149 @@ public static class GrokBotQuotaParser
                 root = wrapped;
             }
 
-            var pooled = JsonQuotaFields.GetBoolean(root, "usesPooledEnterpriseAllowance",
-                "uses_pooled_enterprise_allowance") == true;
-            var includedZero = JsonQuotaFields.GetBoolean(root, "includedLimitZero", "included_limit_zero") == true;
-            var hasIncluded = JsonQuotaFields.GetBoolean(root, "hasNonZeroIncludedLimit",
-                "has_non_zero_included_limit");
-            var usedPresent = root.TryGetProperty("usagePercent", out var usedElement) ||
-                              root.TryGetProperty("usage_percent", out usedElement);
-            var used = usedPresent ? JsonQuotaFields.GetDouble(root, "usagePercent", "usage_percent") : null;
-
-            var flagsPresent = root.TryGetProperty("usesPooledEnterpriseAllowance", out _) ||
-                               root.TryGetProperty("uses_pooled_enterprise_allowance", out _) ||
-                               root.TryGetProperty("includedLimitZero", out _) ||
-                               root.TryGetProperty("included_limit_zero", out _) ||
-                               root.TryGetProperty("hasNonZeroIncludedLimit", out _) ||
-                               root.TryGetProperty("has_non_zero_included_limit", out _);
-            if (!flagsPresent && !usedPresent)
+            switch (ProbeMode(root))
             {
-                errorCode = "grok_bot_unreadable";
-                return Array.Empty<QuotaWindowObservation>();
+                case SandModeProbe.Unified:
+                    return ReadUnified(root, nowUtc);
+                case SandModeProbe.NotBoolean:
+                    return new CursorSandParse(CursorAllowanceMode.Unconfirmed,
+                        Array.Empty<QuotaWindowObservation>(), "cursor_sand_mode_invalid");
+                case SandModeProbe.Legacy:
+                    return new CursorSandParse(CursorAllowanceMode.Legacy, ReadLegacy(root, out var legacyError),
+                        legacyError);
+                default:
+                    return new CursorSandParse(CursorAllowanceMode.Unconfirmed, ReadLegacy(root, out var absentError),
+                        absentError);
             }
-
-            if (pooled || includedZero || hasIncluded == false || !usedPresent || !used.HasValue)
-            {
-                errorCode = "grok_bot_not_included";
-                return Array.Empty<QuotaWindowObservation>();
-            }
-
-            if (used.Value < 0 || used.Value > 100)
-            {
-                errorCode = "grok_bot_usage_invalid";
-                return Array.Empty<QuotaWindowObservation>();
-            }
-
-            var reset = JsonQuotaFields.GetDate(root, "nextResetTimestampUtc", "next_reset_timestamp_utc",
-                "nextResetAt", "next_reset_at");
-            return new[]
-            {
-                new QuotaWindowObservation("sand", "Grok Bot 周额度", used, reset, null, true,
-                    reset.HasValue ? null : "重置时间未提供，不按 7 天推算"),
-            };
         }
         catch (JsonException)
         {
-            errorCode = "grok_bot_json_invalid";
+            return new CursorSandParse(CursorAllowanceMode.Unconfirmed, Array.Empty<QuotaWindowObservation>(),
+                "grok_bot_json_invalid");
+        }
+    }
+
+    private enum SandModeProbe
+    {
+        Absent,
+        Legacy,
+        Unified,
+        NotBoolean,
+    }
+
+    private static SandModeProbe ProbeMode(JsonElement root)
+    {
+        if (!root.TryGetProperty("isUnified", out var value) &&
+            !root.TryGetProperty("is_unified", out value))
+        {
+            return SandModeProbe.Absent;
+        }
+
+        if (value.ValueKind == JsonValueKind.True) return SandModeProbe.Unified;
+        if (value.ValueKind == JsonValueKind.False) return SandModeProbe.Legacy;
+        return SandModeProbe.NotBoolean;
+    }
+
+    private static CursorSandParse ReadUnified(JsonElement root, DateTimeOffset nowUtc)
+    {
+        var includedZero = JsonQuotaFields.GetBoolean(root, "includedLimitZero", "included_limit_zero") == true;
+        var hasIncluded = JsonQuotaFields.GetBoolean(root, "hasNonZeroIncludedLimit", "has_non_zero_included_limit");
+        if (includedZero || hasIncluded == false)
+        {
+            return new CursorSandParse(CursorAllowanceMode.Unified, Array.Empty<QuotaWindowObservation>(),
+                "shared_weekly_not_included");
+        }
+
+        var usedPresent = root.TryGetProperty("usagePercent", out _) || root.TryGetProperty("usage_percent", out _);
+        var used = usedPresent ? JsonQuotaFields.GetDouble(root, "usagePercent", "usage_percent") : null;
+        if (!usedPresent || !used.HasValue)
+        {
+            return new CursorSandParse(CursorAllowanceMode.Unified, Array.Empty<QuotaWindowObservation>(),
+                "shared_weekly_usage_missing");
+        }
+
+        if (!double.IsFinite(used.Value) || used.Value < 0 || used.Value > 100)
+        {
+            return new CursorSandParse(CursorAllowanceMode.Unified, Array.Empty<QuotaWindowObservation>(),
+                "shared_weekly_usage_invalid");
+        }
+
+        var start = JsonQuotaFields.GetDate(root, "currentPeriodStart", "current_period_start");
+        var end = JsonQuotaFields.GetDate(root, "nextResetTimestampUtc", "next_reset_timestamp_utc",
+            "nextResetAt", "next_reset_at");
+        if (end.HasValue && end.Value <= nowUtc)
+        {
+            return new CursorSandParse(CursorAllowanceMode.Unified, Array.Empty<QuotaWindowObservation>(),
+                "shared_weekly_period_elapsed");
+        }
+
+        if (start.HasValue && start.Value > nowUtc)
+        {
+            return new CursorSandParse(CursorAllowanceMode.Unified, Array.Empty<QuotaWindowObservation>(),
+                "shared_weekly_period_not_current");
+        }
+
+        int? duration = null;
+        if (start.HasValue && end.HasValue)
+        {
+            var minutes = (int)Math.Round((end.Value - start.Value).TotalMinutes, MidpointRounding.AwayFromZero);
+            if (minutes <= 0)
+            {
+                return new CursorSandParse(CursorAllowanceMode.Unified, Array.Empty<QuotaWindowObservation>(),
+                    "shared_weekly_period_elapsed");
+            }
+
+            duration = minutes;
+        }
+
+        return new CursorSandParse(CursorAllowanceMode.Unified, new[]
+        {
+            new QuotaWindowObservation(SharedWeeklyQuota.WindowId, SharedWeeklyQuota.DisplayName, used, end, duration,
+                true, end.HasValue ? null : "重置时间未提供，不按 7 天推算"),
+        }, null);
+    }
+
+    private static IReadOnlyList<QuotaWindowObservation> ReadLegacy(JsonElement root, out string? errorCode)
+    {
+        errorCode = null;
+        var pooled = JsonQuotaFields.GetBoolean(root, "usesPooledEnterpriseAllowance",
+            "uses_pooled_enterprise_allowance") == true;
+        var includedZero = JsonQuotaFields.GetBoolean(root, "includedLimitZero", "included_limit_zero") == true;
+        var hasIncluded = JsonQuotaFields.GetBoolean(root, "hasNonZeroIncludedLimit",
+            "has_non_zero_included_limit");
+        var usedPresent = root.TryGetProperty("usagePercent", out _) || root.TryGetProperty("usage_percent", out _);
+        var used = usedPresent ? JsonQuotaFields.GetDouble(root, "usagePercent", "usage_percent") : null;
+        var flagsPresent = root.TryGetProperty("usesPooledEnterpriseAllowance", out _) ||
+                           root.TryGetProperty("uses_pooled_enterprise_allowance", out _) ||
+                           root.TryGetProperty("includedLimitZero", out _) ||
+                           root.TryGetProperty("included_limit_zero", out _) ||
+                           root.TryGetProperty("hasNonZeroIncludedLimit", out _) ||
+                           root.TryGetProperty("has_non_zero_included_limit", out _);
+        if (!flagsPresent && !usedPresent)
+        {
+            errorCode = "grok_bot_unreadable";
             return Array.Empty<QuotaWindowObservation>();
         }
+
+        if (pooled || includedZero || hasIncluded == false || !usedPresent || !used.HasValue)
+        {
+            errorCode = "grok_bot_not_included";
+            return Array.Empty<QuotaWindowObservation>();
+        }
+
+        if (used.Value < 0 || used.Value > 100)
+        {
+            errorCode = "grok_bot_usage_invalid";
+            return Array.Empty<QuotaWindowObservation>();
+        }
+
+        var reset = JsonQuotaFields.GetDate(root, "nextResetTimestampUtc", "next_reset_timestamp_utc",
+            "nextResetAt", "next_reset_at");
+        return new[]
+        {
+            new QuotaWindowObservation("sand", "Grok Bot 周额度", used, reset, null, true,
+                reset.HasValue ? null : "重置时间未提供，不按 7 天推算"),
+        };
     }
 }
 

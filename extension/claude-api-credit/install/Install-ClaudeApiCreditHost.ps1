@@ -1,12 +1,23 @@
-# Delivered for a later approved install. Do not run it in this candidate round.
+# Delivered for a later approved install. Do not run it against the real profile in this candidate round.
 # Writes only HKCU\Software\Google\Chrome\NativeMessagingHosts\com.codexusagehud.claude_api_credit
 # and copies this bundle into %LOCALAPPDATA%\CodexUsageHUD\claude-api-credit-bridge.
+# Pass -DestinationRoot to copy into an isolated directory and skip the registry.
 [CmdletBinding()]
 param(
-    [string]$BundleRoot
+    [string]$BundleRoot,
+    [string]$DestinationRoot
 )
 
 $ErrorActionPreference = 'Stop'
+$ExtensionFiles = @(
+    'manifest.json',
+    'background.js',
+    'content.js',
+    'parser.js',
+    'popup.html',
+    'popup.js'
+)
+
 function Find-BundleRoot([string]$Start) {
     $dir = [System.IO.Path]::GetFullPath($Start)
     while ($dir) {
@@ -26,17 +37,26 @@ if (-not $BundleRoot) { $BundleRoot = Find-BundleRoot $PSScriptRoot }
 if (-not $BundleRoot) { throw 'bundle_root_not_found' }
 $BundleRoot = [System.IO.Path]::GetFullPath($BundleRoot)
 $hostExe = Join-Path $BundleRoot 'ClaudeApiCreditHost.exe'
-$extensionManifest = Join-Path $BundleRoot 'extension\manifest.json'
+$extensionSource = Join-Path $BundleRoot 'extension'
 if (-not (Test-Path -LiteralPath $hostExe -PathType Leaf)) { throw "host_exe_missing:$hostExe" }
-if (-not (Test-Path -LiteralPath $extensionManifest -PathType Leaf)) { throw "extension_manifest_missing:$extensionManifest" }
 
-$destRoot = Join-Path $env:LOCALAPPDATA 'CodexUsageHUD\claude-api-credit-bridge'
+$register = [string]::IsNullOrWhiteSpace($DestinationRoot)
+if ($register) {
+    if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { throw 'local_app_data_missing' }
+    $DestinationRoot = Join-Path ([System.IO.Path]::GetFullPath($env:LOCALAPPDATA)) 'CodexUsageHUD\claude-api-credit-bridge'
+}
+$destRoot = [System.IO.Path]::GetFullPath($DestinationRoot)
 $destExtension = Join-Path $destRoot 'extension'
 New-Item -ItemType Directory -Force -Path $destExtension | Out-Null
-Copy-Item -LiteralPath $hostExe -Destination (Join-Path $destRoot 'ClaudeApiCreditHost.exe') -Force
-Copy-Item -LiteralPath (Join-Path $BundleRoot 'extension\*') -Destination $destExtension -Recurse -Force
 
 $destExe = Join-Path $destRoot 'ClaudeApiCreditHost.exe'
+Copy-Item -LiteralPath $hostExe -Destination $destExe -Force
+foreach ($name in $ExtensionFiles) {
+    $source = Join-Path $extensionSource $name
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "extension_file_missing:$source" }
+    Copy-Item -LiteralPath $source -Destination (Join-Path $destExtension $name) -Force
+}
+
 $destJson = Join-Path $destRoot 'native-host.json'
 $manifest = [ordered]@{
     name = 'com.codexusagehud.claude_api_credit'
@@ -48,10 +68,13 @@ $manifest = [ordered]@{
 $json = $manifest | ConvertTo-Json -Depth 4
 [System.IO.File]::WriteAllText($destJson, $json + "`n")
 
-$regPath = 'HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.codexusagehud.claude_api_credit'
-New-Item -Path $regPath -Force | Out-Null
-New-ItemProperty -Path $regPath -Name '(default)' -Value $destJson -PropertyType String -Force | Out-Null
-Write-Output "registered=$regPath"
+if ($register) {
+    $regPath = 'HKCU:\Software\Google\Chrome\NativeMessagingHosts\com.codexusagehud.claude_api_credit'
+    New-Item -Path $regPath -Force | Out-Null
+    New-ItemProperty -Path $regPath -Name '(default)' -Value $destJson -PropertyType String -Force | Out-Null
+    Write-Output "registered=$regPath"
+}
+
 Write-Output "manifest=$destJson"
 Write-Output "host=$destExe"
 Write-Output "extension=$destExtension"

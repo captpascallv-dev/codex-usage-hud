@@ -10,10 +10,9 @@
     ["剩余余额", "适用范围", "到期日", "授予日期"],
     ["Remaining balance", "Applies to", "Expires", "Granted"],
   ];
-  const ORGANIZATION_SELECTORS = [
-    '[data-testid="organization-switcher"]',
-    '[data-testid="organization-menu-button"]',
-  ];
+  const NAV_LABEL = "主要導覽";
+  const READY_TIMEOUT_MS = 5000;
+  const READY_INTERVAL_MS = 100;
   const OBSERVATION_FIELDS = [
     "schema", "kind", "source", "observed_at_utc", "organization_binding", "state",
     "currency", "remaining", "grant_amount", "granted_on_utc", "expires_on_utc",
@@ -75,11 +74,23 @@
     return match[1] + "-" + match[2] + "-" + match[3];
   }
 
+  function isAriaHidden(node) {
+    return Boolean(node && typeof node.getAttribute === "function" && node.getAttribute("aria-hidden") === "true");
+  }
+
+  function visibleText(node) {
+    if (!node || isAriaHidden(node)) return "";
+    const nodes = node.childNodes && node.childNodes.length ? Array.from(node.childNodes) : null;
+    if (nodes && nodes.length) return nodes.map(visibleText).join("");
+    if (node.children && node.children.length) return Array.from(node.children).map(visibleText).join("");
+    return node.textContent || "";
+  }
+
   function headerCells(table) {
     const head = table.querySelector("thead");
     const row = head ? head.querySelector("tr") : table.querySelector("tr");
     if (!row) return [];
-    return Array.from(row.querySelectorAll("th")).map(cell => normalizeSpace(cell.textContent));
+    return Array.from(row.querySelectorAll("th")).map(cell => normalizeSpace(visibleText(cell)));
   }
 
   function bodyRows(table) {
@@ -87,30 +98,50 @@
     return Array.from(body.querySelectorAll("tr")).filter(row => row.querySelectorAll("td").length > 0);
   }
 
-  function organizationLabel(document) {
-    const texts = [];
-    for (const selector of ORGANIZATION_SELECTORS) {
-      for (const node of Array.from(document.querySelectorAll(selector))) {
-        const text = normalizeSpace(node.textContent).normalize("NFC");
-        if (text && text.length <= 200) texts.push(text);
-      }
-    }
-    const unique = Array.from(new Set(texts));
-    if (unique.length === 1) return { label: unique[0] };
-    if (unique.length === 0) return { reason: "binding_missing" };
-    return { reason: "binding_ambiguous" };
+  function tagName(node) {
+    return String((node && (node.tagName || node.tag)) || "").toUpperCase();
   }
 
-  function withBinding(result, binding) {
-    if (binding && binding.label) result.organizationLabel = binding.label;
+  function organizationLabels(document) {
+    const navs = Array.from(document.querySelectorAll('[aria-label="' + NAV_LABEL + '"]'));
+    if (navs.length !== 1) return { reason: navs.length === 0 ? "binding_missing" : "binding_ambiguous" };
+    const buttons = Array.from(navs[0].querySelectorAll("button")).filter(button =>
+      button.getAttribute("aria-haspopup") === "menu");
+    if (buttons.length !== 1) return { reason: buttons.length === 0 ? "binding_missing" : "binding_ambiguous" };
+    const children = Array.from(buttons[0].children || []);
+    if (children.length !== 3 || tagName(children[1]) !== "DIV") return { reason: "binding_missing" };
+    const spans = Array.from(children[1].children || []);
+    if (spans.length !== 2 || spans.some(span => tagName(span) !== "SPAN")) return { reason: "binding_missing" };
+    const displayName = normalizeSpace(visibleText(spans[0])).normalize("NFC");
+    const organizationName = normalizeSpace(visibleText(spans[1])).normalize("NFC");
+    if (!displayName || !organizationName || displayName.length > 200 || organizationName.length > 200) {
+      return { reason: "binding_missing" };
+    }
+    return { labels: [displayName, organizationName] };
+  }
+
+  function withBinding(result, identity) {
+    if (identity && identity.labels) result.organizationLabels = identity.labels.slice();
     return result;
+  }
+
+  function promotionalTables(document) {
+    return Array.from(document.querySelectorAll("table")).filter(table =>
+      TABLE_LABELS.includes(normalizeSpace(table.getAttribute("aria-label"))));
+  }
+
+  function surfaceReady(document) {
+    if (!organizationLabels(document).labels) return false;
+    const tables = promotionalTables(document);
+    if (tables.length !== 1 || !headersMatch(headerCells(tables[0]))) return false;
+    const rows = bodyRows(tables[0]);
+    return rows.length === 1 && Array.from(rows[0].querySelectorAll("td")).length === 4;
   }
 
   function readPromotionalCredit(document, href) {
     if (!pageAllowed(href)) return { ok: false, reason: "wrong_page" };
-    const tables = Array.from(document.querySelectorAll("table")).filter(table =>
-      TABLE_LABELS.includes(normalizeSpace(table.getAttribute("aria-label"))));
-    const binding = organizationLabel(document);
+    const tables = promotionalTables(document);
+    const binding = organizationLabels(document);
     if (tables.length === 0) {
       return withBinding({ ok: false, reason: binding.reason || "missing" }, binding);
     }
@@ -127,7 +158,7 @@
     if (!amount || !expiresOnUtc || !grantedOnUtc || grantedOnUtc > expiresOnUtc) {
       return withBinding({ ok: false, reason: "malformed_row" }, binding);
     }
-    if (!binding.label) return { ok: false, reason: binding.reason || "binding_missing" };
+    if (!binding.labels) return { ok: false, reason: binding.reason || "binding_missing" };
     return {
       ok: true,
       currency: "USD",
@@ -135,13 +166,14 @@
       grantAmount: amount.grantAmount,
       grantedOnUtc,
       expiresOnUtc,
-      organizationLabel: binding.label,
+      organizationLabels: binding.labels.slice(),
     };
   }
 
-  async function organizationBinding(label) {
-    const normalized = normalizeSpace(label).normalize("NFC");
-    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(normalized));
+  async function organizationBinding(labels) {
+    const parts = (Array.isArray(labels) ? labels : [labels])
+      .map(part => normalizeSpace(part).normalize("NFC"));
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(parts.join("\n")));
     return Array.from(new Uint8Array(digest)).map(byte => byte.toString(16).padStart(2, "0")).join("");
   }
 
@@ -211,8 +243,11 @@
     SOURCE_URL,
     HEADER_SETS,
     TABLE_LABELS,
-    ORGANIZATION_SELECTORS,
+    NAV_LABEL,
+    READY_TIMEOUT_MS,
+    READY_INTERVAL_MS,
     readPromotionalCredit,
+    surfaceReady,
     organizationBinding,
     toNativeMessage,
     sanitizeNativeMessage,

@@ -322,7 +322,7 @@ public static class HudPresentation
         var quota = GetUsablePrimaryQuota(snapshot.Quota);
         var quotaText = quota is null
             ? "额度：不可用 · 官方重置时间：不可用 · 倒计时：不可用"
-            : $"额度：已用 {quota.UsedPercent:0}% · 剩余 {quota.RemainingPercent:0}%（{quota.Name}） · " +
+            : $"额度：已用 {FormatQuotaPercent(quota.UsedPercent)} · 剩余 {FormatQuotaPercent(quota.RemainingPercent)}（{quota.Name}） · " +
               $"官方重置 {quota.ResetsAtUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss} · " +
               $"倒计时 {FormatCountdown(quota.ResetsAtUtc - snapshot.GeneratedAtUtc)}";
         var running = snapshot.MachineLocalRunningCount ?? snapshot.Sessions.Count(IsRunning);
@@ -380,7 +380,7 @@ public static class HudPresentation
     {
         if (snapshot.AggregateMigrationPending) return "? 索引中（统计迁移） · raw token 统计暂不可用";
         var quota = GetUsablePrimaryQuota(snapshot.Quota);
-        var remaining = quota is null ? "不可用" : $"{quota.RemainingPercent:0}%（{quota.Name}）";
+        var remaining = quota is null ? "不可用" : $"{FormatQuotaPercent(quota.RemainingPercent)}（{quota.Name}）";
         var countdown = quota is null ? "额度不可用" : FormatCountdown(quota.ResetsAtUtc - snapshot.GeneratedAtUtc);
         var running = snapshot.MachineLocalRunningCount ?? snapshot.Sessions.Count(IsRunning);
         var cycle = snapshot.CycleTotal.HasValue
@@ -517,6 +517,9 @@ public static class HudPresentation
 
     public static QuotaBucket? GetUsablePrimaryQuota(QuotaObservation observation) =>
         observation.Primary is { HasValidWindow: true } primary ? primary : null;
+
+    public static string FormatQuotaPercent(double value) =>
+        ProviderQuotaPresentation.FormatFinePercent(value) + "%";
 
     public static string FormatCountdown(TimeSpan remaining)
     {

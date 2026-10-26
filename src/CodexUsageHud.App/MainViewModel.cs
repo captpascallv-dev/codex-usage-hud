@@ -50,6 +50,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _slotDetailSource = "";
     private string _slotDetailObserved = "";
     private string _slotDetailAccountHint = "";
+    private string _slotDetailShareNote = "";
     private IReadOnlyList<SlotWindowRow> _slotDetailWindows = Array.Empty<SlotWindowRow>();
     private ClaudeApiCreditObservation? _claudeApiCredit;
     private bool _claudeApiCreditVisible;
@@ -130,6 +131,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public string SlotDetailObserved { get => _slotDetailObserved; private set => SetField(ref _slotDetailObserved, value); }
     public string SlotDetailAccountHint { get => _slotDetailAccountHint; private set => SetField(ref _slotDetailAccountHint, value); }
     public bool SlotDetailAccountHintVisible => !string.IsNullOrWhiteSpace(SlotDetailAccountHint);
+    public string SlotDetailShareNote { get => _slotDetailShareNote; private set => SetField(ref _slotDetailShareNote, value); }
+    public bool SlotDetailShareNoteVisible => !string.IsNullOrWhiteSpace(SlotDetailShareNote);
     public bool ClaudeApiCreditVisible => _claudeApiCreditVisible;
     public string ClaudeApiCreditTitle => _claudeApiCreditTitle;
     public string ClaudeApiCreditAmount => _claudeApiCreditAmount;
@@ -195,7 +198,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
         var quota = HudPresentation.GetUsablePrimaryQuota(timed.Quota);
         var firstLine = quota is null
             ? "额度：不可用 · 官方重置时间：不可用 · 倒计时：不可用"
-            : $"额度：已用 {quota.UsedPercent:0}% · 剩余 {quota.RemainingPercent:0}%（{quota.Name}） · " +
+            : $"额度：已用 {HudPresentation.FormatQuotaPercent(quota.UsedPercent)} · 剩余 {HudPresentation.FormatQuotaPercent(quota.RemainingPercent)}（{quota.Name}） · " +
               $"官方重置 {quota.ResetsAtUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss} · " +
               $"倒计时 {HudPresentation.FormatCountdown(quota.ResetsAtUtc - nowUtc)}";
         var separator = OverviewText.IndexOf('\n');
@@ -240,7 +243,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
             QuotaStateText, QuotaStateDetailText, RemainingWindowText, VisibleSessionCountText,
             PrimarySessionCountText, InternalTaskCountText, AppSessionCountText,
             CliSessionCountText, OrphanTaskCountText, SlotDetailTitle, SlotDetailPercent, SlotDetailBody, BindingNote,
-            SlotDetailStatus, SlotDetailSource, SlotDetailObserved, SlotDetailAccountHint,
+            SlotDetailStatus, SlotDetailSource, SlotDetailObserved, SlotDetailAccountHint, SlotDetailShareNote,
             ClaudeApiCreditTitle, ClaudeApiCreditAmount, ClaudeApiCreditDetail, ClaudeApiCreditMeta,
             ClaudeApiCreditScope,
             AnalysisEmptyTitle, AnalysisEmptyDetail,
@@ -422,9 +425,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
         else
         {
             var remaining = quota.ResetsAtUtc - nowUtc;
-            RemainingText = $"{quota.RemainingPercent:0}%";
+            RemainingText = HudPresentation.FormatQuotaPercent(quota.RemainingPercent);
             RemainingWindowText = string.IsNullOrWhiteSpace(quota.Name) ? "剩余额度" : quota.Name;
-            UsedText = $"{quota.UsedPercent:0}%";
+            UsedText = HudPresentation.FormatQuotaPercent(quota.UsedPercent);
             CountdownText = HudPresentation.FormatCountdown(remaining);
             CountdownCompactText = FormatCompactCountdown(remaining);
             ResetTimeText = quota.ResetsAtUtc.ToLocalTime().ToString("MM月dd日 HH:mm");
@@ -500,8 +503,10 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 : "观测：" + observedAge;
             SlotDetailAccountHint = SlotAccountHint(slot);
             SlotDetailWindows = BuildWindowRows(slot, _snapshot.GeneratedAtUtc);
+            SlotDetailShareNote = ShareNote(slot);
             SlotDetailBody = BuildSlotDetail(slot, _snapshot.GeneratedAtUtc);
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SlotDetailAccountHintVisible)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SlotDetailShareNoteVisible)));
         }
         RefreshClaudeApiCreditRow();
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedSlot)));
@@ -517,10 +522,12 @@ public sealed class MainViewModel : INotifyPropertyChanged
         SlotDetailSource = "";
         SlotDetailObserved = "";
         SlotDetailAccountHint = "";
+        SlotDetailShareNote = "";
         SlotDetailWindows = Array.Empty<SlotWindowRow>();
         SlotDetailBody = body;
         RefreshClaudeApiCreditRow();
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SlotDetailAccountHintVisible)));
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SlotDetailShareNoteVisible)));
     }
 
     private void RefreshClaudeApiCreditRow()
@@ -570,6 +577,9 @@ public sealed class MainViewModel : INotifyPropertyChanged
             lines.Add(hint);
         if (!slot.SuppliesLocalAnalysis)
             lines.Add("此槽不提供会话或续接分析。");
+        var share = ShareNote(slot);
+        if (!string.IsNullOrWhiteSpace(share))
+            lines.Add(share);
         if (slot.Windows.Count == 0)
             lines.Add(slot.Status == QuotaSlotStatus.NoAllowance
                 ? "没有计入计划的额度，不显示 100% 可用。"
@@ -588,6 +598,16 @@ public sealed class MainViewModel : INotifyPropertyChanged
         }
 
         return string.Join('\n', lines);
+    }
+
+    private static string ShareNote(ProviderSlotSnapshot slot)
+    {
+        if (slot.SlotId is ProviderSlotIds.Cursor or ProviderSlotIds.GrokBot &&
+            slot.Windows.Any(window => window.WindowId == SharedWeeklyQuota.WindowId))
+            return SharedWeeklyQuota.SharedSeatNote;
+        if (slot.SlotId == ProviderSlotIds.Grok)
+            return SharedWeeklyQuota.GrokSeatNote;
+        return "";
     }
 
     private static string SlotAccountHint(ProviderSlotSnapshot slot)
@@ -620,7 +640,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 return new SlotWindowRow(window.DisplayName, "—", reset, 0, false, true);
 
             var remaining = window.RemainingPercent!.Value;
-            var remainingText = remaining.ToString("0", CultureInfo.InvariantCulture) + "%";
+            var remainingText = ProviderQuotaPresentation.FormatPercent(window, remaining);
             if (slot.UpdateDelayed)
                 remainingText += " · 旧值";
             else if (!live)

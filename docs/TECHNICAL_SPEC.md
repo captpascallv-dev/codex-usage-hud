@@ -653,6 +653,7 @@ left out instead of copied:
 | Cursor | `autoPercentUsed` | `cursor_auto` |
 | Cursor | `apiPercentUsed` | `cursor_api` |
 | Cursor | `团队共用` | `cursor_team` |
+| Cursor or Bot | `shared_weekly` | `x_shared_weekly` |
 | Grok | `weekly` | `grok_weekly` |
 | Bot | `sand` | `grok_bot` |
 | Claude | `five_hour` | `claude_five_hour` |
@@ -662,6 +663,21 @@ left out instead of copied:
 Windows stay separate. The file does not collapse them into the single smallest
 glance percent. The same pool can appear more than once; `window_minutes` and
 `resets_at_utc` keep the entries distinct.
+
+`x_shared_weekly` is written only when `get-sand-usage-status` returns boolean
+`isUnified: true`. The Cursor slot and the Bot slot may each contain that pool.
+They are two views of one Sand allowance and must not be added together. The
+window uses that response's `usagePercent`, `currentPeriodStart` and
+`nextResetTimestampUtc`; monthly `autoPercentUsed` / `apiPercentUsed` are not
+substituted. Explicit `isUnified: false` keeps `cursor_auto`, `cursor_api`,
+`cursor_team` and Bot `sand` as `grok_bot`. If `isUnified` is missing or not a
+boolean, Cursor does not export a monthly pool from `usage-summary`. Bot can
+still export legacy `grok_bot` when the Sand body itself has a legacy allowance
+and no explicit unified flag. `grok_weekly` remains the Grok credential's own
+billing window. A similar percent or reset does not make it the same allowance,
+and the file does not copy or add it to `x_shared_weekly`. The detail and
+status text use “Cursor/Grok/Bot 共享周额度”. The narrow rail caption is
+“共享周额度”, beside the slot name, so the full phrase is not clipped.
 
 The document is built from those fields only. It does not contain custom labels,
 account keys, identity hashes, config fingerprints, source or error text,

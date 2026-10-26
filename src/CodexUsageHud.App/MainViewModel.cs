@@ -577,7 +577,7 @@ public sealed class MainViewModel : INotifyPropertyChanged
                 return new SlotWindowRow(window.DisplayName, "—", reset, 0, false, true);
 
             var remaining = window.RemainingPercent!.Value;
-            var remainingText = remaining.ToString("0", CultureInfo.InvariantCulture) + "%";
+            var remainingText = ProviderQuotaPresentation.FormatPercent(window, remaining);
             if (slot.UpdateDelayed)
                 remainingText += " · 旧值";
             else if (!live)

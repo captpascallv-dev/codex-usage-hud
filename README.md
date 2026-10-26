@@ -47,7 +47,10 @@ SHA-256 校验文件，用于确认下载内容没有发生变化。
 
 快照只含固定槽位名（Codex主、Codex备、Cursor、Grok、Bot、Claude）、已知额度池标识和
 数字。不含自定义槽名、账号、邮箱、令牌、凭据、路径或会话内容。不新增额度来源，
-也不把 raw token 换算成额度。字段和消费者读法见技术规格的 “Opt-in local quota snapshot”。
+也不把 raw token 换算成额度。Cursor 与 Bot 在官方 `isUnified` 为 true 时都写出
+`x_shared_weekly`，这是同一份共享周额度的两个视图，不能相加。Grok 的 `grok_weekly`
+仍是 Grok 自己的账单。旧的 `cursor_auto`、`cursor_api`、`cursor_team` 和 `grok_bot`
+只留给明确的旧计划。字段和消费者读法见技术规格的 “Opt-in local quota snapshot”。
 
 ### v1.1.2
 
@@ -157,7 +160,11 @@ Codex App Server 现会同时返回名为 `primary` 与 `secondary` 的额度窗
   第二 Codex 默认仍读取本机 PI 已登录的 ChatGPT/Codex 订阅（openai-codex）。设置里可以另填一个
   Codex CLI 主目录；留空继续用 PI，填写后只对该目录读取 CLI 额度，失败时不改回 PI，也不复制登录。
   Cursor、Grok、Grok Bot 和 Claude 需在设置中勾选后，运行时才读取
-  各自本机已有登录中的必要字段，并只访问该服务自己的额度接口。Claude 只显示订阅用量，不分析会话。
+  各自本机已有登录中的必要字段，并只访问该服务自己的额度接口。Cursor 先看 Sand 接口里的
+  官方 `isUnified`：为 true 时显示共享周额度的实际用量、周期和重置，不再把月度
+  auto/api 的 0 显示成 100%。窄栏写「共享周额度」，详情和状态写完整的
+  「Cursor/Grok/Bot 共享周额度」。Bot 关闭时 Cursor 仍会自己读取。`isUnified` 缺失或不是布尔值时，
+  Cursor 显示不可用，不回退月度数字。Claude 只显示订阅用量，不分析会话。
   Grok 访问令牌到期时，若本地仍有可续期凭据，HUD 会调用官方 `grok models` 让 Grok CLI 自己续写登录，而不是
   把文件时间戳当成退出登录，也不会改写 `auth.json`。Claude 登录过期时不刷新、不改写凭据。
 - 会话分析默认显示所有者确认的当前 Codex 主目录会话，并排除确认他户。这是目录级绑定，
@@ -238,7 +245,9 @@ login reset, data migration, or enabled-provider choices.
 8. 额度槽：当前 Codex 使用本机已安装的 Codex CLI App Server。第二 Codex 在目录留空时读取本机 PI
    已登录的 `openai-codex` 订阅；填写目录后只读取该 CLI 主目录的额度。没有对应登录时显示未连接。
    在设置中勾选 Cursor、Grok、Grok Bot 或 Claude 后，HUD 才使用对应本机已有登录。Grok 需要已安装
-   并登录的 Grok CLI；到期时由官方 `grok models` 续期。Grok Bot 走 Cursor 登录中的独立额度。
+   并登录的 Grok CLI；到期时由官方 `grok models` 续期。Grok Bot 走 Cursor 登录。官方 `isUnified`
+   为 true 时，Cursor 和 Bot 显示同一份共享周额度，不要把两格相加；Grok 仍用自己的账单。
+   旧计划仍把 Cursor 月度池和 Bot 额度分开。
    Claude 优先读取本机 Claude Code 已有 OAuth 登录；没有可用访问令牌时才回退到当前 Claude Desktop
    配置中的一个未过期访问令牌。订阅用量包含 5 小时、每周和接口实际返回的模型窗口。不启动或更新 Claude，
    也不把 raw token 当成订阅额度。公开包默认不启用 Cursor/Grok/Grok Bot/Claude，也不会写入任何人的启用勾选。
@@ -433,7 +442,16 @@ Precedence is rollout-explicit, legacy-preserved, catalog-default, then
 unavailable. The HUD observes this value and never changes runtime service.
 
 Cursor, Grok, Grok Bot and Claude quota reads run only after the user enables that slot.
-They use existing local logins against fixed HTTPS allowlists. Grok may spawn
+They use existing local logins against fixed HTTPS allowlists. Cursor reads
+`isUnified` from the Sand usage endpoint before trusting monthly auto/api percents.
+Explicit `true` shows that endpoint's shared weekly usage, real period and reset on
+the Cursor slot, even when Bot is disabled. The Bot slot then uses the same label and
+the snapshot pool `x_shared_weekly`. Detail and status say “Cursor/Grok/Bot 共享周额度”;
+the narrow rail caption is “共享周额度”. Those two entries are views of one allowance.
+Grok keeps its own billing read as `grok_weekly` and is not copied or added.
+Explicit `false` keeps the legacy monthly pools and the Bot-only Sand label. A missing
+or non-boolean `isUnified` leaves Cursor unavailable instead of showing a monthly 100%.
+Grok may spawn
 the official `grok models` CLI to renew an expired access key that still has a
 refresh grant, then re-read the login file. The HUD does not write Grok
 `auth.json`. The second Codex slot reads `openai-codex` against

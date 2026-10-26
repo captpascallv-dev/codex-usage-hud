@@ -133,6 +133,44 @@ public class CodexQuotaProfile
     }
 }
 
+internal static class CursorSandAccess
+{
+    public static AllowlistedHttpRequest Request(string cookie) => new("POST",
+        ProviderHttpAllowlist.CursorSandUsage,
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["Cookie"] = "WorkosCursorSessionToken=" + cookie,
+            ["Origin"] = "https://cursor.com",
+            ["Accept"] = "application/json",
+        }, "{}");
+
+    public static ProviderSlotSnapshot SharedSnapshot(ProviderSlotSettings settings, CursorSandParse sand,
+        DateTimeOffset now, string? identity)
+    {
+        if (sand.Windows.Count == 0)
+        {
+            var elapsed = string.Equals(sand.ErrorCode, "shared_weekly_period_elapsed", StringComparison.Ordinal);
+            var excluded = string.Equals(sand.ErrorCode, "shared_weekly_not_included", StringComparison.Ordinal);
+            var status = elapsed
+                ? QuotaSlotStatus.Stale
+                : excluded ? QuotaSlotStatus.NoAllowance : QuotaSlotStatus.Unavailable;
+            var text = elapsed
+                ? "已结束的周期，不显示为当前额度"
+                : excluded
+                    ? "当前计划未包含共享周额度，不显示 100% 可用"
+                    : "共享周额度无法确认，不显示月度 100%";
+            return ProviderQuotaPresentation.Placeholder(settings, false, status, text, SharedWeeklyQuota.SourceUrl,
+                sand.ErrorCode);
+        }
+
+        var stale = sand.Windows.Any(window => window.ResetsAtUtc.HasValue && window.ResetsAtUtc.Value <= now);
+        return new ProviderSlotSnapshot(settings.SlotId, ProviderQuotaPresentation.ProviderFor(settings.SlotId),
+            settings.Label, true, false, stale ? QuotaSlotStatus.Stale : QuotaSlotStatus.Live,
+            stale ? "陈旧观测" : SharedWeeklyQuota.StatusText, now, SharedWeeklyQuota.SourceUrl, sand.Windows,
+            identity, sand.ErrorCode, identity, FieldPresenceFlags: "isUnified=1");
+    }
+}
+
 public sealed class CursorQuotaAdapter
 {
     private readonly IAllowlistedHttpSender _http;
@@ -168,43 +206,35 @@ public sealed class CursorQuotaAdapter
         }
         try
         {
-            var response = await _http.SendAsync(new AllowlistedHttpRequest("GET",
-                ProviderHttpAllowlist.CursorUsageSummary,
-                new Dictionary<string, string>(StringComparer.Ordinal)
-                {
-                    ["Cookie"] = "WorkosCursorSessionToken=" + cookie,
-                    ["Accept"] = "application/json",
-                }), cancellationToken).ConfigureAwait(false);
-            if (response.StatusCode is 401 or 403)
+            var sandResponse = await _http.SendAsync(CursorSandAccess.Request(cookie), cancellationToken)
+                .ConfigureAwait(false);
+            if (sandResponse.StatusCode is 401 or 403)
             {
                 return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.NotConnected,
-                    "未连接：Cursor 登录已失效", "usage-summary 拒绝", "cursor_unauthorized");
+                    "未连接：Cursor 登录已失效", "get-sand-usage-status 拒绝", "cursor_sand_unauthorized");
             }
 
-            if (response.StatusCode < 200 || response.StatusCode >= 300)
+            if (sandResponse.StatusCode < 200 || sandResponse.StatusCode >= 300)
             {
                 return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.Unavailable,
-                    "Cursor 额度接口不可用", "usage-summary HTTP " + response.StatusCode,
-                    "cursor_http_" + response.StatusCode);
-            }
-
-            var windows = CursorQuotaParser.Parse(response.Body, DateTimeOffset.UtcNow, out var error, out var shape);
-            if (windows.Count == 0)
-            {
-                return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.Unavailable,
-                    "Cursor 未返回可用的模型池", "两个池不能合并成一个限额", error ?? "cursor_pools_missing") with
-                {
-                    FieldPresenceFlags = shape.Format(),
-                };
+                    "Cursor 额度模式无法确认，不沿用月度 100%", "get-sand-usage-status HTTP " + sandResponse.StatusCode,
+                    "cursor_sand_http_" + sandResponse.StatusCode);
             }
 
             var now = DateTimeOffset.UtcNow;
-            var stale = windows.Any(window => window.ResetsAtUtc.HasValue && window.ResetsAtUtc.Value <= now);
-            return new ProviderSlotSnapshot(settings.SlotId, ProviderIds.Cursor, settings.Label, true, false,
-                stale ? QuotaSlotStatus.Stale : QuotaSlotStatus.Live,
-                stale ? "陈旧观测" : "Cursor usage-summary", now,
-                "https://cursor.com/api/usage-summary", windows, identity, error, identity,
-                FieldPresenceFlags: shape.Format());
+            var sand = GrokBotQuotaParser.Read(sandResponse.Body, now);
+            if (sand.Mode == CursorAllowanceMode.Unified)
+                return CursorSandAccess.SharedSnapshot(settings, sand, now, identity);
+            if (sand.Mode != CursorAllowanceMode.Legacy)
+            {
+                var code = sand.ErrorCode is "cursor_sand_mode_invalid" or "grok_bot_json_invalid"
+                    ? sand.ErrorCode
+                    : "cursor_mode_unconfirmed";
+                return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.Unavailable,
+                    "无法确认 Cursor 额度模式，不沿用月度 100%", "get-sand-usage-status 没有明确的 isUnified", code);
+            }
+
+            return await ReadLegacySummaryAsync(settings, cookie, identity, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -222,6 +252,48 @@ public sealed class CursorQuotaAdapter
             return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.Unavailable,
                 "Cursor 网络不可用", "独立失败", "cursor_network");
         }
+    }
+
+    private async Task<ProviderSlotSnapshot> ReadLegacySummaryAsync(ProviderSlotSettings settings, string cookie,
+        string identity, CancellationToken cancellationToken)
+    {
+        var response = await _http.SendAsync(new AllowlistedHttpRequest("GET",
+            ProviderHttpAllowlist.CursorUsageSummary,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["Cookie"] = "WorkosCursorSessionToken=" + cookie,
+                ["Accept"] = "application/json",
+            }), cancellationToken).ConfigureAwait(false);
+        if (response.StatusCode is 401 or 403)
+        {
+            return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.NotConnected,
+                "未连接：Cursor 登录已失效", "usage-summary 拒绝", "cursor_unauthorized");
+        }
+
+        if (response.StatusCode < 200 || response.StatusCode >= 300)
+        {
+            return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.Unavailable,
+                "Cursor 额度接口不可用", "usage-summary HTTP " + response.StatusCode,
+                "cursor_http_" + response.StatusCode);
+        }
+
+        var windows = CursorQuotaParser.Parse(response.Body, DateTimeOffset.UtcNow, out var error, out var shape);
+        if (windows.Count == 0)
+        {
+            return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.Unavailable,
+                "Cursor 未返回可用的模型池", "两个池不能合并成一个限额", error ?? "cursor_pools_missing") with
+            {
+                FieldPresenceFlags = shape.Format(),
+            };
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var stale = windows.Any(window => window.ResetsAtUtc.HasValue && window.ResetsAtUtc.Value <= now);
+        return new ProviderSlotSnapshot(settings.SlotId, ProviderIds.Cursor, settings.Label, true, false,
+            stale ? QuotaSlotStatus.Stale : QuotaSlotStatus.Live,
+            stale ? "陈旧观测" : "Cursor usage-summary", now,
+            "https://cursor.com/api/usage-summary", windows, identity, error, identity,
+            FieldPresenceFlags: shape.Format());
     }
 }
 
@@ -503,14 +575,8 @@ public sealed class GrokBotQuotaAdapter
         }
         try
         {
-            var response = await _http.SendAsync(new AllowlistedHttpRequest("POST",
-                ProviderHttpAllowlist.CursorSandUsage,
-                new Dictionary<string, string>(StringComparer.Ordinal)
-                {
-                    ["Cookie"] = "WorkosCursorSessionToken=" + cookie,
-                    ["Origin"] = "https://cursor.com",
-                    ["Accept"] = "application/json",
-                }, "{}"), cancellationToken).ConfigureAwait(false);
+            var response = await _http.SendAsync(CursorSandAccess.Request(cookie), cancellationToken)
+                .ConfigureAwait(false);
             if (response.StatusCode is 401 or 403)
             {
                 return ProviderQuotaPresentation.Placeholder(settings, false, QuotaSlotStatus.NotConnected,
@@ -526,7 +592,12 @@ public sealed class GrokBotQuotaAdapter
             }
 
             var now = DateTimeOffset.UtcNow;
-            var windows = GrokBotQuotaParser.Parse(response.Body, now, out var error);
+            var sand = GrokBotQuotaParser.Read(response.Body, now);
+            if (sand.Mode == CursorAllowanceMode.Unified)
+                return CursorSandAccess.SharedSnapshot(settings, sand, now, identity);
+
+            var windows = sand.Windows;
+            var error = sand.ErrorCode;
             if (windows.Count == 0)
             {
                 var excluded = string.Equals(error, "grok_bot_not_included", StringComparison.Ordinal);
@@ -540,7 +611,7 @@ public sealed class GrokBotQuotaAdapter
             return new ProviderSlotSnapshot(settings.SlotId, ProviderIds.GrokBot, settings.Label, true, false,
                 stale ? QuotaSlotStatus.Stale : QuotaSlotStatus.Live,
                 stale ? "陈旧观测" : "Cursor dashboard Sand", now,
-                "https://cursor.com/api/dashboard/get-sand-usage-status", windows, identity, error, identity);
+                SharedWeeklyQuota.SourceUrl, windows, identity, error, identity);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {

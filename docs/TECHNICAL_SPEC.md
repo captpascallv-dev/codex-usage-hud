@@ -610,7 +610,9 @@ is. File mtime is not a freshness signal. IO errors are contained and do not
 change refresh, tray, docking, or provider reads.
 
 Schema is `1`. UTF-8 JSON, no BOM. Root fields are `schema`, `written_at_utc`,
-`hud_version`, and `slots`. `hud_version` is the App assembly version
+`hud_version`, and `slots`. When a local Claude API credit observation exists,
+the same document adds one `claude_api_credit` object after `slots`; otherwise
+that object is omitted. `hud_version` is the App assembly version
 `major.minor.build` (candidate `1.1.3`). `written_at_utc` is the replace time.
 `slots` always has these six entries, in this order:
 
@@ -672,6 +674,37 @@ Consumers should treat `disabled` and `unavailable` as having no usable numbers,
 treat `stale` numbers as the last retained observation, and ignore a file whose
 `written_at_utc` or `observed_at_utc` is older than the decision they are making.
 `null` means the HUD did not have that value.
+
+### Claude API promotional credit
+
+This is money, not a quota window. `remaining` and `grant_amount` are decimal
+USD strings such as `99.20` and `100.00`. They are not percentages, and they are
+not derived by subtracting a cost report from a fixed grant. `granted_on_utc`
+and `expires_on_utc` are UTC calendar dates (`yyyy-MM-dd`). The expiry date is
+valid through that UTC day. The HUD does not turn it into a time-of-day reset.
+The balance is the subscriber organization share. It is not a Cursor-only allowance
+and it does not change Cursor, Claude subscription, or any other weekly glance.
+Glance and minimum selection still read usable quota windows only.
+
+`claude_api_credit` has exactly these fields when present: `currency`,
+`remaining`, `grant_amount`, `granted_on_utc`, `expires_on_utc`,
+`observed_at_utc`, and `state`. `currency` is `USD` when amounts exist.
+`state` is `ok`, `stale`, or `unavailable`. Null amounts mean there is no live
+reading. `observed_at_utc` is the source observation time. An `ok` reading older
+than 15 minutes is shown as `stale` without rewriting that timestamp. A disabled
+or not-yet-connected bridge writes nothing, so the object stays absent and the
+Cursor detail does not show a money row.
+
+The HUD keeps the opaque organization binding in its own `claude-api-credit.json`
+cache, beside `usage.db`. The public snapshot does not include that binding,
+organization text, HTML, account keys, or source markup. The cache is one file
+with one owned temp. The receiver is stdio native messaging only. It does not
+open an HTTP port. A credit-file failure does not block quota refresh or the
+WPF quota panel. Account changes replace or clear the previous amounts.
+
+The optional Chrome reader is off until its own popup starts it. It may refresh
+one extension-owned billing tab every five minutes. Installation of that reader
+is separate from the ordinary HUD package and stays off until it is approved.
 
 ## 12. Reliability and resource behavior
 

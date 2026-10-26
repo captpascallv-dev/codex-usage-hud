@@ -1,0 +1,7 @@
+{
+  "name": "com.codexusagehud.claude_api_credit",
+  "description": "Codex Usage HUD Claude API credit receiver",
+  "path": "ClaudeApiCreditHost.exe",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://jnfblichipcdliigeooegbehgnennbfa/"]
+}

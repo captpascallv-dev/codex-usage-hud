@@ -180,7 +180,8 @@ public static class QuotaSnapshotMapper
 
 public static class QuotaSnapshotJson
 {
-    public static byte[] Serialize(IReadOnlyList<QuotaSnapshotSlot> slots, DateTimeOffset writtenAtUtc, string hudVersion)
+    public static byte[] Serialize(IReadOnlyList<QuotaSnapshotSlot> slots, DateTimeOffset writtenAtUtc, string hudVersion,
+        ClaudeApiCreditObservation? credit = null)
     {
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream, new JsonWriterOptions
@@ -227,6 +228,12 @@ public static class QuotaSnapshotJson
             }
 
             writer.WriteEndArray();
+            if (credit is not null)
+            {
+                writer.WritePropertyName("claude_api_credit");
+                ClaudeApiCreditJson.WritePublic(writer, credit);
+            }
+
             writer.WriteEndObject();
         }
 
@@ -288,7 +295,7 @@ public sealed class QuotaSnapshotWriter
             _pending = null;
     }
 
-    public void Publish(ProviderQuotaBoard board)
+    public void Publish(ProviderQuotaBoard board, ClaudeApiCreditObservation? credit = null)
     {
         if (Volatile.Read(ref _enabled) == 0) return;
         int epoch;
@@ -311,7 +318,7 @@ public sealed class QuotaSnapshotWriter
         lock (_gate)
         {
             if (Volatile.Read(ref _enabled) == 0) return;
-            _pending = new PendingSnapshot(slots, epoch);
+            _pending = new PendingSnapshot(slots, credit, epoch);
             if (_running) return;
             _running = true;
             _tail = Task.Run(Drain);
@@ -370,7 +377,7 @@ public sealed class QuotaSnapshotWriter
         {
             if (string.IsNullOrWhiteSpace(_directory)) return;
             Directory.CreateDirectory(_directory);
-            var bytes = QuotaSnapshotJson.Serialize(pending.Slots, _clock(), _hudVersion);
+            var bytes = QuotaSnapshotJson.Serialize(pending.Slots, _clock(), _hudVersion, pending.Credit);
             // One owned temp per directory. An interrupted write is overwritten here, not renamed aside.
             tempPath = Path.Combine(_directory, TempFileName);
             using (var stream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096,
@@ -428,5 +435,5 @@ public sealed class QuotaSnapshotWriter
         return trimmed;
     }
 
-    private sealed record PendingSnapshot(IReadOnlyList<QuotaSnapshotSlot> Slots, int Epoch);
+    private sealed record PendingSnapshot(IReadOnlyList<QuotaSnapshotSlot> Slots, ClaudeApiCreditObservation? Credit, int Epoch);
 }

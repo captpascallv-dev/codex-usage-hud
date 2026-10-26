@@ -49,6 +49,17 @@ SHA-256 校验文件，用于确认下载内容没有发生变化。
 数字。不含自定义槽名、账号、邮箱、令牌、凭据、路径或会话内容。不新增额度来源，
 也不把 raw token 换算成额度。字段和消费者读法见技术规格的 “Opt-in local quota snapshot”。
 
+### Claude API 赠送额度
+
+这是美元余额，不是每周剩余百分比，也不参与一眼最小剩余的计算。可选的本机桥接从
+Claude Console 账单页已经渲染的促销额度表读取剩余金额、授予总额和 UTC 日历日；
+购买额度、月度预算和发票不算。没有观测时，Cursor 详情不显示这一行，快照也不增加字段。
+有观测且额度快照开关打开时，同一份 schema `1` 文件在六个槽之后增加 `claude_api_credit`：
+`currency`、`remaining`、`grant_amount`、`granted_on_utc`、`expires_on_utc`、
+`observed_at_utc`、`state`。金额是美元字符串。到期日只到日期，不表示精确重置时刻。
+该余额按组织共享，不限 Cursor。公开文件不含组织名、绑定、HTML 或凭据。
+桥接默认关闭；读取失败不会挡住额度刷新。安装范围见扩展目录里的 `INSTALL.md`。
+
 ### v1.1.2
 
 相对已公开的 v1.1.1，这一版包含三处已接受的使用变化：
@@ -206,6 +217,11 @@ stops further writes. The v1.1.2 changes since the published v1.1.1 download rem
 an optional, default-off Claude subscription quota slot, an explicit secondary Codex
 CLI home that stays on PI when blank, and a no-focus raise when a docked auto-hidden
 card is revealed.
+The same release line can show one optional Claude API promotional balance in the
+Cursor detail. It is USD remaining over the actual grant, with UTC calendar dates,
+and it is omitted until a local observation exists. It is not a weekly percent and
+does not change the glance minimum. The shared-organization scope and the
+`claude_api_credit` object are described under “Opt-in local quota snapshot”.
 To upgrade a portable copy, exit the old HUD from the tray, replace the program
 files from the new ZIP, and open it again. Existing data and settings under
 `%LOCALAPPDATA%\CodexUsageHUD` are left in place. The ZIP has no installer,

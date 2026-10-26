@@ -3,9 +3,16 @@ param(
     [string]$ProjectRoot
 )
 
-$localDotnet = Join-Path $ProjectRoot '.tools\dotnet\dotnet.exe'
-if (Test-Path -LiteralPath $localDotnet -PathType Leaf) {
-    return (Resolve-Path -LiteralPath $localDotnet).Path
+$dir = [System.IO.Path]::GetFullPath($ProjectRoot)
+while ($dir) {
+    $localDotnet = Join-Path $dir '.tools\dotnet\dotnet.exe'
+    if (Test-Path -LiteralPath $localDotnet -PathType Leaf) {
+        return (Resolve-Path -LiteralPath $localDotnet).Path
+    }
+
+    $parent = Split-Path -Parent $dir
+    if (-not $parent -or $parent -eq $dir) { break }
+    $dir = $parent
 }
 
 $systemDotnet = Get-Command dotnet.exe -CommandType Application -ErrorAction SilentlyContinue |

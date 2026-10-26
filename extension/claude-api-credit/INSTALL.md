@@ -1,6 +1,6 @@
 # Claude API 赠送额度候选安装
 
-这是候选包，不是现行 HUD 的安装程序。在 Lead 验收且 Pascal 批准之前，不要运行本目录的安装脚本，不要加载扩展，也不要替换已经安装的 HUD。
+本目录安装的是可选 Chrome 余额连接。HUD 主程序的常规更新沿用 Pascal 的修复授权；新增 Chrome 连接须在 Lead 验收候选、Pascal 确认实际权限后，才能运行安装脚本、加载扩展和启用同步。
 
 ## 扩展权限
 
@@ -10,7 +10,7 @@ Manifest V3，扩展 ID `jnfblichipcdliigeooegbehgnennbfa`（由 manifest 里的
 - `storage`：记住开关；弹出页只保存状态、观测时间和金额
 - `alarms`：每 5 分钟刷新自己的后台标签
 - `scripting`：只向自己打开的账单页注入读取脚本
-- 主机权限只有 `https://platform.claude.com/settings/billing`
+- 网站权限为 `https://platform.claude.com`。Chrome 按网站授予读取与修改能力，权限中的 URL 路径不会缩小授权范围；本连接的已审阅代码仅在自己创建的账单标签中读取促销额度表。
 
 没有 `cookies`、`tabs`、`history`、`webRequest`。不读密钥、Cookie 或浏览器存储里的登录。不调用付费模型接口。
 

@@ -32,7 +32,6 @@ public sealed class UsageEngine : IDisposable
     private readonly List<FileSystemWatcher> _watchers = new();
     private readonly AppIoQueue _appIo;
     private readonly QuotaSnapshotWriter _quotaSnapshots;
-    private readonly ClaudeApiCreditCache _creditCache;
     private IReadOnlyList<RolloutFile> _files = Array.Empty<RolloutFile>();
     private Dictionary<string, ThreadMetadataRow> _metadataByPath = new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<ThreadMetadataRow> _metadataRows = Array.Empty<ThreadMetadataRow>();
@@ -66,11 +65,9 @@ public sealed class UsageEngine : IDisposable
         _quota = _quotaState.RestoreForDisplay();
         _providers = providers ?? new ProviderQuotaCoordinator();
         var dataDirectory = Path.GetDirectoryName(Path.GetFullPath(databasePath));
-        var creditDirectory = string.IsNullOrEmpty(dataDirectory) ? Path.GetFullPath(".") : dataDirectory;
         _quotaSnapshots = quotaSnapshots ?? new QuotaSnapshotWriter(
-            creditDirectory,
+            string.IsNullOrEmpty(dataDirectory) ? Path.GetFullPath(".") : dataDirectory,
             string.IsNullOrWhiteSpace(productVersion) ? HudReleaseVersion.FromEntryAssembly() : productVersion);
-        _creditCache = new ClaudeApiCreditCache(creditDirectory);
         _providers.SlotPublished += OnProviderSlotPublished;
         _providersBoard = _providers.CurrentBoard(DateTimeOffset.UtcNow, _providerSettings);
         InitializeWatchers();
@@ -142,12 +139,6 @@ public sealed class UsageEngine : IDisposable
     public void SetQuotaSnapshotExportEnabled(bool enabled) => _quotaSnapshots.SetEnabled(enabled);
 
     public void ExportCurrentQuotaSnapshot() => TryExportQuotaSnapshot(_providersBoard);
-
-    public ClaudeApiCreditReadResult ReadClaudeApiCredit()
-    {
-        try { return _creditCache.Read(DateTimeOffset.UtcNow); }
-        catch (Exception) { return ClaudeApiCreditReadResult.Unreadable; }
-    }
 
     public Task FlushQuotaSnapshotAsync() => _quotaSnapshots.WhenIdleAsync();
 
@@ -417,11 +408,7 @@ public sealed class UsageEngine : IDisposable
     {
         try
         {
-            ClaudeApiCreditObservation? credit = null;
-            var read = _creditCache.Read(DateTimeOffset.UtcNow);
-            if (!read.KeepPrevious)
-                credit = read.Observation;
-            _quotaSnapshots.Publish(board, credit);
+            _quotaSnapshots.Publish(board);
         }
         catch (Exception)
         {

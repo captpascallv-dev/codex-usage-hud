@@ -74,8 +74,6 @@ internal static class Program
             return RunSecondaryCliCapture(args.Skip(1).ToArray());
         if (args.Length > 0 && args[0].Equals("--quota-snapshot", StringComparison.Ordinal))
             return QuotaSnapshotTests.Run(args.Skip(1).ToArray());
-        if (args.Length > 0 && args[0].Equals("--claude-api-credit", StringComparison.Ordinal))
-            return ClaudeApiCreditTests.Run(args.Skip(1).ToArray());
 
         var runRoot = NewRunRoot("test-run");
         var tests = new (string Name, Action Run)[]
@@ -174,6 +172,7 @@ internal static class Program
                 var board = UnifiedWeeklySharedPool(runRoot).GetAwaiter().GetResult();
                 RenderSharedPool(runRoot, board);
             }),
+            ("percentage_presentation", PercentagePresentation),
             ("claude_subscription_quota_slot", () => ClaudeSubscriptionQuotaSlot().GetAwaiter().GetResult()),
             ("claude_refresh_stability", () => ClaudeRefreshStability(runRoot)),
             ("failed_provider_does_not_block_ui", () => FailedProviderDoesNotBlock(runRoot).GetAwaiter().GetResult()),
@@ -3704,6 +3703,55 @@ internal static class Program
         Assert.True(bound != OpaqueIdentity.Hash("codex|acct-2"));
     }
 
+    private static void PercentagePresentation()
+    {
+        Assert.Equal("96", ProviderQuotaPresentation.FormatFinePercent(96));
+        Assert.Equal("4", ProviderQuotaPresentation.FormatFinePercent(4));
+        Assert.Equal("97.5", ProviderQuotaPresentation.FormatFinePercent(97.5));
+        var now = new DateTimeOffset(2026, 10, 27, 2, 0, 0, TimeSpan.Zero);
+        const double fractionalUsed = 4.639407888798628;
+        var provider = new QuotaWindowObservation("weekly", "每周额度", fractionalUsed, now.AddDays(7), 10080, true);
+        var providerRemaining = provider.RemainingPercent!.Value;
+        Assert.Equal(100d - fractionalUsed, providerRemaining);
+        Assert.Equal("95.36%", ProviderQuotaPresentation.FormatPercent(provider, providerRemaining));
+        Assert.Equal("4.64%", ProviderQuotaPresentation.FormatPercent(provider, fractionalUsed));
+        var whole = new QuotaWindowObservation("weekly", "每周额度", 4, now.AddDays(7), 10080, true);
+        Assert.Equal("96%", ProviderQuotaPresentation.FormatPercent(whole, whole.RemainingPercent!.Value));
+        var sharedUsed = 4.606914;
+        var shared = new QuotaWindowObservation(SharedWeeklyQuota.WindowId, SharedWeeklyQuota.DisplayName, sharedUsed, now.AddDays(7), 10080, true);
+        var sharedRemaining = shared.RemainingPercent!.Value;
+        Assert.Equal(100d - sharedUsed, sharedRemaining);
+        Assert.Equal("95.39%", ProviderQuotaPresentation.FormatPercent(shared, sharedRemaining));
+
+        var fractionBucket = new QuotaBucket("primary", "5小时", fractionalUsed, 300, now.AddHours(5));
+        var fractionSnapshot = new HudSnapshot(
+            new QuotaObservation(fractionBucket, Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false),
+            Array.Empty<SessionAggregate>(), null, now, false, null, Array.Empty<string>());
+        var collapsed = HudPresentation.BuildCollapsedText(fractionSnapshot);
+        Assert.True(collapsed.Contains("95.36%", StringComparison.Ordinal), collapsed);
+        Assert.True(!collapsed.Contains("95.360", StringComparison.Ordinal), collapsed);
+        var overview = HudPresentation.BuildFrame(fractionSnapshot).OverviewText;
+        Assert.True(overview.Contains("已用 4.64%", StringComparison.Ordinal) &&
+                    overview.Contains("剩余 95.36%", StringComparison.Ordinal), overview);
+        var wholeBucket = new QuotaBucket("primary", "5小时", 4, 300, now.AddHours(5));
+        var wholeText = HudPresentation.BuildCollapsedText(fractionSnapshot with
+        {
+            Quota = new QuotaObservation(wholeBucket, Array.Empty<QuotaBucket>(), QuotaSource.OfficialAppServer, now, false),
+        });
+        Assert.True(wholeText.Contains("96%", StringComparison.Ordinal) &&
+                    !wholeText.Contains("96.00", StringComparison.Ordinal), wholeText);
+
+        var window = new QuotaSnapshotWindow("grok_weekly", 10080, providerRemaining, now.AddDays(7), now);
+        var slot = new QuotaSnapshotSlot("grok", "Grok", "ok", new[] { window });
+        var json = Encoding.UTF8.GetString(QuotaSnapshotJson.Serialize(new[] { slot }, now, "1.1.3"));
+        using var document = JsonDocument.Parse(json);
+        var exported = document.RootElement.GetProperty("slots")[0].GetProperty("windows")[0]
+            .GetProperty("remaining_percent").GetDouble();
+        Assert.Equal(providerRemaining, exported);
+        Assert.True(Math.Abs(exported - 95.36d) > 0.0001, "snapshot_keeps_raw_double");
+        Assert.True(!document.RootElement.TryGetProperty("claude_api_credit", out _), "snapshot_has_no_credit");
+    }
+
     private static async Task<ProviderQuotaBoard> UnifiedWeeklySharedPool(string runRoot)
     {
         const string UsedLiteral = "2.4749526130517197";
@@ -4050,12 +4098,25 @@ internal static class Program
         Directory.CreateDirectory(Path.Combine(directory, "codex-home", "sessions"));
         using var engine = new UsageEngine(Path.Combine(directory, "codex-home"), Path.Combine(directory, "usage.db"),
             Path.Combine(directory, "hud.log"));
+        var offLeft = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
+        var offTop = System.Windows.SystemParameters.VirtualScreenTop - 1600;
         using var window = new MainWindow(engine, () => Task.CompletedTask, false);
         window.ShowActivated = false;
         window.ShowInTaskbar = false;
-        window.Left = System.Windows.SystemParameters.VirtualScreenLeft - 4000;
-        window.Top = System.Windows.SystemParameters.VirtualScreenTop - 4000;
+        window.Left = offLeft + 40;
+        window.Top = offTop + 40;
+        window.OverrideWorkAreaForTests(new System.Windows.Rect(offLeft, offTop, 1800, 1200));
+        typeof(MainWindow).GetField("_autoHide",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(window, false);
+        var trayField = typeof(MainWindow).GetField("_tray",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        if (trayField?.GetValue(window) is System.Windows.Forms.NotifyIcon tray)
+            tray.Visible = false;
+        _ = new System.Windows.Interop.WindowInteropHelper(window).EnsureHandle();
         window.Show();
+        window.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+        Assert.True(window.IsLoaded, "render_window_loaded");
         var viewModel = (MainViewModel)typeof(MainWindow).GetField("_viewModel",
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(window)!;
         var now = board.GeneratedAtUtc;
@@ -4063,37 +4124,111 @@ internal static class Program
             "合成共享周额度", Array.Empty<string>(), Providers: board));
         InvokeWindowMethod(window, "ApplyExpansionState", false);
         window.UpdateLayout();
+        window.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.Render);
         var output = Path.Combine(ProjectRoot(), ".artifacts", "unified-pools-20261026");
         Directory.CreateDirectory(output);
         var rail = (System.Windows.FrameworkElement)window.FindName("RailVerticalShell")!;
-        RenderElement(rail, Path.Combine(output, "rail.png"));
-        viewModel.SelectSlot(ProviderSlotIds.Cursor, true);
-        InvokeWindowMethod(window, "PlaceSlotDetailPopup");
-        window.UpdateLayout();
+        RenderVisibleElement(rail, Path.Combine(output, "rail.png"));
+        OpenRenderedSlot(window, viewModel, ProviderSlotIds.Cursor);
         var detail = (System.Windows.FrameworkElement)window.FindName("SlotDetailHost")!;
-        RenderElement(detail, Path.Combine(output, "cursor-detail.png"));
+        var note = window.FindName("SlotDetailShareNoteText") as System.Windows.Controls.TextBlock;
+        Assert.True(note is not null && note.Visibility == System.Windows.Visibility.Visible, "share_note_visible");
+        Assert.Equal(SharedWeeklyQuota.SharedSeatNote, note!.Text);
+        RenderVisibleElement(detail, Path.Combine(output, "cursor-detail.png"));
         var detailText = string.Join("\n", FindVisualChildren<System.Windows.Controls.TextBlock>(detail)
             .Select(block => block.Text));
         Assert.True(detailText.Contains("97.53%", StringComparison.Ordinal), detailText);
         Assert.True(detailText.Contains("共享周额度", StringComparison.Ordinal), detailText);
         Assert.True(detailText.Contains("周期 7 天", StringComparison.Ordinal), detailText);
+        Assert.True(detailText.Contains(SharedWeeklyQuota.SharedSeatNote, StringComparison.Ordinal), detailText);
         Assert.True(!detailText.Contains("100%", StringComparison.Ordinal), "detail_not_100");
-        viewModel.SelectSlot(ProviderSlotIds.GrokBot, true);
-        InvokeWindowMethod(window, "PlaceSlotDetailPopup");
-        window.UpdateLayout();
-        RenderElement(detail, Path.Combine(output, "bot-detail.png"));
+        AssertNoCreditRow(detailText);
+        OpenRenderedSlot(window, viewModel, ProviderSlotIds.GrokBot);
+        Assert.Equal(SharedWeeklyQuota.SharedSeatNote, note.Text);
+        Assert.Equal(System.Windows.Visibility.Visible, note.Visibility);
+        RenderVisibleElement(detail, Path.Combine(output, "bot-detail.png"));
         var botText = string.Join("\n", FindVisualChildren<System.Windows.Controls.TextBlock>(detail)
             .Select(block => block.Text));
+        Assert.True(botText.Contains("97.53%", StringComparison.Ordinal), botText);
         Assert.True(botText.Contains("共享周额度", StringComparison.Ordinal), botText);
+        Assert.True(botText.Contains(SharedWeeklyQuota.SharedSeatNote, StringComparison.Ordinal), botText);
         Assert.True(!botText.Contains("Grok Bot 周额度", StringComparison.Ordinal), "bot_not_legacy_label");
+        AssertNoCreditRow(botText);
+        OpenRenderedSlot(window, viewModel, ProviderSlotIds.Grok);
+        Assert.Equal(SharedWeeklyQuota.GrokSeatNote, note.Text);
+        Assert.Equal(System.Windows.Visibility.Visible, note.Visibility);
+        Assert.Equal("98%", viewModel.SlotDetailPercent);
+        RenderVisibleElement(detail, Path.Combine(output, "grok-detail.png"));
+        var grokText = string.Join("\n", FindVisualChildren<System.Windows.Controls.TextBlock>(detail)
+            .Select(block => block.Text));
+        Assert.True(grokText.Contains("98%", StringComparison.Ordinal), grokText);
+        Assert.True(grokText.Contains(SharedWeeklyQuota.GrokSeatNote, StringComparison.Ordinal), grokText);
+        AssertNoCreditRow(grokText);
+        OpenRenderedSlot(window, viewModel, ProviderSlotIds.CodexPrimary);
+        Assert.Equal("80%", viewModel.SlotDetailPercent);
+        Assert.Equal(System.Windows.Visibility.Collapsed, note.Visibility);
+        RenderVisibleElement(detail, Path.Combine(output, "codex-detail.png"));
+        var codexText = string.Join("\n", FindVisualChildren<System.Windows.Controls.TextBlock>(detail)
+            .Select(block => block.Text));
+        Assert.True(codexText.Contains("80%", StringComparison.Ordinal), codexText);
+        AssertNoCreditRow(codexText);
         var railText = string.Join("\n", FindVisualChildren<System.Windows.Controls.TextBlock>(rail)
             .Select(block => block.Text));
         Assert.True(railText.Contains("97.53%", StringComparison.Ordinal), railText);
         Assert.True(railText.Contains("98%", StringComparison.Ordinal), railText);
+        Assert.True(railText.Contains("80%", StringComparison.Ordinal), railText);
         Assert.True(railText.Contains(SharedWeeklyQuota.RailCaption, StringComparison.Ordinal), railText);
         Assert.True(railText.Contains("每周额度", StringComparison.Ordinal), railText);
+        AssertNoCreditRow(railText);
         window.Hide();
         System.Threading.SynchronizationContext.SetSynchronizationContext(null);
+    }
+
+    private static void OpenRenderedSlot(MainWindow window, MainViewModel viewModel, string slotId)
+    {
+        viewModel.SelectSlot(slotId, true);
+        typeof(MainWindow).GetField("_slotDetailOpen",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .SetValue(window, true);
+        InvokeWindowMethod(window, "PlaceSlotDetailPopup");
+        window.UpdateLayout();
+        window.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.Render);
+        var popup = window.FindName("SlotDetailPopup") as System.Windows.Controls.Primitives.Popup;
+        Assert.True(popup is { IsOpen: true }, "slot_popup_open");
+    }
+
+    private static void AssertNoCreditRow(string text)
+    {
+        Assert.True(!text.Contains("Claude API", StringComparison.Ordinal), text);
+        Assert.True(!text.Contains("赠送额度", StringComparison.Ordinal), text);
+        Assert.True(!text.Contains("US$", StringComparison.Ordinal), text);
+    }
+
+    private static void RenderVisibleElement(System.Windows.FrameworkElement element, string outputPath)
+    {
+        element.UpdateLayout();
+        var width = element.ActualWidth;
+        var height = element.ActualHeight;
+        if (width < 40 || height < 40)
+            throw new InvalidOperationException("render_unloaded " + outputPath + " " +
+                width.ToString("0", CultureInfo.InvariantCulture) + "x" +
+                height.ToString("0", CultureInfo.InvariantCulture));
+        var pixelWidth = Math.Max(1, (int)Math.Ceiling(width));
+        var pixelHeight = Math.Max(1, (int)Math.Ceiling(height));
+        var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap(
+            pixelWidth, pixelHeight, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
+        bitmap.Render(element);
+        var pixels = new byte[pixelWidth * pixelHeight * 4];
+        bitmap.CopyPixels(pixels, pixelWidth * 4, 0);
+        var ink = 0;
+        for (var index = 3; index < pixels.Length; index += 4)
+        {
+            if (pixels[index] != 0) ink++;
+        }
+
+        if (ink < 100)
+            throw new InvalidOperationException("render_blank " + outputPath + " ink=" + ink);
+        SavePng(bitmap, outputPath);
     }
 
     private sealed class MutableCursorTokens : ICursorTokenSource

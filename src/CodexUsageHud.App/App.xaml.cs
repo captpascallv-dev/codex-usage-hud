@@ -16,17 +16,6 @@ public partial class App : System.Windows.Application
 
     private async void OnStartup(object sender, StartupEventArgs e)
     {
-        if (ClaudeApiCreditLaunch.IsHostMode(e.Args))
-        {
-            var code = ClaudeApiCreditNativeHost.Run(
-                Console.OpenStandardInput(),
-                Console.OpenStandardOutput(),
-                ClaudeApiCreditLaunch.ResolveDataDirectory(e.Args),
-                DateTimeOffset.UtcNow);
-            Environment.Exit(code);
-            return;
-        }
-
         var isolated = IsolatedPreviewLaunch.IsIsolated(e.Args);
         IsolatedPreviewLaunch.MarkCurrentProcess(isolated);
         _ = SetCurrentProcessExplicitAppUserModelID(
@@ -181,7 +170,7 @@ public partial class App : System.Windows.Application
             if (arguments[index].Equals("--data-dir", StringComparison.Ordinal))
                 return Path.GetFullPath(arguments[index + 1]);
         }
-        return ClaudeApiCreditLaunch.ResolveDataDirectory(arguments);
+        return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexUsageHUD");
     }
 
     private static TimeSpan? ResolveQaExitDelay(IReadOnlyList<string> arguments)

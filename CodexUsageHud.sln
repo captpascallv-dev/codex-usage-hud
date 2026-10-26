@@ -9,8 +9,6 @@ Project("{60DC8134-9BBA-4DAE-82B4-BBAF1F07A9A9}") = "CodexUsageHud.App", "src\Co
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CodexUsageHud.Tests", "tests\CodexUsageHud.Tests\CodexUsageHud.Tests.csproj", "{5E5C51C0-07EF-49A8-B9E7-BB7D4A39A003}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "CodexUsageHud.ClaudeApiCreditHost", "src\CodexUsageHud.ClaudeApiCreditHost\CodexUsageHud.ClaudeApiCreditHost.csproj", "{5E5C51C0-07EF-49A8-B9E7-BB7D4A39A004}"
-EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -29,10 +27,6 @@ Global
 		{5E5C51C0-07EF-49A8-B9E7-BB7D4A39A003}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{5E5C51C0-07EF-49A8-B9E7-BB7D4A39A003}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{5E5C51C0-07EF-49A8-B9E7-BB7D4A39A003}.Release|Any CPU.Build.0 = Release|Any CPU
-		{5E5C51C0-07EF-49A8-B9E7-BB7D4A39A004}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{5E5C51C0-07EF-49A8-B9E7-BB7D4A39A004}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{5E5C51C0-07EF-49A8-B9E7-BB7D4A39A004}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{5E5C51C0-07EF-49A8-B9E7-BB7D4A39A004}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

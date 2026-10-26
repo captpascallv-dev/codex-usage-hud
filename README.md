@@ -51,18 +51,8 @@ SHA-256 校验文件，用于确认下载内容没有发生变化。
 `x_shared_weekly`，这是同一份共享周额度的两个视图，不能相加。同一付费席位上，Grok 和 Build
 也用这份每周额度，不是额外预算。Grok 的 `grok_weekly` 仍是该登录自己的官方读数；整数和小数不同
 也不互相抄数，另一套登录不会被改成相同数字。旧的 `cursor_auto`、`cursor_api`、`cursor_team` 和 `grok_bot`
-只留给明确的旧计划。字段和消费者读法见技术规格的 “Opt-in local quota snapshot”。
-
-### Claude API 赠送额度
-
-这是美元余额，不是每周剩余百分比，也不参与一眼最小剩余的计算。可选的本机桥接从
-Claude Console 账单页已经渲染的促销额度表读取剩余金额、授予总额和 UTC 日历日；
-购买额度、月度预算和发票不算。没有观测时，Cursor 详情不显示这一行，快照也不增加字段。
-有观测且额度快照开关打开时，同一份 schema `1` 文件在六个槽之后增加 `claude_api_credit`：
-`currency`、`remaining`、`grant_amount`、`granted_on_utc`、`expires_on_utc`、
-`observed_at_utc`、`state`。金额是美元字符串。到期日只到日期，不表示精确重置时刻。
-该余额按组织共享，不限 Cursor。公开文件不含组织名、绑定、HTML 或凭据。
-桥接默认关闭；读取失败不会挡住额度刷新。安装范围见扩展目录里的 `INSTALL.md`。
+只留给明确的旧计划。界面按官方读数显示剩余百分比，最多两位小数，整数仍显示为整数。
+快照里的 `remaining_percent` 保持原始小数。字段和消费者读法见技术规格的 “Opt-in local quota snapshot”。
 
 ### v1.1.2
 
@@ -226,12 +216,11 @@ stores quota numbers and times only. Turning it off
 stops further writes. The v1.1.2 changes since the published v1.1.1 download remain:
 an optional, default-off Claude subscription quota slot, an explicit secondary Codex
 CLI home that stays on PI when blank, and a no-focus raise when a docked auto-hidden
-card is revealed.
-The same release line can show one optional Claude API promotional balance in the
-Cursor detail. It is USD remaining over the actual grant, with UTC calendar dates,
-and it is omitted until a local observation exists. It is not a weekly percent and
-does not change the glance minimum. The shared-organization scope and the
-`claude_api_credit` object are described under “Opt-in local quota snapshot”.
+card is revealed. Displayed percents follow the official value to at most two
+decimal places, and a whole number stays whole. `remaining_percent` in the snapshot
+stays the raw double. On one paid seat, Cursor, Grok, Bot and Build share one weekly
+allowance; Cursor and Bot are two views and are not added. Grok still shows that
+login's own official read.
 To upgrade a portable copy, exit the old HUD from the tray, replace the program
 files from the new ZIP, and open it again. Existing data and settings under
 `%LOCALAPPDATA%\CodexUsageHUD` are left in place. The ZIP has no installer,

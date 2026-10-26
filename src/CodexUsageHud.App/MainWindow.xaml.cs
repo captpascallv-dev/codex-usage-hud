@@ -104,7 +104,6 @@ public partial class MainWindow : Window, IDisposable
         {
             _viewModel.Tick(DateTimeOffset.UtcNow);
             _viewModel.ApplyProviders(_engine.GetProviderBoard());
-            RefreshClaudeApiCredit();
         };
         _hideTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
@@ -859,20 +858,6 @@ public partial class MainWindow : Window, IDisposable
             (auth.Present ? "存在" : "未找到") + "（" + auth.RelativeHint + "，只看时间与大小）";
     }
 
-    private void RefreshClaudeApiCredit()
-    {
-        try
-        {
-            var read = _engine.ReadClaudeApiCredit();
-            if (!read.KeepPrevious)
-                _viewModel.SetClaudeApiCredit(read.Observation);
-        }
-        catch
-        {
-            // A credit-file failure must not block the quota panel.
-        }
-    }
-
     private void OnEngineProvidersUpdated()
     {
         if (_disposed || _exiting) return;
@@ -880,7 +865,6 @@ public partial class MainWindow : Window, IDisposable
         {
             if (_disposed || _exiting) return;
             _viewModel.ApplyProviders(_engine.GetProviderBoard());
-            RefreshClaudeApiCredit();
             RemeasureCompactRail();
             PlaceSlotDetailPopup();
         }));

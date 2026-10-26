@@ -552,7 +552,7 @@
                                     <CheckBox x:Name="AutoHideCheckBox" Content="停靠边缘时自动隐藏" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,12" Click="OnAutoHideSettingClick" />
                                     <StackPanel x:Name="QuotaSnapshotSettingBlock" Margin="0,4,0,0">
                                         <CheckBox x:Name="QuotaSnapshotCheckBox" Content="导出本机额度快照" Foreground="{StaticResource HudText}" FontSize="15" Margin="0,8,0,4" Click="OnQuotaSnapshotSettingClick" />
-                                        <TextBlock Text="默认关闭。打开后，每次额度刷新把六个槽的窗口、剩余百分比和重置时间写入 %LOCALAPPDATA%\CodexUsageHUD\quota-snapshot.json。若本机已有 Claude API 赠送额度观测，同一文件会多一段美元余额；没有观测时不写这段。只写额度数字和时间，不写账号或凭据。关闭后不再写入。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,8" />
+                                        <TextBlock Text="默认关闭。打开后，每次额度刷新把六个槽的窗口、剩余百分比和重置时间写入 %LOCALAPPDATA%\CodexUsageHUD\quota-snapshot.json。只写额度数字和时间，不写账号或凭据。关闭后不再写入。" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,8" />
                                     </StackPanel>
                                     <TextBlock Text="默认停靠方向" Style="{StaticResource Caption}" Margin="0,18,0,8" />
                                     <ComboBox x:Name="DockSideComboBox" Height="40" SelectionChanged="OnDockSideSettingChanged">
@@ -740,21 +740,6 @@
                 <TextBlock x:Name="SlotDetailShareNoteText" Text="{Binding SlotDetailShareNote}" FontSize="12"
                            Margin="0,0,0,8" TextWrapping="Wrap" Foreground="{StaticResource HudMuted}"
                            Visibility="{Binding SlotDetailShareNoteVisible, Converter={StaticResource BoolVisibility}}" />
-                <Border x:Name="ClaudeApiCreditRow" Margin="0,0,0,8" Padding="0"
-                        Visibility="{Binding ClaudeApiCreditVisible, Converter={StaticResource BoolVisibility}}"
-                        AutomationProperties.Name="Claude API赠送额度">
-                    <StackPanel>
-                        <TextBlock Text="{Binding ClaudeApiCreditTitle}" FontSize="13" Foreground="{StaticResource HudMuted}" TextWrapping="Wrap" />
-                        <TextBlock Text="{Binding ClaudeApiCreditAmount}" FontSize="22" FontWeight="Bold" Margin="0,2,0,0"
-                                   Foreground="{StaticResource HudMint}" />
-                        <TextBlock Text="{Binding ClaudeApiCreditDetail}" FontSize="12" Margin="0,2,0,0" TextWrapping="Wrap"
-                                   Foreground="{StaticResource HudSubtle}" />
-                        <TextBlock Text="{Binding ClaudeApiCreditMeta}" FontSize="12" Margin="0,2,0,0" TextWrapping="Wrap"
-                                   Foreground="{StaticResource HudMuted}" />
-                        <TextBlock Text="{Binding ClaudeApiCreditScope}" FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap"
-                                   Foreground="{StaticResource HudSubtle}" />
-                    </StackPanel>
-                </Border>
                 <TextBlock Text="{Binding SlotDetailSource}" FontSize="12" TextWrapping="Wrap"
                            Foreground="{StaticResource HudMuted}" />
                 <TextBlock Text="{Binding SlotDetailObserved}" FontSize="12" Margin="0,2,0,12" TextWrapping="Wrap"

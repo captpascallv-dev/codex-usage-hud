@@ -114,6 +114,17 @@ Focused synthetic checks cover the allowlist, the six slots, nulls, the toggle,
 atomic readers, and an isolated IO failure. Those checks are not a live quota
 comparison and not a full-suite replay.
 
+The same version keeps one shared weekly pool when the provider returns boolean
+`isUnified` true. Cursor and Bot are two views of that pool and are not added.
+Grok keeps its own official weekly read on its own credential. A whole-number
+percent and a fractional percent are not two budgets, and one login is not copied
+onto another. Displayed percents use the official value to at most two decimal
+places; integers stay integers. Snapshot `remaining_percent` stays the raw double.
+The slot detail shows one sentence under the window rows for that shared window,
+and a separate sentence on Grok. This release preparation checks that shared-pool
+behavior, the snapshot, and the percent presentation with synthetic fixtures. It
+does not rerun the earlier accepted catalog and does not read a live provider.
+
 A green test result does not replace the real window and interaction checks.
 
 ## Package and operating boundaries

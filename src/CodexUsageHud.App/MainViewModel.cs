@@ -52,13 +52,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     private string _slotDetailAccountHint = "";
     private string _slotDetailShareNote = "";
     private IReadOnlyList<SlotWindowRow> _slotDetailWindows = Array.Empty<SlotWindowRow>();
-    private ClaudeApiCreditObservation? _claudeApiCredit;
-    private bool _claudeApiCreditVisible;
-    private string _claudeApiCreditTitle = "";
-    private string _claudeApiCreditAmount = "";
-    private string _claudeApiCreditDetail = "";
-    private string _claudeApiCreditMeta = "";
-    private string _claudeApiCreditScope = "";
     private string _bindingNote = "仅当前绑定的 Codex App 槽提供会话分析。主目录已由所有者确认。";
     private bool _slotDetailPinned;
     private bool _topBarNarrowLayout;
@@ -133,18 +126,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
     public bool SlotDetailAccountHintVisible => !string.IsNullOrWhiteSpace(SlotDetailAccountHint);
     public string SlotDetailShareNote { get => _slotDetailShareNote; private set => SetField(ref _slotDetailShareNote, value); }
     public bool SlotDetailShareNoteVisible => !string.IsNullOrWhiteSpace(SlotDetailShareNote);
-    public bool ClaudeApiCreditVisible => _claudeApiCreditVisible;
-    public string ClaudeApiCreditTitle => _claudeApiCreditTitle;
-    public string ClaudeApiCreditAmount => _claudeApiCreditAmount;
-    public string ClaudeApiCreditDetail => _claudeApiCreditDetail;
-    public string ClaudeApiCreditMeta => _claudeApiCreditMeta;
-    public string ClaudeApiCreditScope => _claudeApiCreditScope;
-
-    public void SetClaudeApiCredit(ClaudeApiCreditObservation? observation)
-    {
-        _claudeApiCredit = observation;
-        RefreshClaudeApiCreditRow();
-    }
 
     public IReadOnlyList<SlotWindowRow> SlotDetailWindows
     {
@@ -244,8 +225,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
             PrimarySessionCountText, InternalTaskCountText, AppSessionCountText,
             CliSessionCountText, OrphanTaskCountText, SlotDetailTitle, SlotDetailPercent, SlotDetailBody, BindingNote,
             SlotDetailStatus, SlotDetailSource, SlotDetailObserved, SlotDetailAccountHint, SlotDetailShareNote,
-            ClaudeApiCreditTitle, ClaudeApiCreditAmount, ClaudeApiCreditDetail, ClaudeApiCreditMeta,
-            ClaudeApiCreditScope,
             AnalysisEmptyTitle, AnalysisEmptyDetail,
             AnalysisRunningCountText,
         };
@@ -508,7 +487,6 @@ public sealed class MainViewModel : INotifyPropertyChanged
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SlotDetailAccountHintVisible)));
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SlotDetailShareNoteVisible)));
         }
-        RefreshClaudeApiCreditRow();
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedSlot)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedSlotId)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SelectedSlotSuppliesAnalysis)));
@@ -525,28 +503,8 @@ public sealed class MainViewModel : INotifyPropertyChanged
         SlotDetailShareNote = "";
         SlotDetailWindows = Array.Empty<SlotWindowRow>();
         SlotDetailBody = body;
-        RefreshClaudeApiCreditRow();
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SlotDetailAccountHintVisible)));
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SlotDetailShareNoteVisible)));
-    }
-
-    private void RefreshClaudeApiCreditRow()
-    {
-        var row = _selectedSlot?.SlotId == ProviderSlotIds.Cursor && _claudeApiCredit is { } credit
-            ? ClaudeApiCreditPresentation.BuildRow(credit)
-            : null;
-        _claudeApiCreditVisible = row is not null;
-        _claudeApiCreditTitle = row?.Title ?? "";
-        _claudeApiCreditAmount = row?.AmountText ?? "";
-        _claudeApiCreditDetail = row?.DetailText ?? "";
-        _claudeApiCreditMeta = row?.MetaText ?? "";
-        _claudeApiCreditScope = row?.ScopeText ?? "";
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ClaudeApiCreditVisible)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ClaudeApiCreditTitle)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ClaudeApiCreditAmount)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ClaudeApiCreditDetail)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ClaudeApiCreditMeta)));
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ClaudeApiCreditScope)));
     }
 
     public bool ClearSlotSelectionIfUnpinned()

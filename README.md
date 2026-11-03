@@ -1,3 +1,11 @@
+> **已迁移至 agent-baton / Moved to agent-baton**
+>
+> Codex Usage HUD 的开发与维护已并入 [agent-baton/hud](https://github.com/captpascallv-dev/agent-baton/tree/main/hud)。请到新目录查看最新代码和说明，并在 [agent-baton Issues](https://github.com/captpascallv-dev/agent-baton/issues) 反馈问题。本仓保留为历史只读存档；[既有 Releases 与安装包](https://github.com/captpascallv-dev/codex-usage-hud/releases/latest) 继续保留下载。下方是归档时的说明。
+>
+> Development and maintenance of Codex Usage HUD have moved to [agent-baton/hud](https://github.com/captpascallv-dev/agent-baton/tree/main/hud). Visit the new directory for current code and documentation, and use [agent-baton Issues](https://github.com/captpascallv-dev/agent-baton/issues) for feedback. This repository is retained as a read-only historical archive; [existing releases and downloads](https://github.com/captpascallv-dev/codex-usage-hud/releases/latest) remain available. The documentation below describes the archived version.
+
+---
+
 # Codex Usage HUD
 
 > 一个运行在 Windows 桌面上的 Codex 用量、会话层级与长会话风险仪表盘。
